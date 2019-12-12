@@ -472,7 +472,7 @@ a plugin system where people can write very precise type-checking for certain
 types of functions. This includes functions like `concatenate` which I noted in
 my writeup were very difficult to express.
 
-As overall notes, Ivan noted two things:
+Overall, Ivan noted two things:
 
 1. "Practicality beats purity" - in Python and `mypy`, sometimes shortcuts are
    taken so that it is actually useful for the average person without getting
