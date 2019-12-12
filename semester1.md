@@ -500,8 +500,13 @@ these `numpy` typings, even in their most basic form, so that I can lay the
 groundwork for more serious typing work for Python in the future.
 
 To ramp up so far, I've been looking at various bug reports or feature requests
-and taking care of them incrementally. Ivan has already laid out a path to the
-`numpy` typing, which is roughly:
+and taking care of them incrementally.
+
+**I've arranged a conference call with the core `mypy` and `pyre` (FB's typing
+library) maintainers to discuss a Python Enhancement Proposal (PEP) regarding
+the `numpy` types.**
+
+Ivan has already laid out a path to the `numpy` typing, which is roughly:
 
 - General support for "variadicity" and ArgSpecs
 - Support for array-arity declaration/checks
