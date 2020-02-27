@@ -1,0 +1,5 @@
+.vscode
+.liquid
+*.hi
+nparray
+*.o
