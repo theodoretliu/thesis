@@ -153,3 +153,19 @@ dropList toDrop dims = dropList' toDrop dims 0
 {-@ assume sum :: NparrayReduce @-}
 sum :: Nparray a -> [Int] -> Nparray a
 sum a l = a
+
+{-@ type NparrayCreation a = v : [Nat] -> {u : Nparray a | (nDims u) = v} @-}
+
+{-@ assume zeros :: NparrayCreation Int @-}
+zeros :: [Int] -> Nparray Int
+zeros dims = N [] (Left 0)
+
+-- duplicate :: a -> Int -> [a] duplicate e 0 = []
+-- duplicate e n = e : (duplicate e (n - 1))
+
+{-@ check :: v : [Nat] -> {u : Nparray a | (nDims u) = v} -> Bool @-}
+check :: [Int] -> Nparray a -> Bool
+check dims arr = (nDims arr) == dims
+
+mat1 = zeros [1, 2]
+mat2 = zeros [2, 3]
