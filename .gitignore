@@ -3,3 +3,7 @@
 *.hi
 nparray
 *.o
+_build
+*.byte
+*.native
+*.mypy_cache
