@@ -6,15 +6,13 @@ let string_of_typ (Nparray l) =
   "Nparray [" ^ (String.concat ", " l) ^ "]"
 
 let print_typ t =
-  print_string (string_of_typ t)
+  print_endline (string_of_typ t)
 
 module StringMap = Map.Make(struct type t = string let compare = compare end)
 
 let prove_equal v1 v2 = v1 = v2
 
 let check_and_update_individual_mapping s1 s2 mapping =
-  print_string ("s1" ^ s1) ;
-  print_string ("s2" ^ s2) ;
   match StringMap.find_opt s1 mapping with
   | None -> Some (StringMap.add s1 s2 mapping)
   | Some v ->
@@ -36,8 +34,6 @@ let check_and_update_mapping t1 t2 mapping =
   check_and_update_mapping' l1 l2 mapping
 
 let check_ret_type_with_mapping rettyp mapping =
-  print_typ rettyp ;
-  let _ = StringMap.mapi (fun k v -> print_string k ; print_string v ; print_newline ()) mapping in
   let Nparray l = rettyp in
   let rec check_ret_type_with_mapping' l =
     match l with
@@ -54,7 +50,6 @@ let check_ret_type_with_mapping rettyp mapping =
 let check_app ((funargtyps, rettyp) : funtyp) (argtyps : typ list) : typ option =
   if List.length funargtyps <> List.length argtyps then None else
   let rec check_app' funargtyps argtyps mappings =
-    print_endline "check_app'" ;
     match funargtyps, argtyps with
     | [], [] -> Some mappings
     | funargtyp :: restfunargtyps, argtyp :: restargtyps ->
@@ -64,7 +59,7 @@ let check_app ((funargtyps, rettyp) : funtyp) (argtyps : typ list) : typ option 
             check_app' restfunargtyps restargtyps new_mapping end
     | _ -> failwith "impossible" in
   match check_app' funargtyps argtyps StringMap.empty with
-  | None -> print_endline "check_app' got None" ; None
+  | None -> None
   | Some mapping ->
       match check_ret_type_with_mapping rettyp mapping with
       | None -> None
