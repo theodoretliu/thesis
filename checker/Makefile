@@ -1,4 +1,4 @@
-.PHONY: all
+.PHONY: all clean
 
 all: test typing
 
@@ -10,3 +10,6 @@ test: test_typing.ml test_z3utils.ml
 
 typing: typing.ml
 	ocamlbuild typing.byte
+
+clean:
+	rm -rf *.byte *.native _build
