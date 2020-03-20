@@ -9,7 +9,7 @@ test: test_typing.ml test_z3utils.ml
 	&& ./test_z3utils.native
 
 typing: typing.ml
-	ocamlbuild typing.byte
+	ocamlbuild -use-ocamlfind typing.native
 
 clean:
 	rm -rf *.byte *.native _build
