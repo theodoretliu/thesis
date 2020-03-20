@@ -54,3 +54,11 @@ let _ =
   | Some (Nparray [Id x]) ->
       assert (Z3utils.prove_int_eq (Z3utils.mk_int x) (Z3utils.add_int ["X"; "Y"; "Z"]))
   | _ -> assert false
+
+(* testing Mul typ declaration *)
+let _ =
+  let mul_typ = [Nparray [Id "A"; Id "B"]], Nparray [Mul (Id "A", Id "B")] in
+  match check_app mul_typ [Nparray [Id "X"; Id "Y"]] with
+  | Some (Nparray [Id x]) ->
+      assert (Z3utils.prove_int_eq (Z3utils.mk_int x) (Z3utils.mul_int ["X"; "Y"]))
+  | _ -> assert false

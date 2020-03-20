@@ -1,6 +1,7 @@
 type entry =
 | Id of string
 | Add of entry * entry
+| Mul of entry * entry
 type typ = Nparray of entry list
 type funtyp = typ list * typ
 
@@ -8,6 +9,7 @@ let rec string_of_entry e =
   match e with
   | Id s -> s
   | Add (e1, e2) -> (string_of_entry e1) ^ " + " ^ (string_of_entry e2)
+  | Mul (e1, e2) -> (string_of_entry e1) ^ " * " ^ (string_of_entry e2)
 
 let string_of_typ (Nparray l) =
   "Nparray ["
@@ -32,6 +34,11 @@ let rec entry_to_expr_from_mapping (s : entry) (mapping : mapping_type) : Z3.Exp
                   entry_to_expr_from_mapping s2 mapping with
       | Some x, Some y -> Some (Z3.Arithmetic.mk_add Z3utils.ctx [x; y])
       | _, _ -> None end
+  | Mul (s1, s2) ->
+      begin match entry_to_expr_from_mapping s1 mapping,
+                  entry_to_expr_from_mapping s2 mapping with
+      | Some x, Some y -> Some (Z3.Arithmetic.mk_mul Z3utils.ctx [x; y])
+      | _, _ -> None end
 
 
 let rec entry_to_expr_no_mapping (s : entry) : Z3.Expr.expr =
@@ -41,6 +48,10 @@ let rec entry_to_expr_no_mapping (s : entry) : Z3.Expr.expr =
       let e1 = entry_to_expr_no_mapping s1 in
       let e2 = entry_to_expr_no_mapping s2 in
       Z3.Arithmetic.mk_add Z3utils.ctx [e1; e2]
+  | Mul (s1, s2) ->
+      let e1 = entry_to_expr_no_mapping s1 in
+      let e2 = entry_to_expr_no_mapping s2 in
+      Z3.Arithmetic.mk_mul Z3utils.ctx [e1; e2]
 
 
 let check_and_update_individual_mapping (s1 : entry)
