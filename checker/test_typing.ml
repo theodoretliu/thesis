@@ -34,4 +34,23 @@ let _ = assert (not_square = None)
 
 (* testing bad type declaration *)
 let bad_typ = [Nparray [Id "A"; Add (Id "A", Id "B")]], Nparray []
-let bad_res = check_app bad_typ [Nparray [Id "X"; Add (Id "X", Id "Y")]]
+let _ =
+  match check_app bad_typ [Nparray [Id "X"; Add (Id "X", Id "Y")]] with
+  | None -> assert true
+  | _ -> assert false
+
+(* testing Add type declaration *)
+let add_typ = [Nparray [Id "A"; Id "B"]], Nparray [Add (Id "A", Id "B")]
+let _ =
+  match check_app add_typ [Nparray [Id "X"; Id "Y"]] with
+  | Some (Nparray [Id x]) ->
+      assert (Z3utils.prove_int_eq (Z3utils.mk_int x) (Z3utils.add_int ["X"; "Y"]))
+  | _ -> assert false
+
+(* testing nested Add type declaration *)
+let _ =
+  let nested_add_typ = [Nparray [Id "A"; Id "B"; Id "C"]], Nparray [Add (Id "A", Add (Id "B", Id "C"))] in
+  match check_app nested_add_typ [Nparray [Id "X"; Id "Y"; Id "Z"]] with
+  | Some (Nparray [Id x]) ->
+      assert (Z3utils.prove_int_eq (Z3utils.mk_int x) (Z3utils.add_int ["X"; "Y"; "Z"]))
+  | _ -> assert false

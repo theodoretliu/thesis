@@ -22,6 +22,10 @@ let prove_int_eq i1 i2 =
   prove (Z3.Boolean.mk_eq ctx i1 i2)
 
 
+let add_int (xs : string list) =
+  Z3.Arithmetic.mk_add ctx (List.map mk_int xs)
+
+
 let add_to_solver (e : Z3.Expr.expr) =
   let new_var_name = mk_string () in
   let new_var = mk_int new_var_name in
