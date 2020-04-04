@@ -5,7 +5,7 @@ type entry =
 | Spread of string
 
 type typ = Nparray of entry list
-type funtyp = typ list * typ
+type funtyp = ((string * typ) list) * typ
 type arg = string
 
 exception TypeError of string
@@ -29,7 +29,9 @@ let print_typ t =
 module StringMap = Map.Make(struct type t = string let compare = compare end)
 module StringSet = Set.Make(struct type t = string let compare = compare end)
 
-type mapping_type = Z3.Expr.expr StringMap.t * (arg list) StringMap.t
+(* single dimension variables, spread variables, named parameters *)
+type mapping_type = Z3.Expr.expr StringMap.t * (arg list) StringMap.t * typ StringMap.t
+
 (*
 let rec entry_to_expr (s : entry) : Z3.Expr.expr =
   match s with
@@ -64,18 +66,17 @@ a few things:
    - new variables are not introduced under Add and Mul
    - introduction of new variables do not shadow spread variables and vice versa
    - Spread does not occur under Add or Mul *)
-let rec check_entry_signature ((vars, spread_vars) : StringSet.t * StringSet.t)
+let rec check_entry_signature ((vars, spread_vars, param_vars) : StringSet.t * StringSet.t * StringSet.t)
                               (e : entry)
                               (can_intro : bool)
-                            : StringSet.t * StringSet.t =
-
+                            : StringSet.t * StringSet.t * StringSet.t =
   match e with
   | Id x ->
       if can_intro then
-        if StringSet.mem x spread_vars
-        then raise (KindError "Attempt to intro variable which is already spread variable")
-        else StringSet.add x vars, spread_vars
-      else if StringSet.mem x vars then vars, spread_vars
+        if List.exists (StringSet.mem x) [spread_vars; param_vars]
+        then raise (KindError "Attempt to intro variable which is already spread or parameter variable")
+        else StringSet.add x vars, spread_vars, param_vars
+      else if StringSet.mem x vars then vars, spread_vars, param_vars
       else raise (KindError "Attempt to intro new variable in bad context")
 
   | Add (e1, e2)
@@ -83,31 +84,42 @@ let rec check_entry_signature ((vars, spread_vars) : StringSet.t * StringSet.t)
       begin match e1, e2 with
       | Spread _, _ | _, Spread _ -> raise (KindError "Spread inside Add")
       | _ ->
-          let first_check = check_entry_signature (vars, spread_vars) e1 false in
+          let first_check = check_entry_signature (vars, spread_vars, param_vars) e1 false in
           check_entry_signature first_check e2 false end
 
   | Spread x ->
       if can_intro then
-        if StringSet.mem x vars
+        if List.exists (StringSet.mem x) [vars; param_vars]
         then raise (KindError "Attempt to intro spread variable which is already variable")
-        else vars, StringSet.add x spread_vars
-      else if StringSet.mem x spread_vars then vars, spread_vars
+        else vars, StringSet.add x spread_vars, param_vars
+      else if StringSet.mem x spread_vars then vars, spread_vars, param_vars
       else raise (KindError "Attempt to intro new variable in bad context")
 
 
-let check_args_signature (funargtyps : typ list) : StringSet.t * StringSet.t =
-  let check_args_signature' ((vars, spread_vars) : StringSet.t * StringSet.t)
-                            (arg : typ)
-                          : StringSet.t * StringSet.t =
+let check_args_signature (funargtyps : (string * typ) list) : StringSet.t * StringSet.t * StringSet.t =
+  let check_args_signature' ((vars, spread_vars, param_vars) : StringSet.t *  StringSet.t * StringSet.t)
+                            ((param_name, arg) : string * typ)
+                          : StringSet.t * StringSet.t * StringSet.t =
+
+    (* don't allow parameter names to be in the set of already used variables *)
+    if List.exists (StringSet.mem param_name) [vars; spread_vars; param_vars]
+    then raise (KindError "Parameter name already used declared") else
+
+    let new_param_vars = StringSet.add param_name param_vars in
+
     let Nparray l = arg in
-    List.fold_left (fun acc e -> check_entry_signature acc e true) (vars, spread_vars) l in
-  List.fold_left check_args_signature' (StringSet.empty, StringSet.empty) funargtyps
+    let new_vars, new_spread_vars, new_param_vars =
+      List.fold_left (fun acc e -> check_entry_signature acc e true) (vars, spread_vars, new_param_vars) l in
+    new_vars, new_spread_vars, new_param_vars in
+
+  List.fold_left check_args_signature' (StringSet.empty, StringSet.empty, StringSet.empty) funargtyps
 
 
 let check_signature ((funargtyps, rettyp) : funtyp) : unit =
-  let vars, spread_vars = check_args_signature funargtyps in
+  let vars, spread_vars, param_vars = check_args_signature funargtyps in
+
   let Nparray l = rettyp in
-  ignore (List.fold_left (fun acc e -> check_entry_signature acc e false) (vars, spread_vars) l)
+  ignore (List.fold_left (fun acc e -> check_entry_signature acc e false) (vars, spread_vars, param_vars) l)
 
 
 let rec binop_to_expr_from_mapping (s : entry) (mapping : Z3.Expr.expr StringMap.t) : Z3.Expr.expr =
@@ -124,21 +136,21 @@ let rec binop_to_expr_from_mapping (s : entry) (mapping : Z3.Expr.expr StringMap
   | _ -> raise (TypeError "Called with wrong argument")
 
 
-let rec check_app' (funargtyps : typ list)
+let rec check_app' (funargtyps : (string * typ) list)
                    (argtyps : arg list list)
                    (mappings : mapping_type)
                  : mapping_type option =
   match funargtyps, argtyps with
   | [], [] -> Some mappings
-  | funargtyp :: restfunargtyps, argtyp :: restargtyps ->
+  | (_, funargtyp) :: restfunargtyps, argtyp :: restargtyps ->
       check_and_update_mapping funargtyp argtyp mappings restfunargtyps restargtyps
   | _ -> failwith "impossible"
 
 
-and check_and_update_mapping (Nparray l1 : typ)
+and check_and_update_mapping ((Nparray l1) : typ)
                              (l2 : arg list)
                              (mapping : mapping_type)
-                             (restfunargstyps : typ list)
+                             (restfunargstyps : (string * typ) list)
                              (restargtyps : arg list list)
                            : mapping_type option =
 
@@ -151,8 +163,8 @@ and check_and_update_mapping (Nparray l1 : typ)
 
 and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
                                         (s2 : arg list) (* the remaining things in the argument *)
-                                        ((var_mapping, spread_mapping) as mapping : mapping_type) (* the mappings thus far *)
-                                        (restfunargstyps : typ list)
+                                        ((var_mapping, spread_mapping, param_mapping) as mapping : mapping_type) (* the mappings thus far *)
+                                        (restfunargstyps : (string * typ) list)
                                         (restargtyps : arg list list)
                                         (restentries : entry list)
                                       : mapping_type option =
@@ -165,7 +177,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
           | None -> (* if variable is not yet mapped, store a new mapping and continue typechecking *)
               let new_var_mapping = StringMap.add x (Z3utils.mk_int h) var_mapping in
               check_and_update_mapping (Nparray restentries) t
-                                       (new_var_mapping, spread_mapping)
+                                       (new_var_mapping, spread_mapping, param_mapping)
                                        restfunargstyps restargtyps
 
           | Some exp -> (* if we mapped variable already, then try to prove it's equal to what's already stored *)
@@ -198,7 +210,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
                 let new_spread_mapping = StringMap.add v front spread_mapping in
                 let mapping_attempt = (* attempt to continue the typechecking with this mapping *)
                   check_and_update_mapping (Nparray restentries) back
-                                           (var_mapping, new_spread_mapping) restfunargstyps restargtyps in
+                                           (var_mapping, new_spread_mapping, param_mapping) restfunargstyps restargtyps in
 
                 begin match mapping_attempt with
                 | None -> try_splits t (* that mapping failed, try the next one instead *)
@@ -226,7 +238,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
     end
 
 
-let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping) : mapping_type) : arg list =
+let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, param_mapping) : mapping_type) : arg list =
   let Nparray l = rettyp in
 
   let rec check_ret_type_with_mapping' (l : entry list) : arg list =
@@ -254,7 +266,11 @@ let check_app ((funargtyps, rettyp) : funtyp) (argtyps : arg list list) : arg li
   check_signature (funargtyps, rettyp) ;
   if List.length funargtyps <> List.length argtyps
   then raise (TypeError "Incorrect number of arguments to function") else
-  let final_mapping = check_app' funargtyps argtyps (StringMap.empty, StringMap.empty) in
+
+  let param_mapping =
+    List.fold_left (fun map (param_name, t) -> StringMap.add param_name t map) StringMap.empty funargtyps in
+
+  let final_mapping = check_app' funargtyps argtyps (StringMap.empty, StringMap.empty, param_mapping) in
   match final_mapping with
   | None -> raise (TypeError "Could not type check")
   | Some mapping -> check_ret_type_with_mapping rettyp mapping

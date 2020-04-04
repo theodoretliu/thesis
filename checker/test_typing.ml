@@ -9,7 +9,7 @@ let is_none m =
 let _ =
   let a, b, c, x, y, z = Z3utils.(mk_string (), mk_string (), mk_string (),
                                   mk_string (), mk_string (), mk_string ()) in
-  let matmultyp = [Nparray [Id a; Id b]; Nparray [Id b; Id c]], Nparray [Id a; Id c] in
+  let matmultyp = ["A", Nparray [Id a; Id b]; "B", Nparray [Id b; Id c]], Nparray [Id a; Id c] in
 
   (* good matrix multiplication *)
   let result_typ = check_app matmultyp [[x; y]; [y; z]] in
@@ -34,7 +34,7 @@ let _ =
   let a, x, y = Z3utils.(mk_string (), mk_string (), mk_string()) in
 
   (* testing good determinant of a square *)
-  let determinant = [Nparray [Id a; Id a]], Nparray [] in
+  let determinant = ["X", Nparray [Id a; Id a]], Nparray [] in
   let square = check_app determinant [[x; x]] in
   let _ = assert (square = []) in
 
@@ -54,7 +54,7 @@ let _ =
   let a, b, c, d = Z3utils.(mk_string (), mk_string (),mk_string (),mk_string ()) in
 
   (* testing bad type declaration (intros variable within Add) *)
-  let bad_typ = [Nparray [Id a; Add (Id a, Id b)]], Nparray [] in
+  let bad_typ = ["X", Nparray [Id a; Add (Id a, Id b)]], Nparray [] in
   let _ = assert_bad_kind bad_typ in
 
   (* testing bad type declaration (intros variable in return) *)
@@ -66,26 +66,50 @@ let _ =
   let _ = assert_bad_kind bad_typ in
 
   (* testing bad type declaration (intros variable in Mul) *)
-  let bad_typ = [Nparray [Mul (Id a, Id b)]], Nparray [] in
+  let bad_typ = ["X", Nparray [Mul (Id a, Id b)]], Nparray [] in
   let _ = assert_bad_kind bad_typ in
 
   (* testing bad type declaration (spread variable shadows variable) *)
-  let bad_typ = [Nparray [Id a; Spread a]], Nparray [] in
+  let bad_typ = ["X", Nparray [Id a; Spread a]], Nparray [] in
+  let _ = assert_bad_kind bad_typ in
+
+  (* testing bad type declaration (variable shadows spread variable) *)
+  let bad_typ = ["X", Nparray [Spread a; Id a]], Nparray [] in
+  let _ = assert_bad_kind bad_typ in
+
+  (* testing bad type declaration (reuse param name) *)
+  let bad_typ = ["X", Nparray []; "X", Nparray []], Nparray [] in
+  let _ = assert_bad_kind bad_typ in
+
+  (* testing bad type declaration (param_name would shadow spread) *)
+  let bad_typ = ["X", Nparray [Spread a]; a, Nparray []], Nparray[] in
+  let _ = assert_bad_kind bad_typ in
+
+  (* testing bad type declaration (param_name shadow id) *)
+  let bad_typ = ["X", Nparray [Id a]; a, Nparray []], Nparray [] in
+  let _ = assert_bad_kind bad_typ in
+
+  (* testing bad type declaration (id shadows param name) *)
+  let bad_typ = [a, Nparray [Id a]], Nparray [] in
+  let _ = assert_bad_kind bad_typ in
+
+  (* testing bad type declaration (spread shadows param name) *)
+  let bad_typ = [a, Nparray [Spread a]], Nparray [] in
   let _ = assert_bad_kind bad_typ in
 
   (* testing bad type declaration (spread inside Add) *)
-  let bad_typ = [Nparray [Spread a; Spread b; Add (Spread a, Spread b)]], Nparray [] in
+  let bad_typ = ["X", Nparray [Spread a; Spread b; Add (Spread a, Spread b)]], Nparray [] in
   let _ = assert_bad_kind bad_typ in
 
   (* testing bad type declaration (spread inside Mul *)
-  let bad_typ = [Nparray [Spread a; Spread b; Mul (Spread a, Spread b)]], Nparray [] in
+  let bad_typ = ["X", Nparray [Spread a; Spread b; Mul (Spread a, Spread b)]], Nparray [] in
   let _ = assert_bad_kind bad_typ in
   ()
 
 (* testing Add type declaration *)
 let _ =
   let a, b, x, y = Z3utils.(mk_string (),mk_string (),mk_string (),mk_string ()) in
-  let add_typ = [Nparray [Id a; Id b]], Nparray [Add (Id a, Id b)] in
+  let add_typ = ["A", Nparray [Id a; Id b]], Nparray [Add (Id a, Id b)] in
   match check_app add_typ [[x; y]] with
   | [x'] ->
       assert (Z3utils.prove_int_eq (Z3utils.mk_int x') (Z3utils.add_int [x; y]))
@@ -94,7 +118,7 @@ let _ =
 (* testing nested Add type declaration *)
 let _ =
   let a, b, c, x, y, z = Z3utils.(mk_string (), mk_string (),mk_string (),mk_string (),mk_string (),mk_string ()) in
-  let nested_Add_typ = [Nparray [Id a; Id b; Id c]], Nparray [Add (Id a, Add (Id b, Id c))] in
+  let nested_Add_typ = ["X", Nparray [Id a; Id b; Id c]], Nparray [Add (Id a, Add (Id b, Id c))] in
   match check_app nested_Add_typ [[x; y; z]] with
   | [x'] ->
       assert (Z3utils.prove_int_eq (Z3utils.mk_int x') (Z3utils.add_int [x; y; z]))
@@ -103,7 +127,7 @@ let _ =
 (* testing Mul typ declaration *)
 let _ =
   let a, b, x, y = Z3utils.(mk_string (), mk_string (),mk_string (),mk_string ()) in
-  let mul_typ = [Nparray [Id a; Id b]], Nparray [Mul (Id a, Id b)] in
+  let mul_typ = ["X", Nparray [Id a; Id b]], Nparray [Mul (Id a, Id b)] in
   match check_app mul_typ [[x; y]] with
   | [x'] ->
       assert (Z3utils.prove_int_eq (Z3utils.mk_int x') (Z3utils.mul_int [x; y]))
@@ -115,7 +139,7 @@ let _ =
                                   mk_string (), mk_string (), mk_string ()) in
 
   (* most basic spread test *)
-  let spread_typ = [Nparray [Spread a]], Nparray [Spread a] in
+  let spread_typ = ["X", Nparray [Spread a]], Nparray [Spread a] in
   let _ =
     match check_app spread_typ [[x; y]] with
     | [x'; y'] ->
@@ -132,7 +156,7 @@ let _ =
     | _ -> assert false in
 
   (* check reuse of spread variable *)
-  let spread_typ = [Nparray [Spread a]; Nparray [Spread a]], Nparray [Spread a] in
+  let spread_typ = ["X", Nparray [Spread a]; "Y", Nparray [Spread a]], Nparray [Spread a] in
   let _ =
     match check_app spread_typ [[x; y]; [x; y]] with
     | [x'; y'] ->
@@ -141,7 +165,7 @@ let _ =
 
     | _ -> assert false in
 
-  let spread_typ = [Nparray [Spread a; Id b]; Nparray [Id b]], Nparray [Id b; Spread a] in
+  let spread_typ = ["X", Nparray [Spread a; Id b]; "Y", Nparray [Id b]], Nparray [Id b; Spread a] in
   let _ =
     match check_app spread_typ [[x; y]; [y]] with
     | [y'; x'] ->
@@ -150,7 +174,7 @@ let _ =
 
     | _ -> assert false in
 
-  let spread_type = [Nparray [Spread a; Id b; Spread c]; Nparray [Spread a; Spread c]], Nparray [Spread c] in
+  let spread_type = ["X", Nparray [Spread a; Id b; Spread c]; "Y", Nparray [Spread a; Spread c]], Nparray [Spread c] in
   let _ =
     match check_app spread_type [[x; y; z]; [x; z]] with
     | [z'] ->
