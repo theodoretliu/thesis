@@ -45,20 +45,43 @@ let _ =
 (* test take_n *)
 let _ =
   let took = take_n [] 0 in
-  assert (took = ([], []))
+  let _ = assert (took = ([], [])) in
 
-let _ =
-  try
-    let _took = take_n [] 1 in
-    assert false
-  with _ -> assert true
+  let _ =
+    try
+      let _took = take_n [] 1 in
+      assert false
+    with _ -> assert true in
 
-let _ =
   let took = take_n [1; 2; 3] 2 in
-  assert (took = ([1; 2], [3]))
+  let _ = assert (took = ([1; 2], [3])) in
 
+  let _ =
+    try
+      let _took = take_n [1; 2; 3] 4 in
+      assert false
+    with _ -> assert true in
+
+  ()
+
+(* test drop *)
 let _ =
-  try
-    let _took = take_n [1; 2; 3] 4 in
-    assert false
-  with _ -> assert true
+  let dropping = drop [] [] in
+  let _ = assert (dropping = Some []) in
+
+  let dropping = drop [1] [] in
+  let _ = assert (dropping = Some [1]) in
+
+  let dropping = drop [1] [0] in
+  let _ = assert (dropping = Some []) in
+
+  let dropping = drop [1] [1] in
+  let _ = assert (dropping = None) in
+
+  let dropping = drop [1; 2; 3; 4] [0; 2] in
+  let _ = assert (dropping = Some [2; 4]) in
+
+  let dropping = drop [1; 2; 3; 4] [2; 1] in
+  let _ = assert (dropping = Some [1; 4]) in
+
+  ()

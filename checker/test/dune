@@ -1,4 +1,5 @@
-(test
-    (name test_typing)
+(tests
+    (names test_typing test_z3utils test_utils)
     (flags (-cclib -lstdc++))
+    (preprocess (pps ppx_deriving.show))
     (libraries numpy_checking))

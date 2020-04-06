@@ -3,6 +3,7 @@ type entry =
 | Add of entry * entry
 | Mul of entry * entry
 | Spread of string
+| Drop of string * string list
 [@@deriving show]
 
 type typ =
@@ -21,13 +22,6 @@ type arg =
 exception TypeError of string
 exception KindError of string
 
-let rec string_of_entry e =
-  match e with
-  | Id s -> s
-  | Add (e1, e2) -> (string_of_entry e1) ^ " + " ^ (string_of_entry e2)
-  | Mul (e1, e2) -> (string_of_entry e1) ^ " * " ^ (string_of_entry e2)
-  | Spread x -> "*" ^ x
-
 let string_of_typ = show_typ
 
 let print_typ t =
@@ -37,52 +31,26 @@ module StringMap = Map.Make(struct type t = string let compare = compare end)
 module StringSet = Set.Make(struct type t = string let compare = compare end)
 
 (* single dimension variables, spread variables, named parameters *)
-type mapping_type = Z3.Expr.expr StringMap.t * (string list) StringMap.t * typ StringMap.t
-
-(*
-let rec entry_to_expr (s : entry) : Z3.Expr.expr =
-  match s with
-  | Id id -> Z3utils.mk_int id
-  | Add (s1, s2) ->
-      let e1 = entry_to_expr s1 in
-      let e2 = entry_to_expr s2 in
-      Z3.Arithmetic.mk_add Z3utils.ctx [e1; e2]
-  | Mul (s1, s2) ->
-      let e1 = entry_to_expr s1 in
-      let e2 = entry_to_expr s2 in
-      Z3.Arithmetic.mk_mul Z3utils.ctx [e1; e2]
-
-
-let check_and_update_individual_mapping (s1 : entry) (s2 : entry)
-                                        (mapping : mapping_type)
-                                      : mapping_type option =
-  let rexp = entry_to_expr_no_mapping s2 in
-  match entry_to_expr_from_mapping s1 mapping with
-  | None ->
-      begin match s1 with
-      | Id x -> Some (StringMap.add x rexp mapping)
-      | _ -> None end
-  | Some e ->
-      if Z3utils.prove_int_eq e rexp then Some mapping else None *)
-
+type mapping_type = Z3.Expr.expr StringMap.t * (string list) StringMap.t * arg StringMap.t
 
 (* given a set of already declared variables and spread variables, this
 function checks that the entry type is well-kinded. particularly, it ensures
 a few things:
    - new variables are not introduced under Add and Mul
    - introduction of new variables do not shadow spread variables and vice versa
-   - Spread does not occur under Add or Mul *)
-let rec check_entry_signature ((vars, spread_vars, param_vars) : StringSet.t * StringSet.t * StringSet.t)
+   - Spread does not occur under Add or Mul
+   - Drop needs a spread variable as its first argument and only vars mapping to TypeInts as its second *)
+let rec check_entry_signature ((vars, spread_vars, param_var_mapping) as orig : StringSet.t * StringSet.t * typ StringMap.t)
                               (e : entry)
                               (can_intro : bool)
-                            : StringSet.t * StringSet.t * StringSet.t =
+                            : StringSet.t * StringSet.t * typ StringMap.t =
   match e with
   | Id x ->
       if can_intro then
-        if List.exists (StringSet.mem x) [spread_vars; param_vars]
+        if StringSet.mem x spread_vars || StringMap.mem x param_var_mapping
         then raise (KindError "Attempt to intro variable which is already spread or parameter variable")
-        else StringSet.add x vars, spread_vars, param_vars
-      else if StringSet.mem x vars then vars, spread_vars, param_vars
+        else StringSet.add x vars, spread_vars, param_var_mapping
+      else if StringSet.mem x vars then vars, spread_vars, param_var_mapping
       else raise (KindError "Attempt to intro new variable in bad context")
 
   | Add (e1, e2)
@@ -90,38 +58,48 @@ let rec check_entry_signature ((vars, spread_vars, param_vars) : StringSet.t * S
       begin match e1, e2 with
       | Spread _, _ | _, Spread _ -> raise (KindError "Spread inside Add")
       | _ ->
-          let first_check = check_entry_signature (vars, spread_vars, param_vars) e1 false in
+          let first_check = check_entry_signature (vars, spread_vars, param_var_mapping) e1 false in
           check_entry_signature first_check e2 false end
 
   | Spread x ->
       if can_intro then
-        if List.exists (StringSet.mem x) [vars; param_vars]
+        if StringSet.mem x vars || StringMap.mem x param_var_mapping
         then raise (KindError "Attempt to intro spread variable which is already variable")
-        else vars, StringSet.add x spread_vars, param_vars
-      else if StringSet.mem x spread_vars then vars, spread_vars, param_vars
+        else vars, StringSet.add x spread_vars, param_var_mapping
+      else if StringSet.mem x spread_vars then vars, spread_vars, param_var_mapping
       else raise (KindError "Attempt to intro new variable in bad context")
 
+  | Drop (arr, indices) ->
+      if not (StringSet.mem arr spread_vars)
+      then raise (KindError "First argument to drop is not a spread var")
+      else if List.exists (fun x ->
+        let res = StringMap.find_opt x param_var_mapping in
+        res <> Some (TypeInt) && res <> Some (Nparray [])) indices
+      then raise (KindError "Arguments to drop are not integers")
+      else orig
 
-let check_args_signature (funargtyps : (string * typ) list) : StringSet.t * StringSet.t * StringSet.t =
-  let check_args_signature' ((vars, spread_vars, param_vars) : StringSet.t *  StringSet.t * StringSet.t)
+
+
+let check_args_signature (funargtyps : (string * typ) list) : StringSet.t * StringSet.t * typ StringMap.t =
+  let check_args_signature' ((vars, spread_vars, param_var_mapping) : StringSet.t *  StringSet.t * typ StringMap.t)
                             ((param_name, arg) : string * typ)
-                          : StringSet.t * StringSet.t * StringSet.t =
+                          : StringSet.t * StringSet.t * typ StringMap.t =
 
     (* don't allow parameter names to be in the set of already used variables *)
-    if List.exists (StringSet.mem param_name) [vars; spread_vars; param_vars]
-    then raise (KindError "Parameter name already used declared") else
+    if List.exists (StringSet.mem param_name) [vars; spread_vars] || StringMap.mem param_name param_var_mapping
+    then raise (KindError "Parameter name already used") else
 
-    let new_param_vars = StringSet.add param_name param_vars in
+    let new_param_var_mapping = StringMap.add param_name arg param_var_mapping in
 
     match arg with
-    | TypeInt -> vars, spread_vars, param_vars
+    | TypeInt -> vars, spread_vars, new_param_var_mapping
 
     | Nparray l ->
-        let new_vars, new_spread_vars, new_param_vars =
-          List.fold_left (fun acc e -> check_entry_signature acc e true) (vars, spread_vars, new_param_vars) l in
-        new_vars, new_spread_vars, new_param_vars in
+        let new_vars, new_spread_vars, new_param_var_mapping =
+          List.fold_left (fun acc e -> check_entry_signature acc e true) (vars, spread_vars, new_param_var_mapping) l in
+        new_vars, new_spread_vars, new_param_var_mapping in
 
-  List.fold_left check_args_signature' (StringSet.empty, StringSet.empty, StringSet.empty) funargtyps
+  List.fold_left check_args_signature' (StringSet.empty, StringSet.empty, StringMap.empty) funargtyps
 
 
 let check_signature ((funargtyps, rettyp) : funtyp) : unit =
@@ -168,7 +146,11 @@ and check_and_update_mapping (curr_typ : typ)
 
     match curr_typ, l2 with
     (* the type is int and an int was provided *)
-    | TypeInt, LiteralInt _ -> check_app' restfunargstyps restargtyps mapping
+    | TypeInt, LiteralInt _
+    | TypeInt, Int
+    | TypeInt, Dimensions []
+    | Nparray [], LiteralInt _
+    | Nparray [], Int -> check_app' restfunargstyps restargtyps mapping
 
     (* the type is nparray and list of dimensions was provided *)
     | Nparray l1, Dimensions l2 ->
@@ -218,8 +200,8 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
           let expr_e = binop_to_expr_from_mapping s1 var_mapping in
           if Z3utils.prove_int_eq expr_e (Z3utils.mk_int h) then
           check_and_update_mapping (Nparray restentries) (Dimensions t) mapping restfunargstyps restargtyps
-          else None end
-
+          else None
+       end
 
   | Spread v -> (* spread operator, capturing 0 or more variables *)
       begin match StringMap.find_opt v spread_mapping with
@@ -258,10 +240,32 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
 
           (* if no, we have to bail out *)
           else None
-    end
+      end
+
+  | Drop (arr_name, indices) ->
+      let arr = StringMap.find arr_name spread_mapping in
+      let concrete_indices = List.map (fun index ->
+        match StringMap.find index param_mapping with
+        | LiteralInt i -> i
+        | _ -> raise (TypeError "Literal integer needed as argument to drop")) indices in
+
+      begin match Utils.drop arr concrete_indices with
+      | None -> None
+      | Some reduced_arr ->
+          if List.length reduced_arr > List.length s2 then None else
+          let front, back = Utils.take_n s2 (List.length reduced_arr) in
+
+          if List.combine front reduced_arr
+            |> List.fold_left (fun acc (left, right) -> acc
+                                 && Z3utils.prove_int_eq (Z3utils.mk_int left) (Z3utils.mk_int right)) true
+          then check_and_update_mapping (Nparray restentries) (Dimensions back) mapping restfunargstyps restargtyps
+
+          else None
+
+      end
 
 
-let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, _param_mapping) : mapping_type) : arg =
+let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, param_mapping) : mapping_type) : arg =
   match rettyp with
   | TypeInt -> Int
   | Nparray l ->
@@ -282,6 +286,21 @@ let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, _p
             | Spread v ->
                 let args = StringMap.find v spread_mapping in
                 args @ (check_ret_type_with_mapping' t)
+
+            | Drop (arr_name, indices) ->
+                let arr = StringMap.find arr_name spread_mapping in
+
+                let concrete_indices = List.map (fun index ->
+                  match StringMap.find index param_mapping with
+                  | LiteralInt i -> i
+                  | _ -> raise (TypeError "Literal integer needed as argument to drop")) indices in
+
+                let new_arr = Utils.drop arr concrete_indices in
+
+                match new_arr with
+                | None -> raise (TypeError "Provided indices exceeded length of variable")
+                | Some res -> res @ (check_ret_type_with_mapping' t)
+
             end
       in
 
@@ -293,8 +312,12 @@ let check_app ((funargtyps, rettyp) : funtyp) (argtyps : arg list) : arg =
   if List.length funargtyps <> List.length argtyps
   then raise (TypeError "Incorrect number of arguments to function") else
 
+  let param_names = List.map fst funargtyps in
+
+  let param_arg_pairings = List.combine param_names argtyps in
+
   let param_mapping =
-    List.fold_left (fun map (param_name, t) -> StringMap.add param_name t map) StringMap.empty funargtyps in
+    List.fold_left (fun map (param_name, arg) -> StringMap.add param_name arg map) StringMap.empty param_arg_pairings in
 
   let final_mapping = check_app' funargtyps argtyps (StringMap.empty, StringMap.empty, param_mapping) in
   match final_mapping with
