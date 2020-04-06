@@ -8,7 +8,7 @@ let rec all_suffixes (l : 'a list) : 'a list list =
   | [] -> [[]]
   | _h :: t -> l :: all_suffixes t
 
-let rec all_splits (l : 'a list) : ('a list * 'a list) list =
+let all_splits (l : 'a list) : ('a list * 'a list) list =
   List.combine (all_prefixes l) (all_suffixes l)
 
 

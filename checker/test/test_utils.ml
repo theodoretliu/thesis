@@ -1,4 +1,4 @@
-open Utils
+open Numpy_checking.Utils
 
 (* test all_prefixes empty *)
 let _ =

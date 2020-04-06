@@ -7,3 +7,4 @@ _build
 *.byte
 *.native
 *.mypy_cache
+.merlin

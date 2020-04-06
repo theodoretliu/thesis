@@ -1,7 +1,5 @@
 .PHONY: all clean
 
-all: test typing
-
 test_all: test_utils test_z3utils test_typing
 
 test_utils: utils.ml test_utils.ml

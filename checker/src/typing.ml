@@ -3,10 +3,20 @@ type entry =
 | Add of entry * entry
 | Mul of entry * entry
 | Spread of string
+[@@deriving show]
 
-type typ = Nparray of entry list
+type typ =
+| Nparray of entry list
+| TypeInt
+[@@deriving show]
+
 type funtyp = ((string * typ) list) * typ
-type arg = string
+
+type arg =
+| Dimensions of string list
+| LiteralInt of int
+| Int
+[@@deriving show]
 
 exception TypeError of string
 exception KindError of string
@@ -18,10 +28,7 @@ let rec string_of_entry e =
   | Mul (e1, e2) -> (string_of_entry e1) ^ " * " ^ (string_of_entry e2)
   | Spread x -> "*" ^ x
 
-let string_of_typ (Nparray l) =
-  "Nparray ["
-    ^ (List.map string_of_entry l |> String.concat ", ")
-    ^ "]"
+let string_of_typ = show_typ
 
 let print_typ t =
   print_endline (string_of_typ t)
@@ -30,7 +37,7 @@ module StringMap = Map.Make(struct type t = string let compare = compare end)
 module StringSet = Set.Make(struct type t = string let compare = compare end)
 
 (* single dimension variables, spread variables, named parameters *)
-type mapping_type = Z3.Expr.expr StringMap.t * (arg list) StringMap.t * typ StringMap.t
+type mapping_type = Z3.Expr.expr StringMap.t * (string list) StringMap.t * typ StringMap.t
 
 (*
 let rec entry_to_expr (s : entry) : Z3.Expr.expr =
@@ -57,7 +64,6 @@ let check_and_update_individual_mapping (s1 : entry) (s2 : entry)
       | _ -> None end
   | Some e ->
       if Z3utils.prove_int_eq e rexp then Some mapping else None *)
-
 
 
 (* given a set of already declared variables and spread variables, this
@@ -107,10 +113,13 @@ let check_args_signature (funargtyps : (string * typ) list) : StringSet.t * Stri
 
     let new_param_vars = StringSet.add param_name param_vars in
 
-    let Nparray l = arg in
-    let new_vars, new_spread_vars, new_param_vars =
-      List.fold_left (fun acc e -> check_entry_signature acc e true) (vars, spread_vars, new_param_vars) l in
-    new_vars, new_spread_vars, new_param_vars in
+    match arg with
+    | TypeInt -> vars, spread_vars, param_vars
+
+    | Nparray l ->
+        let new_vars, new_spread_vars, new_param_vars =
+          List.fold_left (fun acc e -> check_entry_signature acc e true) (vars, spread_vars, new_param_vars) l in
+        new_vars, new_spread_vars, new_param_vars in
 
   List.fold_left check_args_signature' (StringSet.empty, StringSet.empty, StringSet.empty) funargtyps
 
@@ -118,8 +127,11 @@ let check_args_signature (funargtyps : (string * typ) list) : StringSet.t * Stri
 let check_signature ((funargtyps, rettyp) : funtyp) : unit =
   let vars, spread_vars, param_vars = check_args_signature funargtyps in
 
-  let Nparray l = rettyp in
-  ignore (List.fold_left (fun acc e -> check_entry_signature acc e false) (vars, spread_vars, param_vars) l)
+  match rettyp with
+  | TypeInt -> ()
+  | Nparray l ->
+      ignore (List.fold_left (fun acc e -> check_entry_signature acc e false)
+                             (vars, spread_vars, param_vars) l)
 
 
 let rec binop_to_expr_from_mapping (s : entry) (mapping : Z3.Expr.expr StringMap.t) : Z3.Expr.expr =
@@ -137,7 +149,7 @@ let rec binop_to_expr_from_mapping (s : entry) (mapping : Z3.Expr.expr StringMap
 
 
 let rec check_app' (funargtyps : (string * typ) list)
-                   (argtyps : arg list list)
+                   (argtyps : arg list)
                    (mappings : mapping_type)
                  : mapping_type option =
   match funargtyps, argtyps with
@@ -147,25 +159,36 @@ let rec check_app' (funargtyps : (string * typ) list)
   | _ -> failwith "impossible"
 
 
-and check_and_update_mapping ((Nparray l1) : typ)
-                             (l2 : arg list)
+and check_and_update_mapping (curr_typ : typ)
+                             (l2 : arg)
                              (mapping : mapping_type)
                              (restfunargstyps : (string * typ) list)
-                             (restargtyps : arg list list)
+                             (restargtyps : arg list)
                            : mapping_type option =
 
-    match l1, l2 with
-    | [], [] -> check_app' restfunargstyps restargtyps mapping
-    | [], _ -> None
-    | _, [] -> None
-    | h :: t, args -> check_and_update_individual_mapping h args mapping restfunargstyps restargtyps t
+    match curr_typ, l2 with
+    (* the type is int and an int was provided *)
+    | TypeInt, LiteralInt _ -> check_app' restfunargstyps restargtyps mapping
+
+    (* the type is nparray and list of dimensions was provided *)
+    | Nparray l1, Dimensions l2 ->
+
+        begin match l1, l2 with
+        | [], [] -> check_app' restfunargstyps restargtyps mapping
+        | [], _ -> None
+        | _, [] -> None
+        | h :: t, args -> check_and_update_individual_mapping h args mapping restfunargstyps restargtyps t
+        end
+
+    (* no other pairing is well-typed *)
+    | _, _ -> None
 
 
 and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
-                                        (s2 : arg list) (* the remaining things in the argument *)
+                                        (s2 : string list) (* the remaining things in the argument *)
                                         ((var_mapping, spread_mapping, param_mapping) as mapping : mapping_type) (* the mappings thus far *)
                                         (restfunargstyps : (string * typ) list)
-                                        (restargtyps : arg list list)
+                                        (restargtyps : arg list)
                                         (restentries : entry list)
                                       : mapping_type option =
   match s1 with
@@ -176,13 +199,13 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
           begin match StringMap.find_opt x var_mapping with
           | None -> (* if variable is not yet mapped, store a new mapping and continue typechecking *)
               let new_var_mapping = StringMap.add x (Z3utils.mk_int h) var_mapping in
-              check_and_update_mapping (Nparray restentries) t
+              check_and_update_mapping (Nparray restentries) (Dimensions t)
                                        (new_var_mapping, spread_mapping, param_mapping)
                                        restfunargstyps restargtyps
 
           | Some exp -> (* if we mapped variable already, then try to prove it's equal to what's already stored *)
               if Z3utils.prove_int_eq exp (Z3utils.mk_int h) then
-              check_and_update_mapping (Nparray restentries) t mapping restfunargstyps restargtyps
+              check_and_update_mapping (Nparray restentries) (Dimensions t) mapping restfunargstyps restargtyps
               else None
           end
       end
@@ -194,7 +217,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       | h :: t -> (* there are args left, try to prove the equality *)
           let expr_e = binop_to_expr_from_mapping s1 var_mapping in
           if Z3utils.prove_int_eq expr_e (Z3utils.mk_int h) then
-          check_and_update_mapping (Nparray restentries) t mapping restfunargstyps restargtyps
+          check_and_update_mapping (Nparray restentries) (Dimensions t) mapping restfunargstyps restargtyps
           else None end
 
 
@@ -203,13 +226,13 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       | None -> (* haven't mapped this spread variable yet *)
           let split_rem = Utils.all_splits s2 in
 
-          let rec try_splits (splits : (arg list * arg list) list) =
+          let rec try_splits (splits : (string list * string list) list) =
             begin match splits with
             | [] -> None
             | (front, back) :: t ->
                 let new_spread_mapping = StringMap.add v front spread_mapping in
                 let mapping_attempt = (* attempt to continue the typechecking with this mapping *)
-                  check_and_update_mapping (Nparray restentries) back
+                  check_and_update_mapping (Nparray restentries) (Dimensions back)
                                            (var_mapping, new_spread_mapping, param_mapping) restfunargstyps restargtyps in
 
                 begin match mapping_attempt with
@@ -231,38 +254,41 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
                                  && Z3utils.prove_int_eq (Z3utils.mk_int left) (Z3utils.mk_int right)) true
 
           (* if yes, then we can continue the type checking *)
-          then check_and_update_mapping (Nparray restentries) back mapping restfunargstyps restargtyps
+          then check_and_update_mapping (Nparray restentries) (Dimensions back) mapping restfunargstyps restargtyps
 
           (* if no, we have to bail out *)
           else None
     end
 
 
-let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, param_mapping) : mapping_type) : arg list =
-  let Nparray l = rettyp in
+let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, _param_mapping) : mapping_type) : arg =
+  match rettyp with
+  | TypeInt -> Int
+  | Nparray l ->
 
-  let rec check_ret_type_with_mapping' (l : entry list) : arg list =
-    match l with
-    | [] -> []
-    | h :: t ->
-        begin match h with
-        | Id x ->
-            let bound_name = StringMap.find x var_mapping |> Z3utils.add_to_solver in
-            bound_name :: check_ret_type_with_mapping' t
+      let rec check_ret_type_with_mapping' (l : entry list) : string list =
+        match l with
+        | [] -> []
+        | h :: t ->
+            begin match h with
+            | Id x ->
+                let bound_name = StringMap.find x var_mapping |> Z3utils.add_to_solver in
+                bound_name :: check_ret_type_with_mapping' t
 
-        | Add _ | Mul _ ->
-            let bound_name = binop_to_expr_from_mapping h var_mapping |> Z3utils.add_to_solver in
-            bound_name :: check_ret_type_with_mapping' t
+            | Add _ | Mul _ ->
+                let bound_name = binop_to_expr_from_mapping h var_mapping |> Z3utils.add_to_solver in
+                bound_name :: check_ret_type_with_mapping' t
 
-        | Spread v ->
-            let args = StringMap.find v spread_mapping in
-            args @ (check_ret_type_with_mapping' t)
-        end in
+            | Spread v ->
+                let args = StringMap.find v spread_mapping in
+                args @ (check_ret_type_with_mapping' t)
+            end
+      in
 
-  check_ret_type_with_mapping' l
+  Dimensions (check_ret_type_with_mapping' l)
 
 
-let check_app ((funargtyps, rettyp) : funtyp) (argtyps : arg list list) : arg list =
+let check_app ((funargtyps, rettyp) : funtyp) (argtyps : arg list) : arg =
   check_signature (funargtyps, rettyp) ;
   if List.length funargtyps <> List.length argtyps
   then raise (TypeError "Incorrect number of arguments to function") else

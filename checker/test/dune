@@ -1,0 +1,4 @@
+(test
+    (name test_typing)
+    (flags (-cclib -lstdc++))
+    (libraries numpy_checking))

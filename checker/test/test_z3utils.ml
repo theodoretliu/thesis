@@ -1,4 +1,4 @@
-open Z3utils
+open Numpy_checking.Z3utils
 
 let x = mk_int "x"
 let other_x = mk_int "x"
