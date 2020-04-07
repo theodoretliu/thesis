@@ -4,6 +4,7 @@ type entry =
 | Mul of entry * entry
 | Spread of string
 | Drop of string * string list
+| Keep of string * string list
 [@@deriving show]
 
 type typ =
@@ -69,9 +70,10 @@ let rec check_entry_signature ((vars, spread_vars, param_var_mapping) as orig : 
       else if StringSet.mem x spread_vars then vars, spread_vars, param_var_mapping
       else raise (KindError "Attempt to intro new variable in bad context")
 
-  | Drop (arr, indices) ->
+  | Drop (arr, indices)
+  | Keep (arr, indices) ->
       if not (StringSet.mem arr spread_vars)
-      then raise (KindError "First argument to drop is not a spread var")
+      then raise (KindError ("First argument to " ^ (show_entry e) ^ " is not a spread var"))
       else if List.exists (fun x ->
         let res = StringMap.find_opt x param_var_mapping in
         res <> Some (TypeInt) && res <> Some (Nparray [])) indices
@@ -242,14 +244,21 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
           else None
       end
 
-  | Drop (arr_name, indices) ->
+  | Drop (arr_name, indices)
+  | Keep (arr_name, indices) ->
       let arr = StringMap.find arr_name spread_mapping in
       let concrete_indices = List.map (fun index ->
         match StringMap.find index param_mapping with
         | LiteralInt i -> i
         | _ -> raise (TypeError "Literal integer needed as argument to drop")) indices in
 
-      begin match Utils.drop arr concrete_indices with
+      let func =
+        match s1 with
+        | Drop _ -> Utils.drop
+        | Keep _ -> Utils.keep
+        | _ -> failwith "panic" in
+
+      begin match func arr concrete_indices with
       | None -> None
       | Some reduced_arr ->
           if List.length reduced_arr > List.length s2 then None else
@@ -287,7 +296,8 @@ let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, pa
                 let args = StringMap.find v spread_mapping in
                 args @ (check_ret_type_with_mapping' t)
 
-            | Drop (arr_name, indices) ->
+            | Drop (arr_name, indices)
+            | Keep (arr_name, indices) ->
                 let arr = StringMap.find arr_name spread_mapping in
 
                 let concrete_indices = List.map (fun index ->
@@ -295,7 +305,13 @@ let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, pa
                   | LiteralInt i -> i
                   | _ -> raise (TypeError "Literal integer needed as argument to drop")) indices in
 
-                let new_arr = Utils.drop arr concrete_indices in
+                let func =
+                  match h with
+                  | Drop _ -> Utils.drop
+                  | Keep _ -> Utils.keep
+                  | _ -> failwith "panic" in
+
+                let new_arr = func arr concrete_indices in
 
                 match new_arr with
                 | None -> raise (TypeError "Provided indices exceeded length of variable")

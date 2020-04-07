@@ -43,3 +43,21 @@ let drop (l : 'a list) (indices : int list) : 'a list option =
   in
 
   drop' l sorted_indices 0
+
+
+(* keep indices in a list *)
+let keep (l : 'a list) (indices : int list) : 'a list option =
+  let sorted_indices = List.sort compare indices in
+  let rec keep' (l : 'a list) (indices : int list) i =
+    match l, indices with
+    | [], [] -> Some []
+    | [], _ -> None
+    | h :: t, [] -> Some []
+    | h :: t, index :: rest ->
+        if index <> i then keep' t indices (i + 1)
+        else match keep' t rest (i + 1) with
+        | None -> None
+        | Some res -> Some (h :: res)
+  in
+
+  keep' l sorted_indices 0

@@ -118,6 +118,18 @@ let _ =
   let bad_typ = [a, Nparray [Spread b]; c, Nparray [Id d]], Nparray [Drop (b, [c])] in
   let _ = assert_bad_kind bad_typ in
 
+  (* keep first arg is not spread *)
+  let bad_typ = ["x", Nparray [Id a]], Nparray [Keep (a, [])] in
+  let _ = assert_bad_kind bad_typ in
+
+  (* keep first arg is not spread *)
+  let bad_typ = ["x", Nparray [Id a]], Nparray [Keep ("x", [])] in
+  let _ = assert_bad_kind bad_typ in
+
+  (* keep second arg not int list *)
+  let bad_typ = [a, Nparray [Spread b]; c, Nparray [Id d]], Nparray [Keep (b, [c])] in
+  let _ = assert_bad_kind bad_typ in
+
   ()
 
 (* testing Add type declaration *)
@@ -295,6 +307,82 @@ let _ =
   let _ =
     try
       let _ = check_app drop_typ_simp [Dimensions [d; e; f]; Int] in
+      assert false
+    with TypeError _ -> assert true
+  in
+
+  ()
+
+(* testing keep typing *)
+let _ =
+  let a, b, c, d, e, f, g = (mk_string(), mk_string(), mk_string(), mk_string(),
+                             mk_string(), mk_string(), mk_string()) in
+
+  (* testing drop of a single axis *)
+  let keep_typ = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [c])] in
+  let _ =
+    match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 2] with
+    | Dimensions [f'] ->
+        assert (prove_int_eq (mk_int f) (mk_int f'))
+    | _ -> assert false in
+
+  (* testing keep where index exceeds provided length *)
+  let _ =
+    try
+      let _ = check_app keep_typ [Dimensions [d; e; f]; LiteralInt 3] in
+      assert false
+    with TypeError _ ->
+      assert true in
+
+  (* testing weird keep *)
+  let keep_typ = [a, Nparray [Spread b]; c, Nparray []], Nparray [Keep (b, [c])] in
+  let _ =
+    match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 3] with
+    | Dimensions [g'] ->
+        List.combine [g] [g'] |>
+          List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+    | _ -> assert false in
+
+  (* testing keep of multiple indices *)
+  let keep_typ = [a, Nparray [Spread b]; c, TypeInt; d, TypeInt], Nparray [Keep (b, [c; d])] in
+  let _ =
+    match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 0; LiteralInt 1] with
+    | Dimensions [d'; e'] ->
+        List.combine [d'; e'] [d; e] |>
+          List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+    | _ -> assert false in
+
+  (* testing keep within the arguments *)
+  let keep_typ = [a, Nparray [Spread b]; c, TypeInt; d, Nparray [Keep (b, [c])]], Nparray [Keep (b, [c])] in
+  let _ =
+    match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 0; Dimensions [d]] with
+    | Dimensions [d'] ->
+        assert (prove_int_eq (mk_int d') (mk_int d))
+    | _ -> assert false in
+
+  (* test sort of advanced keeping leading into another keep *)
+  let keep_typ' = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [c])] in
+  let _ =
+    let res = check_app keep_typ' [Dimensions [d; e; f; g]; LiteralInt 0] in
+      match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 0; res] with
+      | Dimensions [d'] ->
+          assert (prove_int_eq (mk_int d) (mk_int d'))
+
+      | _ -> assert false in
+
+  (* keepping something that out of bounds *)
+  let keep_typ_simp = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [c])] in
+  let _ =
+    try
+      let _ = check_app keep_typ_simp [Dimensions [d; e; f]; LiteralInt 3] in
+      assert false
+    with TypeError _ -> assert true
+  in
+
+  (* trying to keep when we don't have further type information *)
+  let _ =
+    try
+      let _ = check_app keep_typ_simp [Dimensions [d; e; f]; Int] in
       assert false
     with TypeError _ -> assert true
   in
