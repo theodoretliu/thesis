@@ -84,6 +84,18 @@ let _ =
   let dropping = drop [1; 2; 3; 4] [2; 1] in
   let _ = assert (dropping = Some [1; 4]) in
 
+  let dropping = drop [1; 2; 3; 4] [-1] in
+  let _ = assert (dropping = Some [1; 2; 3]) in
+
+  let dropping = drop [1; 2; 3; 4] [-2; -1] in
+  let _ = assert (dropping = Some [1; 2]) in
+
+  let dropping = drop [1; 2; 3; 4] [0; -2; -1] in
+  let _ = assert (dropping = Some [2]) in
+
+  let dropping = drop [] [-1] in
+  let _ = assert (dropping = None) in
+
   ()
 
 (* test keep *)
@@ -105,5 +117,17 @@ let _ =
 
   let keeping = keep [1; 2; 3] [0; 2] in
   let _ = assert (keeping = Some [1; 3]) in
+
+  let keeping = keep [1; 2; 3; 4] [-1] in
+  let _ = assert (keeping = Some [4]) in
+
+  let keeping = keep [1; 2; 3; 4] [-2; -1] in
+  let _ = assert (keeping = Some [3; 4]) in
+
+  let keeping = keep [1; 2; 3; 4] [0; -2; -1] in
+  let _ = assert (keeping = Some [1; 3; 4]) in
+
+  let keeping = keep [] [-1] in
+  let _ = assert (keeping = None) in
 
   ()

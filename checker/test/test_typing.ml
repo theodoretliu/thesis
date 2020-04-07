@@ -297,6 +297,18 @@ let _ =
     with TypeError _ -> assert true
   in
 
+  let drop_neg = [a, Nparray [Spread b]], Nparray [Drop (b, [Right ~-1])] in
+  let _ =
+    match check_app drop_neg [Dimensions [d; e; f]] with
+    | Dimensions l -> prove_list_eq l [d; e]
+    | _ -> assert false in
+
+  let drop_neg = [a, Nparray [Spread b]; c, TypeInt], Nparray [Drop (b, [Left c])] in
+  let _ =
+    match check_app drop_neg [Dimensions [d; e; f]; LiteralInt ~-2] with
+    | Dimensions l -> prove_list_eq l [d; f]
+    | _ -> assert false in
+
   ()
 
 (* testing keep typing *)
@@ -371,6 +383,18 @@ let _ =
       assert false
     with TypeError _ -> assert true
   in
+
+  let keep_neg = [a, Nparray [Spread b]], Nparray [Keep (b, [Right ~-1])] in
+  let _ =
+    match check_app keep_neg [Dimensions [d; e; f]] with
+    | Dimensions l -> prove_list_eq l [f]
+    | _ -> assert false in
+
+  let keep_neg = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [Left c])] in
+  let _ =
+    match check_app keep_neg [Dimensions [d; e; f]; LiteralInt ~-2] with
+    | Dimensions l -> prove_list_eq l [e]
+    | _ -> assert false in
 
   ()
 
