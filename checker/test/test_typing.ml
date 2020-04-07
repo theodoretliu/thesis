@@ -388,3 +388,34 @@ let _ =
   in
 
   ()
+
+
+(* test integer literal things *)
+let _ =
+  let a, b, c = mk_string (), mk_string (), mk_string () in
+  let x, y, z = mk_int_var 2, mk_int_var 3, mk_int_var 4 in
+
+  (* test integer bounds *)
+  let int_typ = [a, Nparray [Int 2; Int 4]], Nparray [Int 3; Int 5] in
+  let _ =
+    match check_app int_typ [Dimensions [x; z]] with
+    | Dimensions [x; y] ->
+        assert (prove_int_eq (mk_int x) (mk_int_numeral 3)) ;
+        assert (prove_int_eq (mk_int y) (mk_int_numeral 5))
+    | _ -> assert false in
+
+  let _ =
+    try
+      let _ = check_app int_typ [Dimensions [x; y]] in
+      assert false
+    with TypeError _ ->
+      assert true
+  in
+
+  (* ensure that the returned types compose and behave expectedly *)
+  let generate_typ = [], Nparray [Int 2; Int 3; Int 4] in
+  let use_typ = [a, Nparray [Int 2; Int 3; Int 4]], Nparray [] in
+  let res = check_app generate_typ [] in
+  let _ = assert (check_app use_typ [res] = Dimensions []) in
+
+  ()

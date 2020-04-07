@@ -1,3 +1,5 @@
+open Z3utils
+
 type entry =
 | Id of string
 | Add of entry * entry
@@ -5,6 +7,7 @@ type entry =
 | Spread of string
 | Drop of string * string list
 | Keep of string * string list
+| Int of int
 [@@deriving show]
 
 type typ =
@@ -80,6 +83,7 @@ let rec check_entry_signature ((vars, spread_vars, param_var_mapping) as orig : 
       then raise (KindError "Arguments to drop are not integers")
       else orig
 
+  | Int _i -> orig
 
 
 let check_args_signature (funargtyps : (string * typ) list) : StringSet.t * StringSet.t * typ StringMap.t =
@@ -273,6 +277,24 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
 
       end
 
+  | Int i ->
+      begin match s2 with
+
+      (* there are no more variables to even match with *)
+      | [] -> None
+
+      (* there is at least one variable to match with *)
+      | h :: t ->
+          let const_int = mk_int_numeral i in
+          (* if we can prove that the provided integer is equal to the dimension
+             in the array, continue *)
+          if prove_int_eq const_int (mk_int h) then
+            check_and_update_mapping (Nparray restentries) (Dimensions t)
+                                     mapping restfunargstyps restargtyps
+          (* we can't prove it, fail *)
+          else None
+      end
+
 
 let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, param_mapping) : mapping_type) : arg =
   match rettyp with
@@ -313,9 +335,15 @@ let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, pa
 
                 let new_arr = func arr concrete_indices in
 
-                match new_arr with
+                begin match new_arr with
                 | None -> raise (TypeError "Provided indices exceeded length of variable")
                 | Some res -> res @ (check_ret_type_with_mapping' t)
+                end
+
+            | Int i ->
+                let gend_var = mk_int_var i in
+
+                gend_var :: (check_ret_type_with_mapping' t)
 
             end
       in

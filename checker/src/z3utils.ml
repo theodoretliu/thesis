@@ -10,8 +10,19 @@ let mk_string =
     res
 
 
+
+
 let mk_int = Z3.Arithmetic.Integer.mk_const_s ctx
 
+let mk_int_numeral = Z3.Arithmetic.Integer.mk_numeral_i ctx
+
+let mk_int_var i =
+  let var_name = mk_string () in
+  let int_num = mk_int_numeral i in
+  let var_expr = mk_int var_name in
+  let equality = Z3.Boolean.mk_eq ctx int_num var_expr in
+  Z3.Solver.add solver [equality] ;
+  var_name
 
 let prove f =
   let res = Z3.Solver.check solver [Z3.Boolean.mk_not ctx f] in
