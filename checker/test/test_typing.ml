@@ -6,6 +6,10 @@ let is_none m =
   | None -> true
   | Some _ -> false
 
+let prove_list_eq l1 l2 =
+  List.combine l1 l2 |>
+    List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+
 (* testing matrix multiplication *)
 let _ =
   let a, b, c, x, y, z = (mk_string (), mk_string (), mk_string (),
@@ -16,9 +20,8 @@ let _ =
   let result_typ = check_app matmultyp [Dimensions [x; y]; Dimensions [y; z]] in
   let _ =
     match result_typ with
-    | Dimensions [x'; z'] ->
-        assert (prove_int_eq (mk_int x) (mk_int x')) ;
-        assert (prove_int_eq (mk_int z) (mk_int z'))
+    | Dimensions l -> prove_list_eq l [x; z]
+
     | _ -> assert false in
 
   (* testing bad matrix multiplication *)
@@ -115,7 +118,7 @@ let _ =
   let _ = assert_bad_kind bad_typ in
 
   (* drop second arg not int list *)
-  let bad_typ = [a, Nparray [Spread b]; c, Nparray [Id d]], Nparray [Drop (b, [c])] in
+  let bad_typ = [a, Nparray [Spread b]; c, Nparray [Id d]], Nparray [Drop (b, [Left c])] in
   let _ = assert_bad_kind bad_typ in
 
   (* keep first arg is not spread *)
@@ -127,7 +130,7 @@ let _ =
   let _ = assert_bad_kind bad_typ in
 
   (* keep second arg not int list *)
-  let bad_typ = [a, Nparray [Spread b]; c, Nparray [Id d]], Nparray [Keep (b, [c])] in
+  let bad_typ = [a, Nparray [Spread b]; c, Nparray [Id d]], Nparray [Keep (b, [Left c])] in
   let _ = assert_bad_kind bad_typ in
 
   ()
@@ -168,44 +171,31 @@ let _ =
   let spread_typ = ["X", Nparray [Spread a]], Nparray [Spread a] in
   let _ =
     match check_app spread_typ [Dimensions [x; y]] with
-    | Dimensions [x'; y'] ->
-        assert (prove_int_eq (mk_int x) (mk_int x')) ;
-        assert (prove_int_eq (mk_int y) (mk_int y'))
+    | Dimensions l -> prove_list_eq l [x; y]
     | _ -> assert false in
 
   let _ =
     match check_app spread_typ [Dimensions [x; y; z]] with
-    | Dimensions [x'; y'; z'] ->
-        assert (prove_int_eq (mk_int x) (mk_int x')) ;
-        assert (prove_int_eq (mk_int y) (mk_int y')) ;
-        assert (prove_int_eq (mk_int z) (mk_int z'))
+    | Dimensions l -> prove_list_eq l [x; y; z]
     | _ -> assert false in
 
   (* check reuse of spread variable *)
   let spread_typ = ["X", Nparray [Spread a]; "Y", Nparray [Spread a]], Nparray [Spread a] in
   let _ =
     match check_app spread_typ [Dimensions [x; y]; Dimensions [x; y]] with
-    | Dimensions [x'; y'] ->
-        assert (prove_int_eq (mk_int x) (mk_int x')) ;
-        assert (prove_int_eq (mk_int y) (mk_int y'))
-
+    | Dimensions l -> prove_list_eq l [x; y]
     | _ -> assert false in
 
   let spread_typ = ["X", Nparray [Spread a; Id b]; "Y", Nparray [Id b]], Nparray [Id b; Spread a] in
   let _ =
     match check_app spread_typ [Dimensions [x; y]; Dimensions [y]] with
-    | Dimensions [y'; x'] ->
-        assert (prove_int_eq (mk_int x) (mk_int x')) ;
-        assert (prove_int_eq (mk_int y) (mk_int y'))
-
+    | Dimensions l -> prove_list_eq l [y; x]
     | _ -> assert false in
 
   let spread_type = ["X", Nparray [Spread a; Id b; Spread c]; "Y", Nparray [Spread a; Spread c]], Nparray [Spread c] in
   let _ =
     match check_app spread_type [Dimensions [x; y; z]; Dimensions [x; z]] with
-    | Dimensions [z'] ->
-        assert (prove_int_eq (mk_int z') (mk_int z))
-
+    | Dimensions l -> prove_list_eq l [z]
     | _ -> assert false in
 
   ()
@@ -240,12 +230,10 @@ let _ =
                              mk_string(), mk_string(), mk_string()) in
 
   (* testing drop of a single axis *)
-  let drop_typ = [a, Nparray [Spread b]; c, TypeInt], Nparray [Drop (b, [c])] in
+  let drop_typ = [a, Nparray [Spread b]; c, TypeInt], Nparray [Drop (b, [Left c])] in
   let _ =
     match check_app drop_typ [Dimensions [d; e; f; g]; LiteralInt 2] with
-    | Dimensions [d'; e'; g'] ->
-        List.combine [d'; e'; g'] [d; e; g] |>
-          List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+    | Dimensions l -> prove_list_eq l [d; e; g]
     | _ -> assert false in
 
   (* testing drop where index exceeds provided length *)
@@ -257,51 +245,49 @@ let _ =
       assert true in
 
   (* testing weird drop *)
-  let drop_typ = [a, Nparray [Spread b]; c, Nparray []], Nparray [Drop (b, [c])] in
+  let drop_typ = [a, Nparray [Spread b]; c, Nparray []], Nparray [Drop (b, [Left c])] in
   let _ =
     match check_app drop_typ [Dimensions [d; e; f; g]; LiteralInt 3] with
-    | Dimensions [d'; e'; f'] ->
-        List.combine [d'; e'; f'] [d; e; f] |>
-          List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+    | Dimensions l -> prove_list_eq l [d; e; f]
     | _ -> assert false in
 
   (* testing drop of multiple indices *)
-  let drop_typ = [a, Nparray [Spread b]; c, TypeInt; d, TypeInt], Nparray [Drop (b, [c; d])] in
+  let drop_typ = [a, Nparray [Spread b]; c, TypeInt; d, TypeInt], Nparray [Drop (b, [Left c; Left d])] in
   let _ =
     match check_app drop_typ [Dimensions [d; e; f; g]; LiteralInt 0; LiteralInt 1] with
-    | Dimensions [f'; g'] ->
-        List.combine [f'; g'] [f; g] |>
-          List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+    | Dimensions l -> prove_list_eq l [f; g]
     | _ -> assert false in
 
   (* testing drop within the arguments *)
-  let drop_typ = [a, Nparray [Spread b]; c, TypeInt; d, Nparray [Drop (b, [c])]], Nparray [Drop (b, [c])] in
+  let drop_typ = [a, Nparray [Spread b]; c, TypeInt; d, Nparray [Drop (b, [Left c])]], Nparray [Drop (b, [Left c])] in
   let _ =
     match check_app drop_typ [Dimensions [d; e; f; g]; LiteralInt 0; Dimensions [e; f; g]] with
-    | Dimensions [e'; f'; g'] ->
-        List.combine [e'; f'; g'] [e; f; g] |>
-          List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+    | Dimensions l -> prove_list_eq l [e; f; g]
     | _ -> assert false in
 
   (* test sort of advanced dropping leading into another drop *)
-  let drop_typ' = [a, Nparray [Spread b]; c, TypeInt], Nparray [Drop (b, [c])] in
+  let drop_typ' = [a, Nparray [Spread b]; c, TypeInt], Nparray [Drop (b, [Left c])] in
   let _ =
     let res = check_app drop_typ' [Dimensions [d; e; f; g]; LiteralInt 0] in
       match check_app drop_typ [Dimensions [d; e; f; g]; LiteralInt 0; res] with
-      | Dimensions [e'; f'; g'] ->
-          List.combine [e'; f'; g'] [e; f; g] |>
-            List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y))) ;
-
+      | Dimensions l -> prove_list_eq l [e; f; g]
       | _ -> assert false in
 
   (* dropping something that out of bounds *)
-  let drop_typ_simp = [a, Nparray [Spread b]; c, TypeInt], Nparray [Drop (b, [c])] in
+  let drop_typ_simp = [a, Nparray [Spread b]; c, TypeInt], Nparray [Drop (b, [Left c])] in
   let _ =
     try
       let _ = check_app drop_typ_simp [Dimensions [d; e; f]; LiteralInt 3] in
       assert false
     with TypeError _ -> assert true
   in
+
+  (* dropping a constant part of a spread *)
+  let drop_typ_const = [a, Nparray [Spread b]], Nparray [Drop (b, [Right 0])] in
+  let _ =
+    match check_app drop_typ_const [Dimensions [d; e; f]] with
+    | Dimensions l -> prove_list_eq l [e; f]
+    | _ -> assert false in
 
   (* trying to drop when we don't have further type information *)
   let _ =
@@ -319,11 +305,10 @@ let _ =
                              mk_string(), mk_string(), mk_string()) in
 
   (* testing drop of a single axis *)
-  let keep_typ = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [c])] in
+  let keep_typ = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [Left c])] in
   let _ =
     match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 2] with
-    | Dimensions [f'] ->
-        assert (prove_int_eq (mk_int f) (mk_int f'))
+    | Dimensions l -> prove_list_eq l [f]
     | _ -> assert false in
 
   (* testing keep where index exceeds provided length *)
@@ -335,49 +320,49 @@ let _ =
       assert true in
 
   (* testing weird keep *)
-  let keep_typ = [a, Nparray [Spread b]; c, Nparray []], Nparray [Keep (b, [c])] in
+  let keep_typ = [a, Nparray [Spread b]; c, Nparray []], Nparray [Keep (b, [Left c])] in
   let _ =
     match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 3] with
-    | Dimensions [g'] ->
-        List.combine [g] [g'] |>
-          List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+    | Dimensions l -> prove_list_eq l [g]
     | _ -> assert false in
 
   (* testing keep of multiple indices *)
-  let keep_typ = [a, Nparray [Spread b]; c, TypeInt; d, TypeInt], Nparray [Keep (b, [c; d])] in
+  let keep_typ = [a, Nparray [Spread b]; c, TypeInt; d, TypeInt], Nparray [Keep (b, [Left c; Left d])] in
   let _ =
     match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 0; LiteralInt 1] with
-    | Dimensions [d'; e'] ->
-        List.combine [d'; e'] [d; e] |>
-          List.iter (fun (x, y) -> assert (prove_int_eq (mk_int x) (mk_int y)))
+    | Dimensions l -> prove_list_eq l [d; e]
     | _ -> assert false in
 
   (* testing keep within the arguments *)
-  let keep_typ = [a, Nparray [Spread b]; c, TypeInt; d, Nparray [Keep (b, [c])]], Nparray [Keep (b, [c])] in
+  let keep_typ = [a, Nparray [Spread b]; c, TypeInt; d, Nparray [Keep (b, [Left c])]], Nparray [Keep (b, [Left c])] in
   let _ =
     match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 0; Dimensions [d]] with
-    | Dimensions [d'] ->
-        assert (prove_int_eq (mk_int d') (mk_int d))
+    | Dimensions l -> prove_list_eq l [d]
     | _ -> assert false in
 
   (* test sort of advanced keeping leading into another keep *)
-  let keep_typ' = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [c])] in
+  let keep_typ' = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [Left c])] in
   let _ =
     let res = check_app keep_typ' [Dimensions [d; e; f; g]; LiteralInt 0] in
       match check_app keep_typ [Dimensions [d; e; f; g]; LiteralInt 0; res] with
-      | Dimensions [d'] ->
-          assert (prove_int_eq (mk_int d) (mk_int d'))
-
+      | Dimensions l -> prove_list_eq l [d]
       | _ -> assert false in
 
-  (* keepping something that out of bounds *)
-  let keep_typ_simp = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [c])] in
+  (* keeping something that out of bounds *)
+  let keep_typ_simp = [a, Nparray [Spread b]; c, TypeInt], Nparray [Keep (b, [Left c])] in
   let _ =
     try
       let _ = check_app keep_typ_simp [Dimensions [d; e; f]; LiteralInt 3] in
       assert false
     with TypeError _ -> assert true
   in
+
+  (* test keeping constant integer *)
+  let keep_const_typ = [a, Nparray [Spread b]], Nparray [Keep (b, [Right 1])] in
+  let _ =
+    match check_app keep_const_typ [Dimensions [d; e; f]] with
+    | Dimensions l -> prove_list_eq l [e]
+    | _ -> assert false in
 
   (* trying to keep when we don't have further type information *)
   let _ =

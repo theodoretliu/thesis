@@ -1,12 +1,17 @@
 open Z3utils
 
+type ('a, 'b) either =
+| Left of 'a
+| Right of 'b
+[@@deriving show]
+
 type entry =
 | Id of string
 | Add of entry * entry
 | Mul of entry * entry
 | Spread of string
-| Drop of string * string list
-| Keep of string * string list
+| Drop of string * (string, int) either list
+| Keep of string * (string, int) either list
 | Int of int
 [@@deriving show]
 
@@ -77,13 +82,16 @@ let rec check_entry_signature ((vars, spread_vars, param_var_mapping) as orig : 
   | Keep (arr, indices) ->
       if not (StringSet.mem arr spread_vars)
       then raise (KindError ("First argument to " ^ (show_entry e) ^ " is not a spread var"))
-      else if List.exists (fun x ->
-        let res = StringMap.find_opt x param_var_mapping in
-        res <> Some (TypeInt) && res <> Some (Nparray [])) indices
-      then raise (KindError "Arguments to drop are not integers")
-      else orig
+      else if List.exists (fun index ->
+        match index with
+        | Left s ->
+            let found = StringMap.find_opt s param_var_mapping in
+            found <> Some (TypeInt) && found <> Some (Nparray [])
+        | Right _ -> false) indices
+        then raise (KindError "Arguments to drop are not integers")
+        else orig
 
-  | Int _i -> orig
+    | Int _i -> orig
 
 
 let check_args_signature (funargtyps : (string * typ) list) : StringSet.t * StringSet.t * typ StringMap.t =
@@ -131,6 +139,16 @@ let rec binop_to_expr_from_mapping (s : entry) (mapping : Z3.Expr.expr StringMap
       Z3.Arithmetic.mk_mul Z3utils.ctx [left; right]
   | _ -> raise (TypeError "Called with wrong argument")
 
+let get_concrete_indices (indices : (string, int) either list)
+                         (param_mapping : arg StringMap.t) : int list =
+  List.map (fun index ->
+    match index with
+    | Left s ->
+        begin match StringMap.find s param_mapping with
+        | LiteralInt i -> i
+        | _ -> raise (TypeError "Literal integer needed as argument to drop")
+        end
+    | Right asdf -> asdf) indices
 
 let rec check_app' (funargtyps : (string * typ) list)
                    (argtyps : arg list)
@@ -251,10 +269,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
   | Drop (arr_name, indices)
   | Keep (arr_name, indices) ->
       let arr = StringMap.find arr_name spread_mapping in
-      let concrete_indices = List.map (fun index ->
-        match StringMap.find index param_mapping with
-        | LiteralInt i -> i
-        | _ -> raise (TypeError "Literal integer needed as argument to drop")) indices in
+      let concrete_indices = get_concrete_indices indices param_mapping in
 
       let func =
         match s1 with
@@ -322,10 +337,7 @@ let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, pa
             | Keep (arr_name, indices) ->
                 let arr = StringMap.find arr_name spread_mapping in
 
-                let concrete_indices = List.map (fun index ->
-                  match StringMap.find index param_mapping with
-                  | LiteralInt i -> i
-                  | _ -> raise (TypeError "Literal integer needed as argument to drop")) indices in
+                let concrete_indices = get_concrete_indices indices param_mapping in
 
                 let func =
                   match h with
