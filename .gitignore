@@ -8,3 +8,5 @@ _build
 *.native
 *.mypy_cache
 .merlin
+thesis.*
+!thesis.tex

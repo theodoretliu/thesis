@@ -1,0 +1,194 @@
+\documentclass{article}
+
+\usepackage[doublespacing]{setspace}
+\usepackage[margin=1in]{geometry}
+
+\begin{document}
+
+\tableofcontents
+\newpage
+
+\begin{abstract}
+\end{abstract}
+
+\section{Introduction}
+
+Python is a strong and dynamically typed language focused on simplicity and ease of use. Since its invention in the late 1980s, Python has exploded in popularity recently, seeing rapid adoption in both academia and industry. Its flexibility, not its speed, made it user-friendly. An increased interest in scientific computing and machine learning from the Python community led to the creation of packages such as \texttt{numpy} and \texttt{pytorch}, which expose high level APIs for high performance C code, enabling rapid development of machine learning and scientific computing applications.
+
+More recently, Python's dynamic type system has been seen as a weakness rather than a strength. Runtime errors caused by type mismatches can be annoying or potentially disastrous for people deploying Python at scale. To combat this, type annotations were added directly to Python's syntax as part of Python 3.5 in 2014, and a typechecker --- \texttt{mypy} --- was developed to statically analyze the annotations. \texttt{mypy} eliminates a whole class of type errors from Python code but still allows for matrices with incompatible dimensions to be multiplied or applied together, resulting in runtime errors in machine learning or scientific computing code.
+
+In this thesis, we propose a new extension to Python's type system that allows the expression of function signatures that respect the dimensions of matrices as they are passed into the function. This contribution further strengthens the type system and makes impossible runtime errors related to the dimensionality of matrices at function application sites.
+
+\newpage
+
+\section{Background}
+
+\subsection{Python}
+
+Python was conceived by Guido van Rossum in 1989 and was officially released to the public in 1991. Python is an interpreted language. Python has a strongly and dynamically typed system. Implicit type conversions are generally not performed and variables can be assigned to values with different types during runtime. Duck typing is allowed: if a method or line of code accesses an object's attribute or method, the runtime is happy to accept \textit{any} object that has an appropriately named method or attribute. Python is mainly an object-oriented and imperative language although it now has aspects of functional languages as well.
+
+Python is well-known for its simplicity, readability, and ease-of-use. Python blocks are delimited by whitespace and its syntax closely resembles pseudocode. Large companies --- including Google, Instagram, and Dropbox --- all use Python in their systems or research due to its flexibility.
+
+Some of the ethos of Python is best captured by quotes from ``The Zen of Python'' by Tim Peters (the poem can be accessed by typing \texttt{import this} into a Python REPL). ``Simple is better than complex.'' ``There should be only one-- and preferably only one --obvious way to do it.''
+
+\subsection{\texttt{numpy} and other matrix libraries}
+
+Python is adored for the speed of iteration it unlocks, but it is not without its shortcomings. Since it is an interpreted language, it can be difficult to write performant code. Ahead of time compilation is largely useless because of the dynamic typing. Python does have a bytecode format, which can speed up interpretation, but ultimately it lags far behind other  compiled languages in speed.
+
+As more and more people began to use Python for scientific and machine learning purposes, its speed increasingly became a barrier. Methods such as JIT compilation were used to speed up execution. Additionally, the slowness led to the development of matrix libraries like \texttt{numpy} and machine learning libraries like \texttt{tensorflow} and \texttt{pytorch}. These libraries still expose high level APIs that are directly accessible from Python but call into highly optimized and parallel C code for the most expensive operations like back propagation and matrix multiplication.
+
+The advent of these libraries has allowed engineers and researchers to continue to leverage the flexibility of Python while not sacrificing the speed of their execution and model training.
+
+\subsection{\texttt{mypy} --- Python Typing}
+
+Recently, static, strong typing has made a comeback in industry. In the 2000s (citation?), companies opted for dynamic languages like Javascript and Python. But as their systems grew, the dynamicism and flexibility of the types became a footgun, threatening the stability of their systems with dreaded runtime errors. Thus, came a wave of adoption of typed languages built on top of or compiled to these languages. TypeScript became a popular choice for former Javascript shops, and while at Dropbox, Guido --- the original inventor of Python --- helped extend Python's official syntax with type annotations in version 3.5 and helped write the accompanying official typechecker, \texttt{mypy}.
+
+There are now several type checkers for Python including \texttt{pyre} from Facebook and \texttt{pytype} from Google. They are all gradual typing schemes. This means that types can optionally be added anywhere in the source files. For annotated code, the types can be checked. Elsewhere, types are assumed to be dynamic or unknown. This allows the typing to be incrementally adopted throughout a codebase, making it easy for users to opt in to checking where they want it without having to type their entire codebase. As of September 2019, Dropbox had reportedly typed 4 million lines of Python internally.
+
+\texttt{mypy} supports basic types as expected. There are constructs to declare standard types like \texttt{int}, \texttt{string}, \texttt{list}, \texttt{tuple}, etc. Classes are also automatically promoted as types, and subtyping follows the inheritance patterns of classes. For more advanced type features, optional types are implemented via Python's \texttt{None} type. There is no explicit \texttt{Some} constructor, but the return of a non-\texttt{None} is considered a \texttt{Some}. There are also sum/union types provided via \texttt{Union}. Function types can also be overloaded via an \texttt{@overload} operator, allowing functions to be invoked with multiple different arguments and corresponding return types. \texttt{mypy} even supports a limited form of dependent typing in the form of \texttt{Literal}, which specifies that a variable may only be statically assigned to a constant. This in combination with \texttt{@overload} can provide surprisingly strong function types.
+
+\subsection{Dependent and Refinement Types}
+
+Python's type system is largely a standard one: types generally constrain a class of values, but further granularity is not possible. In comparison, dependent types allow for ``stronger'' types that can further constrain the space of well-typed programs. Refinement types are one such dependent type system, allowing the user to write predicates over values of a particular class to constrain them. Liquid Haskell is one such project that seeks to add refinement types to the programming language Haskell.
+
+As an example, of the power of dependent types, and in particular, refinement types, consider the function that accepts a list and an integer for indexing into the list. In Python, the type of such a function can be seen in Figure \ref{python-type-indexing}.
+
+\begin{figure}
+\centering
+\begin{verbatim}
+A = TypeVar('A')
+def index(lst: List[A], i: int) -> A: ... \end{verbatim}
+\caption{\texttt{index} function type in Python}
+\label{python-type-indexing}
+\end{figure}
+Such a type prevents improper indexing where the second argument is not an integer or where the first argument is not a list. However, such a type declaration still allows for runtime errors to occur, like the invocation \texttt{index([], 1)}. This will raise an \texttt{IndexOutOfBounds} error since \texttt{1} exceeds the maximum index of the empty list.
+
+A stronger type --- one that is possible to declare in Liquid Haskell --- can statically prevent such malformed invocations. See Figure \ref{lh-type-indexing} for the declaration of the type. Although verbose, this type declaration prevents the misuse of the \texttt{index} function and statically raises a type error for the use \texttt{index [] 0}, which Python was unable to do.
+
+\begin{figure}
+    \centering
+    \begin{verbatim}
+{-@ measure size @-}
+{-@ size :: [a] -> {v : Int | v >= 0} @-}
+size :: [a] -> Int
+size [] = 0
+size (h : t) = 1 + size t
+
+{-@ index :: {l : [a] | true} -> {v : Int | v < size l && v >= 0} -> a @-}
+index :: [a] -> Int -> a
+index (h : t) i = if i == 0 then h else index t (i - 1)
+
+test1 = index [1, 2, 3] 0
+test2 = index [] 0 {- type error -}\end{verbatim}
+    \caption{\texttt{index} function type in Liquid Haskell}
+    \label{lh-type-indexing}
+\end{figure}
+
+
+\section{Shortcomings of Existing Type Systems}
+
+The fundamental tension between these type systems is their expressiveness and specificity versus their verbosity and ease of use.
+
+\subsection{\texttt{mypy}}
+
+\texttt{mypy} takes a relatively lightweight approach to type checking. Its simplicity follows the ethos of Python quite closely. Even with its gradual  and sipmle approach, \texttt{mypy} is still able to eliminate a whole class errors, such as invoking functions with inappropriate arguments, accessing attributes that do not exist, or neglecting to check for the ``\texttt{None}-ness'' of function returns.
+
+Still, as seen in Figure \ref{python-type-indexing}, Python still allows for rather obvious errors to occur, and this situation only becomes worse in the case of matrix types. As an example, the best \texttt{mypy} can do for matrix multiplication is seen in Figure \ref{python-type-matmul}. Here, the function type adds little information; it is unlikely that users will attempt to pass anything except \texttt{np.ndarray}. In the code contexts that \texttt{matmul} would occur, it is likely that almost \textit{all} objects are \texttt{np.ndarray}s. This type is so permissive of \texttt{np.ndarray}s that even matrices that do not have exactly two dimensions can be passed into the function without type errors being raised. The type signature does little to prevent runtime errors relating to the shape of the matrices.
+
+\begin{figure}
+    \centering
+    \begin{verbatim}
+import numpy as np
+
+def matmul(x: np.ndarray, y: np.ndarray) -> np.ndarray: ...\end{verbatim}
+    \caption{Sample \texttt{mypy} for \texttt{matmul}}
+    \label{python-type-matmul}
+\end{figure}
+
+
+\subsection{Liquid Haskell}
+
+Liquid Haskell (LH) has almost the opposite mentality of \texttt{mypy}. LH can represent extremely precise types and make very powerful static deductions about what can and cannot happen at runtime. However, this power and precision is also a downside. Declaring the proper types can be cumbersome and verbose. Furthermore, using these types in function types and then type checking them can be an expensive process. As an experiment, we declared the \texttt{np.nparray} in LH such that we could refer to the dimensions of the \texttt{np.nparray} in function signatures. The representation can be found in Figure \ref{lh-nparray}.
+
+\begin{figure}
+    \centering
+    \begin{verbatim}
+{-@ LIQUID "--exact-data-con" @-}
+{-@ LIQUID "--reflection" @-}
+{-@ LIQUID "--ple" @-}
+
+import Prelude hiding (reverse, max, drop)
+
+{-@ type Nat = {v: Int | v >= 0} @-}
+
+{-@ measure size @-}
+{-@ size :: [a] -> Nat @-}
+size :: [a] -> Int
+size [] = 0
+size (hd : tl) = 1 + size tl
+
+data Vector a = V {vLen::Int, elts::[a]} deriving (Eq)
+{-@ data Vector a = V {vLen::Nat, elts::{v : [a] | size v == vLen}} @-}
+{-@ type VectorN a N = {v : Vector a | vLen v = N} @-}
+
+{-@ type ListNE a = {v : [a] | size v > 0} @-}
+
+{-@ measure head1 @-}
+{-@ head1 :: ListNE Nat -> Nat @-}
+head1 :: [Int] -> Int
+head1 (h : t) = h
+
+{-@ measure tail1 @-}
+{-@ tail1 :: ListNE Nat -> [Nat] @-}
+tail1 :: [Int] -> [Int]
+tail1 (h : t) = t
+
+data Nparray a = N {nDims::[Int], nElts::Either a (Vector (Nparray a))}
+
+{-@ measure ords @-}
+{-@ ords :: Nparray a -> [Nat] @-}
+ords :: Nparray a -> [Int]
+ords (N nDims _nElts) = nDims
+
+{-@ measure isLeft @-}
+isLeft (Left _) = True
+isLeft (Right _) = False
+
+{-@ data Nparray a =
+ N {nDims::[Nat],
+    nElts::{v : Either a (VectorN ({x : Nparray a | (tail1 nDims) == (ords x)}) {head1 nDims})
+            | (isLeft v && size nDims = 0) || (not (isLeft v) && size nDims > 0) }} @-}
+
+{-@ type NparrayN a N = {v : Nparray a | nDims v = N} @-}\end{verbatim}
+
+    \caption{Sample implementation of the \texttt{np.ndarray} type in LH}
+    \label{lh-nparray}
+
+
+\end{figure}
+
+This is not a fun representation to work with. Admittedly, little time was spent on making this representation as compact as possible, and we do not claim to be experts in Liquid Haskell. Still, in comparison to the entire Python typing ecosystem, it is clear that bolting on a full refinement type system would be a gross violation of Python's ethos of simplicity and ease of use.
+
+\section{A Simple Type Calculus for Matrix Dimensions}
+
+
+
+\subsection{Syntax}
+
+\subsection{Examples}
+
+\subsection{Semantics}
+
+\section{Evaluation}
+
+\subsection{Practicality}
+
+\subsection{Implementation}
+
+\subsection{Shortcomings}
+
+\subsection{Future Work}
+
+\section{Conclusion}
+
+\end{document}
