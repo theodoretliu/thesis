@@ -2,6 +2,9 @@
 
 \usepackage[doublespacing]{setspace}
 \usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{syntax}
+\usepackage{enumitem}
 
 \begin{document}
 
@@ -168,16 +171,205 @@ isLeft (Right _) = False
 \end{figure}
 
 This is not a fun representation to work with. Admittedly, little time was spent on making this representation as compact as possible, and we do not claim to be experts in Liquid Haskell. Still, in comparison to the entire Python typing ecosystem, it is clear that bolting on a full refinement type system would be a gross violation of Python's ethos of simplicity and ease of use.
+\newpage
 
 \section{A Simple Type Calculus for Matrix Dimensions}
 
-
+How can we check matrix dimensions while maintaining the Python ethos? In this section, we introduce a new type as well as several operators to Python's type annotations that will enable checking of the dimensionality of matrices. The scope of the types is purposefully limited to matrices, to avoid the explosion in complexity of a more general system.
 
 \subsection{Syntax}
 
+\begin{figure}
+    \centering
+    \begin{grammar}
+        <type> ::= \ldots
+        \alt Nparray <dimension>*
+
+        <dimension> ::= Id <string>
+        \alt Int <int>
+        \alt Add (<dimension>, <dimension>)
+        \alt Mul (<dimension>, <dimension>)
+        \alt Spread <string>
+        \alt Drop (<string>, (<string> | <int>)*)
+        \alt Keep (<string>, (<string> | <int>)*)
+
+        <functionarg> ::= (<string>, <type>)
+
+        <functiontype> ::= (<functionarg>*, <type>)
+
+    \end{grammar}
+    \caption{Full syntax for matrix types}
+    \label{syntax}
+\end{figure}
+
+
+The major construct is a new \textbf{Nparray} type. This type represents a matrix of certain dimensions. It accepts a list of \textit{dimensions} to represent the concrete or abstract dimensions of the array. \textit{dimensions} have several constructs.
+\begin{itemize}
+    \item \textbf{Id} --- declares or references an abstract dimension of an array, one that can be of any non-negative length
+
+    \item \textbf{Int} --- declares a dimension that must be exactly a certain size
+
+    \item \textbf{Add} --- declares a dimensions that is the result of adding the sizes of previously declared dimensions. In Python syntax, can be represented by the \texttt{+} operator.
+
+    \item \textbf{Mul} --- declares a dimensions that is the result of multiplying the sizes of previously declared dimensions. In Python, can be represented by the \texttt{*} operator.
+
+    \item \textbf{Spread} --- declares or references an arbitrary number of dimensions that have arbitrary sizes. In Python, can be represented as \texttt{*A} where \texttt{A} could be an arbitrary variable name.
+
+    \item \textbf{Drop} --- references an arbitrary number of dimensions declared by a \textbf{Spread} operation and allows the dropping of one or more of the captured dimensions.
+
+    \item \textbf{Keep} --- references an arbitrary number of dimensions declared by a \textbf{Spread} operation and allows keeping one or more of the captured dimensions, discarding the rest.
+\end{itemize}
+
+We represent a function parameter type is a pair between a string --- the name of the parameter --- and a type. A function type is then a pair between a list of function parameter types and a return type.
+
+For arguments to these function, we restrict to \textbf{Nparray} types which have a finite and known number of dimensions, essentially disallowing \textbf{Spread} and related \textit{dimensions} constructors. This currently restricts us to checking function applications and unable to verify the body of functions that use or return the \textbf{Nparray} constructor. Despite this limitation, we can still declare the types for many \texttt{numpy} functions and check their sequential applications. In future work, we can investigate lifting such restrictions and performing checking on function bodies.
+
+See Figure \ref{syntax} for the formal syntax.
+
 \subsection{Examples}
 
+Suppose we would like to annotate the matrix multiplication function in Python with this new syntax. As a general description, matrix multiplication acts on two matrices with two dimensions each. The ``inner'' dimensions of the two matrices must be the same size. The result of the multiplication will be a matrix of two dimensions which correspond to the ``outer'' dimensions of the two original matrices. The definition along with some applications can be found, quite succinctly, in Figure \ref{np-type-matmul}. Here, we can see that the previous weaknesses in \texttt{mypy} allowing for the incorrect number of dimensions or dimensions that do not match has been caught statically.
+
+\begin{figure}
+    \centering
+    \begin{verbatim}
+def matmul(X: Nparray[A, B], Y: Nparray[B, C]) -> Nparray[A, C]: ...
+
+X: Nparray[A, B, C]
+Y: Nparray[A, B]
+Z: Nparray[B, C]
+W: Nparray[C, D]
+
+matmul(X, Y) # will fail, number of dimensions incorrect
+matmul(Y, Y) # will fail, inner dimensions don't work
+res = matmul(X, Y) # will succeed
+matmul(res, W) # will succeed, res inferred to have type Nparray[A, C]\end{verbatim}
+    \caption{Typing of matrix multplication with new types}
+    \label{np-type-matmul}
+\end{figure}
+
+As a demonstration of the \textbf{Spread} operator, we can also provide a typing annotation for one case of the \texttt{numpy.dot} operator. In this particular case, the first matrix can have an arbitrary number of dimensions. The second matrix must have exactly one dimension, which matches the last dimension of the first matrix. The return type is a matrix which has the same dimensions as the first matrix except the last dimension is removed. All this can be expressed in the type found in Figure \ref{np-type-dot}.
+
+\begin{figure}
+    \begin{verbatim}
+def dot(X: Nparray[*A, B], Y: Nparray[B]) -> Nparray[*A]: ...
+
+X: Nparray[1, 2, 3, 4]
+Y: Nparray[5]
+Z: Nparray[4]
+W: Nparray[A, A, 5]
+
+dot(X, Y) # will fail, last dimension doesn't match
+dot(X, Z) # will succeed, result is Nparray[1, 2, 3]
+dot(W, Y) # will succeed, result is Nparray[A, A]\end{verbatim}
+    \caption{Typing of \texttt{np.dot} with new types}
+    \label{np-type-dot}
+\end{figure}
+
 \subsection{Semantics}
+
+We now provide a formal semantics for type checking the types defined above. There are three stores in the context: $\Gamma, \Sigma,$ and $\Pi$. They map single dimension variables to the argument's dimensions, spread variables to a list of argument dimensions, and parameter names to the argument types, respectively.
+
+At a high level, checking falls into three steps:
+\begin{enumerate}[label=\arabic*.]
+    \item \textbf{Application checking} --- this checks a \textit{function type} against a list of \textit{arg types}. For each parameter in the function type, the type of the parameter is checked against the type of the corresponding argument. If each of the parameter types checks, then we can form the return type from the context. Represented by the relation
+    $$\Gamma, \Sigma, \Pi \vdash_{A} (param\_types, ret\_type), args : \Gamma', \Sigma', \Pi', \tau$$
+
+    \item \textbf{Parameter/argument checking} --- this checks a specific parameter type against the provided argument type. If the parameter type is an integer, the type checking is straightforward. We simply check that the argument type is an integer, literal integer, or \textbf{Nparray} with 0 dimensions (which is equivalent to a scalar). If the parameter type is an \textbf{Nparray}, after verifying that the argument type is also an \textbf{Nparray}, we need to do further checking of the dimensions of the parameter and argument type. Represented by the relation
+    $$\Gamma, \Sigma, \Pi \vdash_{P} (type, arg\_type) : \Gamma', \Sigma', \Pi'$$
+
+
+    \item \textbf{Dimension checking} --- this is the ``lowest'' level of the type checking. Here we will establish equalities and mappings between the dimensions required by the type and those provided in the arguments. For each of the dimension constructs, there are different typing rules. Let \textit{args} represent the dimensions of the argument type. Represented by the relation
+    $$\Gamma, \Sigma, \Pi \vdash_{D} (dimension, arg\_dimensions) : \Gamma', \Sigma', \Pi', rem\_dimensions$$
+
+    \begin{itemize}
+        \item \textbf{Id} \textit{i} --- if \textit{i} is not in $\Gamma$, then map $\Gamma[i \mapsto hd(args)]$ and continue type checking the remaining argument dimensions. If \textit{i} is in $\Gamma$, then prove that $\Gamma(i) = hd(args)$.
+
+        \item \textbf{Int} \textit{i} --- prove that $i = hd(args)$.
+
+        \item \textbf{Add} $(d_1, d_2)$ --- build arithmetic expressions from $d_1$ and $d_2$ resulting in $e_1$ and $e_2$. Prove that $e_1 + e_2 = hd(args)$.
+
+        \item \textbf{Mul} $(d_1, d_2)$ --- build arithmetic expressions from $d_1$ and $d_2$ resulting in $e_1$ and $e_2$. Prove that $e_1 * e_2 = hd(args)$.
+
+        \item \textbf{Spread} \textit{var} --- if \textit{var} is not in $\Sigma$, then find a split of \textit{args} into lists of types \textit{front} and \textit{back} such that $\Sigma[var \mapsto front]$ allows the remainder of type checking to succeed. If \textit{var} is in $\Sigma$, then split \textit{args} into \textit{front} and \textit{back} where $len(front) = len(\Sigma(var))$. For each element of \textit{front} and $\Sigma(var)$, prove that they are equal.
+
+        \item \textbf{Drop} (\textit{var}, \textit{indices}) --- require that $var$ is in $\Sigma$. Convert \textit{indices} to a list of integers and drop those indices from $\Sigma(var)$. The indices can be pulled from $\Pi$ since arguments to the functions can be used to drop dimensions
+
+        \item \textbf{Keep} (\textit{var}, \textit{indices}) --- require that $var$ is in $\Sigma$. Convert \textit{indices} to a list of integers and keep those indices in $\Sigma(var)$.
+    \end{itemize}
+\end{enumerate}
+
+\begin{figure}
+    $$\textsc{CheckAppEmpty}~\frac{\Gamma, \Sigma, \Pi \vdash_R ret : \tau}{\Gamma, \Sigma, \Pi \vdash_A ([], ret), [] : \Gamma, \Sigma, \Pi, \tau}$$
+
+    $$\textsc{CheckApp}~\frac{\Gamma, \Sigma, \Pi[p \mapsto h_2] \vdash_P h_1, h_2 : \Gamma', \Sigma', \Pi' \qquad \Gamma', \Sigma', \Pi' \vdash_A (t_1, ret), t_2 : \Gamma'', \Sigma'', \Pi'', \tau}{\Gamma, \Sigma, \Pi \vdash_A ((p, h_1) :: t_1, ret), h_2 :: t_2 : \Gamma'', \Sigma'', \Pi'', \tau}$$
+
+    $$\textsc{CheckParamScalarArrArr}~\frac{}{\Gamma, \Sigma, \Pi \vdash_P (\textbf{Nparray}~[], \textbf{Nparray}~[]) : \Gamma, \Sigma, \Pi}$$
+
+    $$\textsc{CheckParamScalarArrInt}~\frac{}{\Gamma, \Sigma, \Pi \vdash_P (\textbf{Nparray}~[], \textbf{Int}) : \Gamma, \Sigma, \Pi}$$
+
+    $$\textsc{CheckParamScalarArrLitInt}~\frac{}{\Gamma, \Sigma, \Pi \vdash_P (\textbf{Nparray}~[], \textbf{LiteralInt}~i) : \Gamma, \Sigma, \Pi}$$
+
+    $$\textsc{CheckParamScalarIntArr}~\frac{}{\Gamma, \Sigma, \Pi \vdash_P (\textbf{Int}, \textbf{Nparray}~[]) : \Gamma, \Sigma, \Pi}$$
+
+    $$\textsc{CheckParamScalarLitInt}~\frac{i = j}{\Gamma, \Sigma, \Pi \vdash_P (\textbf{LiteralInt}~i, \textbf{LiteralInt}~j) : \Gamma, \Sigma, \Pi}$$
+
+    $$\textsc{CheckParamArray}~\frac{\begin{gathered}\Gamma, \Sigma, \Pi \vdash_D h, \ell_2 : \Gamma', \Sigma', \Pi', rem \\ \Gamma', \Sigma', \Pi' \vdash_P (\textbf{Nparray}~\ell_1, \textbf{Nparray}~rem) : \Gamma'', \Sigma'', \Pi''\end{gathered}}{\Gamma, \Sigma, \Pi \vdash_P (\textbf{Nparray}~h :: \ell_1, \textbf{Nparray}~\ell_2) : \Gamma'', \Sigma'', \Pi''}$$
+
+    $$\textsc{CheckDimIdNotFound}~\frac{n \not\in \Gamma}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Id}~n, h :: t) : \Gamma[n \mapsto t], \Sigma, \Pi, t}$$
+
+    $$\textsc{CheckDimIdFound}~\frac{n \in \Gamma \qquad \Gamma(n) = h}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Id}~n, h :: t) : \Gamma, \Sigma, \Pi, t}$$
+
+    $$\textsc{CheckDimInt}~\frac{h = i}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Int}~i, h :: t) : \Gamma, \Sigma, \Pi, t}$$
+
+    $$\textsc{CheckDimAdd}~\frac{e_1 \qquad e_2 \qquad h = e_1 + e_2}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Add}~(d_1, d_2), h :: t) : \Gamma, \Sigma, \Pi, t}$$
+
+    $$\textsc{CheckDimMul}~\frac{e_1 \qquad e_2 \qquad h = e_1 \cdot e_2}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Mul}~(d_1, d_2), h :: t) : \Gamma, \Sigma, \Pi, t}$$
+
+    \caption{Formal semantics for type checking (part 1)}
+    \label{semantics1}
+\end{figure}
+
+\begin{figure}
+    $$\textsc{CheckDimSpreadNotFound}~\frac{n \not\in \Sigma}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Spread}~n, front @ back) : \Gamma, \Sigma[n \mapsto front], \Pi, back}$$
+
+    $$\textsc{CheckDimSpreadFound}~\frac{n \in \Sigma \qquad len(front) = len(\Sigma(n)) \qquad front = \Sigma(n)}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Spread}~n, front @ back) : \Gamma, \Sigma, \Pi, back}$$
+
+    $$\textsc{CheckDimDrop}~\frac{n \in \Sigma \qquad \Pi \vdash_L \ell \rightsquigarrow \ell' \qquad drop(\Sigma(n), \ell') = front}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Drop}~(n, \ell), front @ back) : \Gamma, \Sigma, \Pi, back}$$
+
+    $$\textsc{CheckDimKeep}~\frac{n \in \Sigma \qquad \Pi \vdash_L \ell \rightsquigarrow \ell' \qquad keep(\Sigma(n), \ell') = front}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Keep}~(n, \ell), front @ back) : \Gamma, \Sigma, \Pi, back}$$
+
+    $$\textsc{RetInt}~\frac{}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Int} : \textbf{Int}}$$
+
+    $$\textsc{RetLiteralInt}~\frac{}{\Gamma, \Sigma, \Pi \vdash_R \textbf{LiteralInt}~i : \textbf{LiteralInt}~i}$$
+
+    $$\textsc{RetNparrayEmpty}~\frac{}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~[] : \textbf{Nparray}~[]}$$
+
+    $$\textsc{RetNparrayFullId}~\frac{i \in \Gamma \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t : \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Id}~i :: t) : \textbf{Nparray}~(\textbf{Id}~i)}$$
+
+    $$\textsc{RetNparrayFullInt}~\frac{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t : \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Int}~i :: t) : \textbf{Nparray}~()\textbf{Int}~i :: t')}$$
+
+    $$\textsc{RetNparrayFullAdd}~\frac{\cdots}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Add}~(d_1, d_2) :: t) : \cdots}$$
+
+    $$\textsc{RetNparrayFullMul}~\frac{\cdots}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Mul}~(d_1, d_2) :: t) : \cdots}$$
+
+    $$\textsc{RetNparrayFullSpread}~\frac{n \in \Sigma \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Spread}~n :: t) : \Sigma(n) @ t'}$$
+
+    $$\textsc{RetNparrayFullDrop}~\frac{n \in \Sigma \qquad \Gamma \vdash_L \ell \rightsquigarrow \ell' \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Drop}~(n, \ell) :: t) : drop(\Sigma(n), \ell') @ t'}$$
+
+    $$\textsc{RetNparrayFullKeep}~\frac{n \in \Sigma \qquad \Gamma \vdash_L \ell \rightsquigarrow \ell' \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Keep}~(n, \ell) :: t) : keep(\Sigma(n), \ell') @ t'}$$
+
+    $$\textsc{TransformListEmpty}~\frac{}{\Gamma \vdash_L [] \rightsquigarrow \ell}$$
+
+    $$\textsc{TransformListInt}~\frac{\Gamma \vdash_L \ell \rightsquigarrow \ell'}{\Gamma \vdash_L i :: \ell \rightsquigarrow i :: \ell'}~i \in \mathbb Z$$
+
+    $$\textsc{TransformListId}~\frac{s \in \Gamma \qquad \Gamma(n) = \textbf{LiteralInt}~i \qquad \Gamma \vdash_L \ell \rightsquigarrow \ell'}{\Gamma \vdash_L s :: \ell \rightsquigarrow i :: \ell'}$$
+
+
+
+\end{figure}
+
+
 
 \section{Evaluation}
 
