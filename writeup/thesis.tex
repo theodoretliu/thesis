@@ -298,6 +298,7 @@ At a high level, checking falls into three steps:
         \item \textbf{Keep} (\textit{var}, \textit{indices}) --- require that $var$ is in $\Sigma$. Convert \textit{indices} to a list of integers and keep those indices in $\Sigma(var)$.
     \end{itemize}
 \end{enumerate}
+The formalized semantics for the type checking are provided in Figure \ref{semantics1} and continue in Figure \ref{semantics2}.
 
 \begin{figure}
     $$\textsc{CheckAppEmpty}~\frac{\Gamma, \Sigma, \Pi \vdash_R ret : \tau}{\Gamma, \Sigma, \Pi \vdash_A ([], ret), [] : \Gamma, \Sigma, \Pi, \tau}$$
@@ -316,17 +317,25 @@ At a high level, checking falls into three steps:
 
     $$\textsc{CheckParamArray}~\frac{\begin{gathered}\Gamma, \Sigma, \Pi \vdash_D h, \ell_2 : \Gamma', \Sigma', \Pi', rem \\ \Gamma', \Sigma', \Pi' \vdash_P (\textbf{Nparray}~\ell_1, \textbf{Nparray}~rem) : \Gamma'', \Sigma'', \Pi''\end{gathered}}{\Gamma, \Sigma, \Pi \vdash_P (\textbf{Nparray}~h :: \ell_1, \textbf{Nparray}~\ell_2) : \Gamma'', \Sigma'', \Pi''}$$
 
-    $$\textsc{CheckDimIdNotFound}~\frac{n \not\in \Gamma}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Id}~n, h :: t) : \Gamma[n \mapsto t], \Sigma, \Pi, t}$$
+    $$\textsc{CheckDimIdNotFound}~\frac{n \not\in \Gamma}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Id}~n, h :: t) : \Gamma[n \mapsto h], \Sigma, \Pi, t}$$
 
     $$\textsc{CheckDimIdFound}~\frac{n \in \Gamma \qquad \Gamma(n) = h}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Id}~n, h :: t) : \Gamma, \Sigma, \Pi, t}$$
 
+    $$\textsc{CheckDimIdFoundInParams}~\frac{n \in \Pi \qquad \Pi(n) = \textbf{LiteralInt}~i \qquad i = h}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Id}~n, h :: t) : \Gamma, \Sigma, \Pi, t}$$
+
     $$\textsc{CheckDimInt}~\frac{h = i}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Int}~i, h :: t) : \Gamma, \Sigma, \Pi, t}$$
 
-    $$\textsc{CheckDimAdd}~\frac{e_1 \qquad e_2 \qquad h = e_1 + e_2}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Add}~(d_1, d_2), h :: t) : \Gamma, \Sigma, \Pi, t}$$
+    $$\textsc{CheckDimAdd}~\frac{d_1 \rightarrow e_1 \qquad d_2 \rightarrow e_2 \qquad h = e_1 + e_2}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Add}~(d_1, d_2), h :: t) : \Gamma, \Sigma, \Pi, t}$$
 
-    $$\textsc{CheckDimMul}~\frac{e_1 \qquad e_2 \qquad h = e_1 \cdot e_2}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Mul}~(d_1, d_2), h :: t) : \Gamma, \Sigma, \Pi, t}$$
+    $$\textsc{CheckDimMul}~\frac{d_1 \rightarrow e_1 \qquad d_2 \rightarrow e_2 \qquad h = e_1 \cdot e_2}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Mul}~(d_1, d_2), h :: t) : \Gamma, \Sigma, \Pi, t}$$
 
-    \caption{Formal semantics for type checking (part 1)}
+    $$\textsc{TransformId}~\frac{d \in \Gamma}{\Gamma \vdash_T d \rightarrow \Gamma(d)}$$
+
+    $$\textsc{TransformAdd}~\frac{\Gamma \vdash_T d_1 \rightarrow e_1 \qquad \Gamma \vdash_T d_2 \rightarrow e_2}{\Gamma \vdash_T \textbf{Add}~(d_1, d_2) \rightarrow e_1 + e_2}$$
+
+    $$\textsc{TransformMul}~\frac{\Gamma \vdash_T d_1 \rightarrow e_1 \qquad \Gamma \vdash_T d_2 \rightarrow e_2}{\Gamma \vdash_T \textbf{Mul}~(d_1, d_2) \rightarrow e_1 + e_2}$$
+
+    \caption{Formal semantics for type checking}
     \label{semantics1}
 \end{figure}
 
@@ -349,15 +358,15 @@ At a high level, checking falls into three steps:
 
     $$\textsc{RetNparrayFullInt}~\frac{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t : \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Int}~i :: t) : \textbf{Nparray}~()\textbf{Int}~i :: t')}$$
 
-    $$\textsc{RetNparrayFullAdd}~\frac{\cdots}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Add}~(d_1, d_2) :: t) : \cdots}$$
+    $$\textsc{RetNparrayFullAdd}~\frac{\Gamma \vdash_T d_1 \rightarrow e_1 \qquad \Gamma \vdash_T d_2 \rightarrow e_2 \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t : \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Add}~(d_1, d_2) :: t) : \textbf{Nparray}~(\textbf{Add}~(e_1, e_2) :: t')}$$
 
-    $$\textsc{RetNparrayFullMul}~\frac{\cdots}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Mul}~(d_1, d_2) :: t) : \cdots}$$
+    $$\textsc{RetNparrayFullMul}~\frac{\Gamma \vdash_T d_1 \rightarrow e_1 \qquad \Gamma \vdash_T d_2 \rightarrow e_2 \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t : \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Mul}~(d_1, d_2) :: t) : \textbf{Nparray}~(\textbf{Mul}~(e_1, e_2) :: t')}$$
 
-    $$\textsc{RetNparrayFullSpread}~\frac{n \in \Sigma \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Spread}~n :: t) : \Sigma(n) @ t'}$$
+    $$\textsc{RetNparrayFullSpread}~\frac{n \in \Sigma \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t : \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Spread}~n :: t) : \Sigma(n) @ t'}$$
 
-    $$\textsc{RetNparrayFullDrop}~\frac{n \in \Sigma \qquad \Gamma \vdash_L \ell \rightsquigarrow \ell' \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Drop}~(n, \ell) :: t) : drop(\Sigma(n), \ell') @ t'}$$
+    $$\textsc{RetNparrayFullDrop}~\frac{n \in \Sigma \qquad \Gamma \vdash_L \ell \rightsquigarrow \ell' \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t : \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Drop}~(n, \ell) :: t) : drop(\Sigma(n), \ell') @ t'}$$
 
-    $$\textsc{RetNparrayFullKeep}~\frac{n \in \Sigma \qquad \Gamma \vdash_L \ell \rightsquigarrow \ell' \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Keep}~(n, \ell) :: t) : keep(\Sigma(n), \ell') @ t'}$$
+    $$\textsc{RetNparrayFullKeep}~\frac{n \in \Sigma \qquad \Gamma \vdash_L \ell \rightsquigarrow \ell' \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~t : \textbf{Nparray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Nparray}~(\textbf{Keep}~(n, \ell) :: t) : keep(\Sigma(n), \ell') @ t'}$$
 
     $$\textsc{TransformListEmpty}~\frac{}{\Gamma \vdash_L [] \rightsquigarrow \ell}$$
 
@@ -365,11 +374,10 @@ At a high level, checking falls into three steps:
 
     $$\textsc{TransformListId}~\frac{s \in \Gamma \qquad \Gamma(n) = \textbf{LiteralInt}~i \qquad \Gamma \vdash_L \ell \rightsquigarrow \ell'}{\Gamma \vdash_L s :: \ell \rightsquigarrow i :: \ell'}$$
 
-
+    \caption{Formal semantics for type checking (continued)}
+    \label{semantics2}
 
 \end{figure}
-
-
 
 \section{Evaluation}
 
