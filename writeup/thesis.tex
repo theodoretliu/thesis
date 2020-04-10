@@ -56,13 +56,13 @@ I would like to thank my parents and my sister, who have been there for me since
 
 \chapter*{Abstract}
 
-Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance linear algebra, multidimensional array, and machine learning libraries. Initially designed as a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types are do not provide enough information to avoid many runtime errors when typing multidimensional array operations. In this thesis, we develop a type system and extension to Python's type system that strengthens the static guarantees of the type checker over multidimensional array operations while not sacrificing the simplicity and ease of use that is core to Python's spirit.
+Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance linear algebra, multidimensional array, and machine learning libraries. Initially designed as a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types are do not provide enough information to avoid many runtime errors when typing multidimensional array operations. In this thesis, we develop a type system and extension to Python's type system that strengthens the static guarantees of the type checker over multidimensional array operations while preserving the simplicity and ease of use that is core to Python's spirit.
 
 \tableofcontents
 
 \chapter{Introduction}
 
-Python is a strong and dynamically typed language focused on simplicity and ease of use. Since its invention in the late 1980s, Python has exploded in popularity, seeing rapid adoption in both academia and industry for its flexibility and approachable syntax. An increased interest in scientific computing and machine learning from the Python community led to the creation of packages such as \texttt{numpy} and \texttt{pytorch}, which expose high level APIs for high performance machine code, circumventing Python's slow execution and enabling rapid development of machine learning and scientific computing applications.
+Python is a strongly and dynamically typed language focused on simplicity and ease of use. Since its invention in the late 1980s, Python has exploded in popularity, seeing rapid adoption in both academia and industry for its flexibility and approachable syntax. An increased interest in scientific computing and machine learning from the Python community led to the creation of packages such as \texttt{numpy} and \texttt{pytorch}, which expose high level APIs for high performance machine code, circumventing Python's slow execution and enabling rapid development of machine learning and scientific computing applications.
 
 More recently, Python's dynamic type system has been seen as a weakness rather than a strength. Runtime errors caused by type mismatches can be annoying or potentially disastrous for people deploying Python at scale. To combat this, type annotations were added directly to Python's syntax, and a reference typechecker --- \texttt{mypy} --- was developed to statically analyze the annotations. \texttt{mypy} eliminates a whole class of type errors from Python code but is not powerful enough to reject multidimensional arrays with incompatible dimensions from being multiplied or applied together, resulting in runtime errors in machine learning or scientific computing code.
 
@@ -97,7 +97,7 @@ A \textbf{weak type system} attempts to perform certain type conversions implici
 
 \item \textbf{Gradual Typing} --- In a gradually typed language, type annotations are optional. Wherever type annotations are present, type checking is performed. For unannotated code, type checking is either elided or a generic type of \textit{any} is inferred \cite{PythonDropbox}. Gradual type systems allow the incremental adoption of typing in a codebase. Instead of having to type every line of code in a codebase at once, small parts can be annotated and statically checked while the remaining code falls back to runtime checks. Thus, gradual typing achieves a balance between static and dynamic typing. TypeScript and Python with \texttt{mypy} are languages with gradual typing.
 
-\item \textbf{Dependent and Refinement Types} --- Dependent type systems extend traditional type systems by allowing values from the language be a part of the type. This allows further specificity of the sets of values that can inhabit a type. As an example, the traditional type \texttt{List int} represents the set of all lists of any length that contain only integers. An analagous dependent type might be \texttt{List int 4}, denoting the set of integer lists which have exactly length 4. We can take this dependent type further with a function
+\item \textbf{Dependent and Refinement Types} --- Dependent type systems extend traditional type systems by allowing values from the language be a part of a type. This allows further specificity of the sets of values that can inhabit a type. As an example, the traditional type \texttt{List int} represents the set of all lists of any length that contain only integers. An analagous dependent type might be \texttt{List int 4}, denoting the set of integer lists which have exactly length 4. We can take this dependent type further with a function
 
 \begin{singlespace*}\begin{center}
     \texttt{def f(x: int) -> List int x: ...}
@@ -172,9 +172,9 @@ Python is well-known for its simplicity, readability, and ease-of-use, and these
 \end{singlespace*}
 These aphorisms are so important that they are included in every Python REPL; you can access them via \texttt{import this}.
 
-Python's design carefully follows the above mantra. Python blocks are delimited by whitespace and its syntax closely resembles pseudocode. Variable types are never explicitly declared, memory is automatically managed and garbage collected, returning different types from functions is allowed. Python's goal is to allow a programmer to sanely accomplish whatever they want with almost no friction. Large companies and academics --- including Google, Instagram, and Dropbox --- all use Python in their systems or research \cite{python-quotes}.
+Python's design carefully follows the above mantra. Blocks are delimited by whitespace, and its syntax closely resembles pseudocode. Variable types are never explicitly declared, memory is automatically managed and garbage collected, and returning different types from functions is allowed. Python's goal is to allow a programmer to sanely accomplish whatever they want with almost no friction. Large companies and academics --- including Google, Instagram, and Dropbox --- all use Python in their systems or research \cite{python-quotes}.
 
-\subsection{\texttt{numpy} and other numerical libraries}
+\subsection{\texttt{numpy} and Other Numerical Libraries}
 
 Python unlocks a much faster speed of iteration, but it has its shortcomings. Since it is an interpreted language, it can be difficult to write performant code. Typically, Python is several orders of magnitude slower than other compiled languages.
 
@@ -253,9 +253,9 @@ x = 3 - 2 # will not type check\end{verbatim}
 
 \end{itemize}
 
-From above, we can see that Python's type system is fairly straightforward. Besides the \texttt{Literal} constructor, Python features no dependent types. This is seemingly a conscious choice; Python invokes its own ethos as described in ``The Zen of Python'' and opts for a type system that is easy to check and declare rather than one that provides the most powerful guarantees.
+From above, we can see that Python's type system is fairly straightforward. Besides the \texttt{Literal} constructor, Python features no dependent types. Python invokes its own ethos as described in ``The Zen of Python'' and opts for a type system that is easy to check and declare rather than one that provides the most powerful guarantees.
 
-\section{Linear Algebra Library Objects and Operations}
+\section{Numerical Libraries' Objects and Operations}
 
 \subsection{Multidimensional Arrays}
 \label{multidimensional}
@@ -305,7 +305,7 @@ Although this signature will prevent nonsensical calls to \texttt{np.dot} with \
 
 \subsection{Multidimensional Arrays in Liquid Haskell}
 
-As an experiment in the expressivity of Liquid Haskell and the practicality of refinement types, we attempt to express a strict type for multidimensional arrays. The resulting code can be found in Figure \ref{lh-nparray}. There are a couple things to note here. First, this representation has the desired property that the shape of the multidimensional array is a part of the matrix type. Refinement and dependent types have lifted the shape value into the type, which will allow us to refer to the shape as part of our type signatures for array operations. Second, the representation is \textit{long}. LH's power and type expressivity have allowed us to express this complicated type, but there is an explosion in verbosity and complexity as a result.
+As an experiment with the expressivity of Liquid Haskell and the practicality of refinement types, we attempt to express a strict type for multidimensional arrays. The resulting code can be found in Figure \ref{lh-nparray}. There are a couple things to note here. First, this representation has the desired property that the shape of the multidimensional array is a part of the matrix type. Refinement and dependent types have lifted the shape value into the type, which will allow us to refer to the shape as part of our type signatures for array operations. Second, the representation is \textit{long}. LH's power and type expressivity have allowed us to express this complicated type, but there is an explosion in verbosity and complexity as a result.
 
 \begin{figure}
     \centering
@@ -615,7 +615,7 @@ broadcast(x, a) # will not type check\end{verbatim}
 \end{singlespace*}
 Our ``hard-coded'' dimension constructor for broadcasting makes this signature easy to declare. We can see that our type checker is able to determine exactly the cases that \textit{should} broadcast and rejects the ones that do not. However, we still do not have a proper construct for the \textit{return} type of broadcast. None of the constructors we have created can represent the return type of a broadcast.
 
-\subsection{Generalized dot product}
+\subsection{Generalized Dot Product}
 Recall that the generalized dot product has different behaviors depending on the shapes of the arguments it is provided. We can use the \texttt{overload} construct in \texttt{mypy} to declare the different function types one by one. For vector dot products:
 
 \begin{singlespace*}
@@ -633,7 +633,7 @@ dot(y, z) # will not type check
 dot(z, a) # will not type check
 \end{verbatim}
 \end{singlespace*}
-With our new types, we can perfectly declare the type of this function. There is some ambiguity in the return type; we could also have returned type \texttt{Ndarray []}, a multidimensional array with no dimensions, which is also an integer scalar. For matrix multiplication:
+With our new types, we can perfectly declare the type of this function. There is some ambiguity in the return type; we could also have returned type \texttt{Ndarray[]}, a multidimensional array with no dimensions, which is also an integer scalar. For matrix multiplication:
 
 \begin{singlespace*}
 \begin{verbatim}
@@ -752,15 +752,15 @@ y: Ndarray[2]
 a: Ndarray[2, 4]
 b: Ndarray[2, A]
 
-concatenate(x, y) # type checks, Ndarray [3]
-concatenate(x, x) # type checks, Ndarray [2]
+concatenate(x, y) # type checks, Ndarray[3]
+concatenate(x, x) # type checks, Ndarray[2]
 
-concatenate(a, b, 1) # type checks, Ndarray [2, A + 4]
+concatenate(a, b, 1) # type checks, Ndarray[2, A + 4]
 concatenate(x, a) # fails\end{verbatim}
 \end{singlespace*}
 The inability to completely capture all possible cases of concatenation is a cause for concern.
 
-\subsection{Model training}
+\subsection{Model Training}
 Model training can be annotated well:
 \begin{singlespace*}
     \begin{verbatim}
@@ -778,36 +778,39 @@ fit(data2, labels2) # type checks\end{verbatim}
 \end{singlespace*}
 The type annotations capture the variation we might have in our dataset and training label shapes.
 
-\subsection{More types}
+\subsection{More Types}
 
 As a further test of the types' flexibility, we can declare the types of other interesting functions.
 
-\paragraph{$k$-means clustering}
-Given a set of $N$ $d$-dimensional points, return the $k$ centroids.
+\begin{itemize}
+    \item \textbf{$k$-means clustering} --- Given a set of $N$ $d$-dimensional points, return the $k$ centroids.
 
 \begin{singlespace*}
     \begin{verbatim}
 def kmeans(X: Ndarray[N, d], k: int) -> Ndarray[k, d]: ... \end{verbatim}
 \end{singlespace*}
 
-\paragraph{Singular value decomposition}
-Given a matrix $M$ of size $m \times n$, decompose it into $U\Sigma V^*$.
+\item \textbf{Singular value decomposition} --- Given a matrix $M$ of size $m \times n$, decompose it into $U\Sigma V^*$.
+
 \begin{singlespace*}
     \begin{verbatim}
 def svd(M: Ndarray[m, n]) -> Tuple[Ndarray[m, m],
                                    Ndarray[m, n],
                                    Ndarray[n, n]]: ...\end{verbatim}
 \end{singlespace*}
+\end{itemize}
 
 \section{Strengths}
 
 These type annotations excel in situations where the function types will rely on a finite number of dimensions and use the dimension variables or dimension integers to express equality between the arguments' dimensions. In the examples in the previous section, the annotations seemed to capture the complete behavior of a function best when it did not excessively or esoterically use the \textbf{Spread} operator.
 
+The annotations are also extremely intuitive to read and declare for programmers who are familiar with the shape attribute of multidimensional arrays.
+
 The use of these type annotations in machine learning and linear algebra algorithms is particularly promising. In machine learning, the maximum number of dimensions in the data array is typically small. As seen in the model training example, the type annotations can assure that the number of data points is equal to the number of data labels. As an example, the $k$-means and SVD algorithms were expressed succinctly and accurately with the new type annotations.
 
 \section{Future Work and Remaining Improvements}
 
-We now review the areas for improvement type system, starting with the most problematic, and propose future steps to mitigate the issue.
+We now review the areas for improvement in the type system, starting with the most problematic, and propose future steps to mitigate the issue.
 
 \subsection{\texttt{mypy} Integration}
 
@@ -860,7 +863,7 @@ One of the original goals of this thesis was for the new type system to align wi
 
 As demonstrated in the examples in Section \ref{type-examples}, the current type annotations are unable to support the zeros and concatenate functions fully. If we extend the annotations to support the full functions, we can reason more powerfully about the dimensions of arrays in our system.
 
-That being said, it might be the case that people rarely make zero arrays of more than five or so dimensions, and people rarely concatenate arrays of more than four dimensions. If that were true, then we could actually get away with simply overloading the function a few times to capture all the practical cases that people use. There is precedent for this in \texttt{mypy}. In the typing stubs for the \texttt{zip} function in Python --- which can actually take an arbitrary number of arguments --- the function is simply overloaded six times to support receiving one through six arguments.
+That being said, it might be the case that people rarely make zero arrays of more than five or so dimensions, and people rarely concatenate arrays of more than four dimensions. If that were true, then we could actually get away with simply overloading the function a few times to capture all the practical cases that people use. There is precedent for this in \texttt{mypy}. In the typing stubs for the \texttt{zip} function in Python --- which can actually take an arbitrary number of arguments --- the function is simply overloaded six times to support receiving one through six arguments \cite{typeshed}.
 
 \subsection{Building Primitives for Broadcast Outputs}
 
