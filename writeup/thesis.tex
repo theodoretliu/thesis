@@ -48,15 +48,15 @@
 
 \chapter*{Acknowledgements}
 
-I would like to thank Professor Nada Amin for advising and encouraging me throughout the project. I would additionally like to thank Professors Steve Chong and Eddie Kohler for their advising in exceptional circumstances.
+I would like to thank Professor Nada Amin for advising and encouraging me throughout the project. I would additionally like to thank Professors Stephen Chong and Eddie Kohler for their advising in exceptional circumstances.
 
-I would like thank all my friends --- Richard, Dan, Nenya, Jason, Joanna, everyone who has been with me throughout my Harvard experience --- for being the best, most supportive, and amazing friends I could ever ask for.
+I would like to thank all my friends --- Richard, Dan, Nenya, Jason, Joanna, everyone who has been with me throughout my Harvard experience --- for being the best, most supportive, and amazing friends I could ever ask for.
 
 I would like to thank my parents and my sister, who have been there for me since the very beginning.
 
 \chapter*{Abstract}
 
-Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance linear algebra, multidimensional array, and machine learning libraries. Initially designed as a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types are do not provide enough information to avoid many runtime errors when typing multidimensional array operations. In this thesis, we develop a type system and extension to Python's type system that strengthens the static guarantees of the type checker over multidimensional array operations while preserving the simplicity and ease of use that is core to Python's spirit.
+Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance linear algebra, multidimensional array, and machine learning libraries. Initially designed as a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types do not provide enough information to avoid many runtime errors when typing multidimensional array operations. In this thesis, we develop a type system and extension to Python's type system that strengthens the static guarantees of the type checker over multidimensional array operations while preserving the simplicity and ease of use that is core to Python's spirit.
 
 \tableofcontents
 
@@ -377,7 +377,7 @@ Work has been done for the more general case of multidimensional arrays. In \cit
 
 \cite{Chen2017TypesafeAF} embeds a multidimensional array type in the Scala type system, leveraging Scala's built-in heterogenous list (HList) type. Like Rink, Chen defines and implements several operations over the shape types, including inserting a new dimension and contracting all dimensions that are equal. Unlike Rink, Chen's dimensions are abstract and do not require concrete integers. Also, Chen's dimensions allow for an arbitrary number of dimensions by having the shape be a generic subtype of an HList. Overall, Chen's embedding most closely matches the embedding we desire in Python's type system. It still lacks support for the atypical broadcast operator, and arithmetic between the dimensions of the arrays does not seem to be allowed. It is not possible to specify exact integers for the dimensions of an array if desired. Also, it appears that the use of user-provided integers is not possible in the embedding.
 
-\chapter{A Type Calculus for Multidimensional Arrays}
+\chapter{A Type System for Multidimensional Arrays}
 
 Having seen the semantics of multidimensional arrays and various embeddings in other languages, how can we check the dimensions of arrays within Python while maintaining its ethos? The goal is to increase the strength of the type checker while not exploding the complexity of the syntax. We should be able to annotate many, if not all, of the functions previously described in Section \ref{ndarray-operations}. With these goals in mind, we present a new syntax and extension to Python's existing type system for declaring and checking multidimensional array functions and values.
 
