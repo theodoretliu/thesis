@@ -218,12 +218,14 @@ From above, we can see that Python's type system is fairly straightforward. Besi
 \section{Matrix library objects and operations}
 
 \subsection{Multidimensional arrays}
+\label{multidimensional}
 
 The fundamental object for storing data in matrix and machine learning libraries like \texttt{numpy} and \texttt{pytorch} is the \textbf{multidimensional} or \textbf{N-dimensional array}. In linear algebra, the fundamental elements are vectors and matrices. Vectors are arrays of numbers. Matrices are arrays of arrays of numbers. \texttt{numpy} generalizes these constructs to an arbitrary number of ``arrays of arrays of arrays of ... of numbers.''. With this generalization, vectors are multidimensional arrays with one dimension, and matrices are multidimensional arrays with two dimensions. Solo scalars can even be represented by multidimensional arrays with zero dimensions. The number of dimensions and the size of each dimension the array is represented by a tuple of integers which is generally referred to as its \textbf{shape} \cite{ndarray}.
 
 To see why this representation is useful, we look at some examples. A vector of length 10 is represented by a shape of $(10,)$. A $2 \times 2$ matrix is represented by a shape of $(2, 2)$. A dataset of 1000 $256 \times 256$ resolution images, each with distinct RGB channels, could be represented by the shape $(1000, 3, 256, 256)$. The scalar $1$ is also a multidimensional array with shape $(,)$ (the empty tuple).
 
 \subsection{Operations on Multidimensional Arrays}
+\label{ndarray-operations}
 
 \texttt{numpy} and related libraries define many operations over these multidimensional arrays. We cover some of the more useful and common operations here \cite{numpy-manual}.
 
@@ -271,11 +273,9 @@ As an experiment in the expressivity of Liquid Haskell and the practicality of r
 {-@ LIQUID "--exact-data-con" @-}
 {-@ LIQUID "--reflection" @-}
 {-@ LIQUID "--ple" @-}
-
 import Prelude hiding (reverse, max, drop)
 
 {-@ type Nat = {v: Int | v >= 0} @-}
-
 {-@ measure size @-}
 {-@ size :: [a] -> Nat @-}
 size :: [a] -> Int
@@ -292,7 +292,6 @@ data Vector a = V {vLen::Int, elts::[a]} deriving (Eq)
 {-@ head1 :: ListNE Nat -> Nat @-}
 head1 :: [Int] -> Int
 head1 (h : t) = h
-
 {-@ measure tail1 @-}
 {-@ tail1 :: ListNE Nat -> [Nat] @-}
 tail1 :: [Int] -> [Int]
@@ -322,13 +321,27 @@ isLeft (Right _) = False
 
 \section{Related Work}
 
+As machine learning and linear algebra routines have become more and more popular, there has been an increased interest in statically typing matrix and multidimensional arrays.
 
+\subsection{Vector and Matrix Embeddings}
 
-\section{A Simple Type Calculus for Matrix Dimensions}
+Eaton makes similar observations about the benefit of highly optimized matrix library code, generally available via the BLAS interface. Using Haskell's type system, Eaton is able to embed the dimensions of vectors and matrices directly into their types. Thus, he is able to get type safe matrix operations. Eaton observes that the Haskell implementation outperforms Octave (another linear algebra programming language) and achieves performance on par with Matlab. However, he laments that the Haskell compiler can generate cryptic errors at locations far removed from the actual dimensionality bugs, making it less ergonomic than desirable \cite{Eaton2006StaticallyTL}. Other packages available on Haskell, such as HMatrix, also provided matrix types with shapes \cite{hmatrix}.
 
-How can we check matrix dimensions while maintaining the Python ethos? In this section, we introduce a new type as well as several operators to Python's type annotations that will enable checking of the dimensionality of matrices. The scope of the types is purposefully limited to matrices, to avoid the explosion in complexity of a more general system.
+Abe and Sumii achieve similar matrix and vector bindings for OCaml. What is incredible about their bindings is that they use the standard OCaml system to embed the dimension of matrices into their types. OCaml does \textit{not} have any form of dependent typing, so such an embeding is a remarkable achievement \cite{Abe2015ASA}.
 
-\subsection{Syntax}
+Eaton and Abe and Sumii's results are interesting but fall short of the general goal of typing multidimensional arrays since their methods only work for vectors and matrices.
+
+\subsection{Multidimensional Array Embeddings}
+
+Work has been done for the more general case of multidimensional arrays beyond just matrices. In Rink 2018, the author represents the type of multidimensional arrays as lists of integers --- analogous to the shape discussed in Section \ref{multidimensional}. Rink also identifies common operations between the shapes of multidimensional arrays. He includes swapping dimensions, dropping dimensions if they are equal, and concatenating the shapes of two arrays. However, the paper requires that the shapes contain only integers --- no abstract values --- and the arguments to the operators he declares must also be integers. Furthermore, there is no concept of array types which accept an arbitrary number of dimensions \cite{Rink2018ModelingOL}.
+
+Chen 2017 embeds a multidimensional array type in the Scala type system, leveraging Scala's built-in heterogenous list (HList) type. Like Rink, Chen defines and implements several operations over the shape types, including inserting a new dimension and contracting all dimensions that are equal. Unlike Rink, Chen's dimensions are abstract and do not require concrete integers. Also, Chen's dimensions allow for an arbitrary number of dimensions by having the shape be a generic subtype of an HList. Overall, Chen's embedding most closely matches the embedding we desire in Python's type system. It still lacks support for the atypical broadcast operator, and arithmetic between the dimensions of the arrays does not seem to be allowed. Also, it appears that the use of user-provided integers is not possible in the embedding.
+
+\chapter{A Type Calculus for Multidimensional Arrays}
+
+Having seen the semantics of multidimensional arrays and various embeddings in other languages, how can we check the dimensions of arrays within Python while maintaining its ethos? The goal is to increase the strength of the type checker while not exploding the complexity of the syntax. We should be able to annotate many, if not all, of the functions previously described in Section \ref{ndarray-operations}. With these goals in mind, we present a new syntax and extension to Python's existing type system for declaring and checking multidimensional array functions and values.
+
+\section{Syntax}
 
 \begin{figure}
     \centering
