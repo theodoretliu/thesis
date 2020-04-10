@@ -1,4 +1,4 @@
-\documentclass{book}
+\documentclass{report}
 
 \usepackage{float}
 \usepackage{url}
@@ -60,29 +60,22 @@ In a gradually typed language, type annotations are optional. Wherever type anno
 \paragraph{Dependent and Refinement Types}
 
 Dependent type systems extend traditional type systems by allowing values from the language be a part of the type. This allows further specificity of the sets of values that can inhabit a type. As an example,the traditional type \texttt{List int} represents the set of all lists of any length that contain only integers. An analagous dependent type might be \texttt{List int 4}, denoting the set of integer lists which have exactly length 4. We can take this dependent type further with a function
-\begin{verbatim}
-def f(x: int) -> List int x: ...\end{verbatim}
+
+\begin{singlespace*}\begin{center}
+    \texttt{def f(x: int) -> List int x: ...}
+\end{center} \end{singlespace*}
 which represents a function who accepts an integer and returns a list of exactly the length provided. Dependent types allow us to powerfully reason about the static properties of our language and will useful in our reasoning about matrix dimensions later.
 
-Refinement types are a form of dependent types in which the set of values in a type can be filtered by predicates attached to a type. One refinement type system is Liquid Haskell, which embeds refinement types in the Haskell programming language \cite{Jhala2014RefinementTF}. Refinement types offer a convenient way to declare specific types, and we explore this further in a later section.
+Refinement types are a form of dependent types in which the set of values in a type can be filtered by predicates attached to a type. One refinement type system is Liquid Haskell (LH), which embeds refinement types in the Haskell programming language \cite{Jhala2014RefinementTF}. Refinement types offer a convenient way to declare specific types, and we explore this further in a later section.
 
-\section{Python}
+As a demonstration of the power of refinement types (and also their potential weakness), consider the function that accepts a list and an integer for indexing into the list. In a simple type system, the type of such a function might be:
 
-Python's type system is largely a standard one: types generally constrain a class of values, but further granularity is not possible. In comparison, dependent types allow for ``stronger'' types that can further constrain the space of well-typed programs. Refinement types are one such dependent type system, allowing the user to write predicates over values of a particular class to constrain them. Liquid Haskell is one such project that seeks to add refinement types to the programming language Haskell.
+\begin{singlespace*}
+\begin{center} \texttt{def index(lst: List[A], i: int) -> A: ...} \end{center} \end{singlespace*}
 
-As an example, of the power of dependent types, and in particular, refinement types, consider the function that accepts a list and an integer for indexing into the list. In Python, the type of such a function can be seen in Figure \ref{python-type-indexing}.
+This type prevents improper indexing where the second argument is not an integer or where the first argument is not a list. However, this type declaration still allows for runtime errors to occur, like the invocation \texttt{index([], 1)}. This will raise an exception since \texttt{1} exceeds the maximum index of the empty list.
 
-\begin{figure}
-\centering
-\begin{verbatim}
-A = TypeVar('A')
-def index(lst: List[A], i: int) -> A: ... \end{verbatim}
-\caption{\texttt{index} function type in Python}
-\label{python-type-indexing}
-\end{figure}
-Such a type prevents improper indexing where the second argument is not an integer or where the first argument is not a list. However, such a type declaration still allows for runtime errors to occur, like the invocation \texttt{index([], 1)}. This will raise an \texttt{IndexOutOfBounds} error since \texttt{1} exceeds the maximum index of the empty list.
-
-A stronger type --- one that is possible to declare in Liquid Haskell --- can statically prevent such malformed invocations. See Figure \ref{lh-type-indexing} for the declaration of the type. Although verbose, this type declaration prevents the misuse of the \texttt{index} function and statically raises a type error for the use \texttt{index [] 0}, which Python was unable to do.
+A stronger type --- one that is possible to declare in Liquid Haskell --- can statically prevent such malformed invocations. See Figure \ref{lh-type-indexing} for the declaration of the type. This type declaration prevents the misuse of the \texttt{index} function and statically raises a type error for the use \texttt{index [] 0}, which Python was unable to do. However, it is clear that the cost of such expressiveness is increased verbosity in the type declaration.
 
 \begin{figure}
     \centering
@@ -104,31 +97,62 @@ test2 = index [] 0 {- type error -}\end{verbatim}
 \end{figure}
 
 
-\subsection{Python}
+\section{Python}
 
-Python was conceived by Guido van Rossum in 1989 and was officially released to the public in 1991. Python is an interpreted rather than compiled language. It has a strong and dynamic type system. Implicit type conversions are generally not performed, and variables can be assigned to values with different types during runtime. Duck typing is allowed: if a method or line of code accesses an object's attribute or method, the runtime is happy to accept \textit{any} object that has the appropriately named method or attribute. Python is mainly an object-oriented and imperative language although it now has aspects of functional languages as well.
+In this section, we examine some of Python's history and design philosophy, its type system, and its matrix and machine learning libraries.
 
-Python is well-known for its simplicity, readability, and ease-of-use, and these attributes are a fundamental part of its spirit. To quote ``The Zen of Python'' by Tim Peters (which can be accessed by typing \texttt{import this} into a Python REPL), ``simple is better than complex'' and ``there should be only one --- and preferably only one --- obvious way to do it.''. Python blocks are delimited by whitespace and its syntax closely resembles pseudocode. Variable types are never explicitly declared, memory is automatically managed and garbage collected, returning different types from functions is allowed; it is seemingly the goal of Python to allow the programmer to sanely accomplish whatever they want with little friction. Large companies --- including Google, Instagram, and Dropbox --- all use Python in their systems or research.
+\subsection{History and Design Philosophy}
+
+Guido van Rossum began work on Python in 1989, and it was officially released to the public in 1991. Python is an interpreted language. It has a strong and dynamic type system. Type errors are raised at runtime, like when a string and an integer are added together. Variables can be assigned to values with different types during runtime. Python allows duck typing: if a method or line of code accesses an object's attribute or method, the runtime is happy to accept \textit{any} object that has the appropriately named method or attribute. Python is mainly an object-oriented and imperative language although it now has aspects of functional languages as well.
+
+Python is well-known for its simplicity, readability, and ease-of-use, and these attributes are fundamental to its spirit. In fact, Python Enhancement Proposal (PEP) 20 --- Python's official format for reviewing and accepting changes to the language --- makes the following aphorisms, collectively called ``The Zen of Python,'' a part of the Python spec \cite{pep20}:
+
+\begin{singlespace*}
+\begin{quote}
+    Beautiful is better than ugly. \\
+    Explicit is better than implicit. \\
+    Simple is better than complex. \\
+    Complex is better than complicated. \\
+    Flat is better than nested. \\
+    Sparse is better than dense. \\
+    Readability counts. \\
+    Special cases aren't special enough to break the rules. \\
+    Although practicality beats purity. \\
+    Errors should never pass silently. \\
+    Unless explicitly silenced. \\
+    In the face of ambiguity, refuse the temptation to guess. \\
+    There should be one-- and preferably only one --obvious way to do it. \\
+    Although that way may not be obvious at first unless you're Dutch. \\
+    Now is better than never. \\
+    Although never is often better than *right* now. \\
+    If the implementation is hard to explain, it's a bad idea. \\
+    If the implementation is easy to explain, it may be a good idea. \\
+    Namespaces are one honking great idea -- let's do more of those!
+\end{quote}
+\end{singlespace*}
+These aphorisms can be accessed from any Python REPL via the command \texttt{import this}.
+
+Python design seems to carefully follow the above mantra. Python blocks are delimited by whitespace and its syntax closely resembles pseudocode. Variable types are never explicitly declared, memory is automatically managed and garbage collected, returning different types from functions is allowed. Python allows a programmer to sanely accomplish whatever they want with little friction. Large companies and academics --- including Google, Instagram, and Dropbox --- all use Python in their systems or research \cite{python-quotes}.
 
 \subsection{\texttt{numpy} and other matrix libraries}
 
 Python unlocks a much faster speed of iteration, but it has its shortcomings. Since it is an interpreted language, it can be difficult to achieve performant code. Python does have a bytecode format which can speed up interpretation, but it is order of magnitudes slower than other compiled languages.
 
-As more and more people began to use Python for scientific and machine learning purposes, its speed increasingly became a barrier. This slowness led to the development of the library \texttt{numpy} which exposes a high-level API for declaring matrices and then performing operations on those matrices. \texttt{numpy} achieves fast performance by implementing all of its algorithms in highly optimized and parallel C code and then linking those into Python. Machine learning libraries such as \texttt{pytorch} and \texttt{tensorflow} took similar approaches, providing high-level APIs for model training while using optimized GPU code to provide speed and parallelism.
+As more and more people began to use Python for scientific and machine learning purposes, its speed increasingly became a barrier. This slowness led to the development of the library \texttt{numpy} which exposes a high-level API for declaring and operating on multi-dimensional matrices. \texttt{numpy} achieves fast performance by implementing all of its algorithms in highly optimized and low-level code and then linking those into Python. Machine learning libraries such as \texttt{pytorch} and \texttt{tensorflow} took similar approaches, providing high-level APIs for model training while using optimized GPU code to provide speed and parallelism. In a future section, we will further explore the objects and operations that are exposed by these libraries.
 
 The advent of these libraries has allowed engineers and researchers to continue to leverage the flexibility of Python while not sacrificing the speed of their execution and model training.
 
 \subsection{\texttt{mypy} --- Python Typing}
 
-Recently, dynamic typing in Python has become seen as a weakness rather than a strength, especially in large organizations. While Python's flexibility initially made development fast and easy, this did not scale as more engineers began to work on the codebase. Not only were runtime errors possible, it was also difficult to look at functions and immediately determine their expectations for the type of their inputs and outputs. This emphasizes the fact that types not only function as a form of safety for a program but also as a form of self-documentation. Jukka Lehtosalo recognized these weaknesses and, along with the help of Guido and others, developed a static type system and checker for Python --- \texttt{mypy}. As part of PEP 484, Python was officially extended with type annotation in version 3.5 in 2015.
+Recently, dynamic typing in Python has become seen as a weakness rather than a strength, especially in large organizations. While Python's flexibility initially made development fast and easy, this did not scale as more engineers began to work on the codebase. Not only were runtime type errors possible, it was also difficult to look at functions and immediately determine their expectations for the type of their inputs and outputs. This emphasizes the fact that types not only function as a form of safety for a program but also as a form of self-documentation. Jukka Lehtosalo recognized these weaknesses and, with the help of Guido and others, developed a static type system and gradual type checker for Python --- \texttt{mypy}. As part of PEP 484, Python was officially extended with type annotation in version 3.5 in 2015 \cite{pep484}.
 
-There are now several type checkers for Python including \texttt{pyre} from Facebook and \texttt{pytype} from Google. They are all gradual type checkers. Types can optionally be added anywhere in the source files. For annotated code, the types are checked. Elsewhere, types are assumed to be dynamic and are automatically accepted. This allows the typing to be incrementally adopted throughout a codebase, making it easy for users to opt in to checking where they want it without having to type their entire codebase. As of September 2019, Dropbox had reportedly typed 4 million lines of their Python code.
+There are now several type checkers for Python including \texttt{pyre} from Facebook and \texttt{pytype} from Google. As of September 2019, Dropbox had reportedly typed 4 million lines of their Python code \cite{PythonDropbox}.
 
 We now give an overview of the types that \texttt{mypy} supports.
 \begin{itemize}
-    \item \textbf{Primitives} --- Python's primitive types such as \texttt{int}, \texttt{float}, \texttt{bool}, and \texttt{str} are supported.
+    \item \textbf{Primitives} --- Python's primitive types such as \texttt{int}, \texttt{float}, \texttt{bool}, and \texttt{str}.
 
-    \item \textbf{Collections} --- Python's standard collections like lists, dictionaries, tuples, and sets are supported. They are declared as \texttt{List[Type]}, \texttt{Dict[Type, Type]}, \texttt{Tuple[Type]}, and \texttt{Set[Type]} respectively. These types are parameterized and can be instantiated with different types.
+    \item \textbf{Collections} --- Python's standard collections like lists, dictionaries, tuples, and sets are supported. They are declared as \texttt{List[Type]}, \texttt{Dict[Type1,Type2]}, \texttt{Tuple[Type]}, and \texttt{Set[Type]}, respectively. These types are parameterized and can be instantiated with different types.
 
     \item \textbf{Classes and Objects} --- all declared classes are automatically promoted to types, meaning that functions can accept parameters of certain classes. Furthermore, inheritance is automatically viewed as a form of subtyping. As an example,
 
@@ -152,7 +176,7 @@ f(b) # will type check\end{verbatim}
 
     \item \textbf{Option types} --- \texttt{mypy} also provides support for option types via \texttt{Optional[Type]}. Although languages with option types typicall have explicit \texttt{None} and \texttt{Some x} constructors, Python simplifies this by having a \texttt{None} and a bare value \texttt{x} for the \texttt{Some} case.
 
-    \item \textbf{Duck typing} --- Python is a duck-typed language, and \texttt{mypy} makes this support explicit via some types. For example, the type \texttt{Iterable[Type]} accepts any object which implements the \texttt{.next()} method and returns the type \texttt{Type}. Similarly, \texttt{Mapping[Type1, Type2]} accepts any object which implements the method \texttt{.__getitem__(x: Type1)} and returns the type \texttt{Type2}. In both of these examples, the exact type of the object does not matter, only that it implements a specific set of methods.
+    \item \textbf{Duck typing} --- Python is a duck-typed language, and \texttt{mypy} makes this support explicit. For example, the type \texttt{Iterable[Type]} accepts any object which implements the \texttt{.next()} method and returns the type \texttt{Type}. Similarly, \texttt{Mapping[Type1, Type2]} accepts any object which implements the method \texttt{.__getitem__(x: Type1)} and returns the type \texttt{Type2}. In both of these examples, the exact type of the object does not matter, only that it implements a specific set of methods.
 
     \item \textbf{Function overloading} --- in \texttt{mypy}, function signatures can be overloaded, meaning that functions can have multiple signatures. This is enabled via the \texttt{@overload} decorator on function. As an example:
 
@@ -185,72 +209,61 @@ x = 1 # will type check
 x = 2 # will not type check
 x = 3 - 2 # will not type check\end{verbatim}
     \end{singlespace*}
-    Note that although in the last line above, it is ``obvious'' that \texttt{x} is being assigned to 1, \texttt{mypy} performs no reasoning or speculation about the result of $3 - 2$. This is limiting but greatly simplifies the task of checking \texttt{Literal} constructors.
+    Note that although in the last line above, it is ``obvious'' that \texttt{x} is being assigned to 1, \texttt{mypy} performs no reasoning or speculation about the result of $3 - 2$. This is limiting but greatly simplifies the task of type checking \texttt{Literal} constructors.
 
 \end{itemize}
 
-\subsection{Dependent and Refinement Types}
+From above, we can see that Python's type system is fairly straightforward. Besides the \texttt{Literal} constructor, Python features no dependent types. This is seemingly a conscious choice; Python invokes its own ethos as described in ``The Zen of Python'' and opts for a type system that is easy to check and declare rather than one that provides the most powerful guarantees.
 
-Python's type system is largely a standard one: types generally constrain a class of values, but further granularity is not possible. In comparison, dependent types allow for ``stronger'' types that can further constrain the space of well-typed programs. Refinement types are one such dependent type system, allowing the user to write predicates over values of a particular class to constrain them. Liquid Haskell is one such project that seeks to add refinement types to the programming language Haskell.
+\section{Matrix library objects and operations}
 
-As an example, of the power of dependent types, and in particular, refinement types, consider the function that accepts a list and an integer for indexing into the list. In Python, the type of such a function can be seen in Figure \ref{python-type-indexing}.
+\subsection{Multidimensional arrays}
 
-\begin{figure}
-\centering
-\begin{verbatim}
-A = TypeVar('A')
-def index(lst: List[A], i: int) -> A: ... \end{verbatim}
-\caption{\texttt{index} function type in Python}
-\label{python-type-indexing}
-\end{figure}
-Such a type prevents improper indexing where the second argument is not an integer or where the first argument is not a list. However, such a type declaration still allows for runtime errors to occur, like the invocation \texttt{index([], 1)}. This will raise an \texttt{IndexOutOfBounds} error since \texttt{1} exceeds the maximum index of the empty list.
+The fundamental object for storing data in matrix and machine learning libraries like \texttt{numpy} and \texttt{pytorch} is the \textbf{multidimensional} or \textbf{N-dimensional array}. In linear algebra, the fundamental elements are vectors and matrices. Vectors are arrays of numbers. Matrices are arrays of arrays of numbers. \texttt{numpy} generalizes these constructs to an arbitrary number of ``arrays of arrays of arrays of ... of numbers.''. With this generalization, vectors are multidimensional arrays with one dimension, and matrices are multidimensional arrays with two dimensions. Solo scalars can even be represented by multidimensional arrays with zero dimensions. The number of dimensions and the size of each dimension the array is represented by a tuple of integers which is generally referred to as its \textbf{shape} \cite{ndarray}.
 
-A stronger type --- one that is possible to declare in Liquid Haskell --- can statically prevent such malformed invocations. See Figure \ref{lh-type-indexing} for the declaration of the type. Although verbose, this type declaration prevents the misuse of the \texttt{index} function and statically raises a type error for the use \texttt{index [] 0}, which Python was unable to do.
+To see why this representation is useful, we look at some examples. A vector of length 10 is represented by a shape of $(10,)$. A $2 \times 2$ matrix is represented by a shape of $(2, 2)$. A dataset of 1000 $256 \times 256$ resolution images, each with distinct RGB channels, could be represented by the shape $(1000, 3, 256, 256)$. The scalar $1$ is also a multidimensional array with shape $(,)$ (the empty tuple).
 
-\begin{figure}
-    \centering
-    \begin{verbatim}
-{-@ measure size @-}
-{-@ size :: [a] -> {v : Int | v >= 0} @-}
-size :: [a] -> Int
-size [] = 0
-size (h : t) = 1 + size t
+\subsection{Operations on Multidimensional Arrays}
 
-{-@ index :: {l : [a] | true} -> {v : Int | v < size l && v >= 0} -> a @-}
-index :: [a] -> Int -> a
-index (h : t) i = if i == 0 then h else index t (i - 1)
+\texttt{numpy} and related libraries define many operations over these multidimensional arrays. We cover some of the more useful and common operations here \cite{numpy-manual}.
 
-test1 = index [1, 2, 3] 0
-test2 = index [] 0 {- type error -}\end{verbatim}
-    \caption{\texttt{index} function type in Liquid Haskell}
-    \label{lh-type-indexing}
-\end{figure}
+\begin{itemize}
+    \item \textbf{Broadcasting} --- a unique operation between multidimensional arrays that does not have a linear algebra interpretation. Broadcasting occurs whenever there is a binary infix operator --- such as +, -, /, etc. --- acting between two arrays or there is assignment from one array to a slice of another.
 
+    To determine whether two arrays can broadcast, we start with the \textit{last} dimensions of both arrays. We continue pairing the dimensions of both arrays until one or both run out of dimensions to pair. For each pair of dimensions, the dimensions must be equal or at least one of the dimensions must be equal to one. If broadcasting succeeds, the resulting array has the same number of dimensions as the longer of the two original arrays. The dimensions of the final array are the maximum of the two original arrays' dimensions.
 
-\section{Shortcomings of Existing Type Systems}
+    Broadcasting is a strange but pragmatic operation. It makes it simple to multiply an entire array by a constant value, like \texttt{2 * X}, or even perform more complicated operations, like adding the same vector to each row of a matrix.
 
-The fundamental tension between these type systems is their expressiveness and specificity versus their verbosity and ease of use.
+    \item \textbf{Generalized dot product} --- the dot product definition depends on the shape of the arrays it is operating on.
+    \begin{itemize}
+        \item If both arrays are vectors, it is the traditional dot product.
+        \item If both arrays are matrices, it is matrix multiplication.
+        \item If either array is scalar, it is equivalent to scalar multiplication.
+        \item If the first array has $N$ dimensions and the second array has 1 dimension, the result is valid if the last dimension of the first array matches with the single dimension of the second array.
+        \item If the first array has $N$ dimensions and the second array has $M$ dimensions, the result is valid if the last dimension of the first matrix and the second-to-last dimension of the second matrix are the same.
+    \end{itemize}
 
-\subsection{\texttt{mypy}}
+    \item \textbf{Summation, Euclidean norm} --- array summation and the Euclidean norm are different operators, but they reduce the dimensions of an array the same way. If given no additional arguments, summation reduces an array to a scalar or an array with zero dimensions. If given an axis, the summation only sums along that particular axis, removing the provided dimension index from the shape.
 
-\texttt{mypy} takes a relatively lightweight approach to type checking. Its simplicity follows the ethos of Python quite closely. Even with its gradual  and sipmle approach, \texttt{mypy} is still able to eliminate a whole class errors, such as invoking functions with inappropriate arguments, accessing attributes that do not exist, or neglecting to check for the ``\texttt{None}-ness'' of function returns.
+    \item \textbf{Zeros, Ones} --- given a tuple of integers, \texttt{np.zeros} generates a multidimensional array of zeros with shape exactly equal to the tuple given. \texttt{np.ones} acts analogously.
 
-Still, as seen in Figure \ref{python-type-indexing}, Python still allows for rather obvious errors to occur, and this situation only becomes worse in the case of matrix types. As an example, the best \texttt{mypy} can do for matrix multiplication is seen in Figure \ref{python-type-matmul}. Here, the function type adds little information; it is unlikely that users will attempt to pass anything except \texttt{np.ndarray}. In the code contexts that \texttt{matmul} would occur, it is likely that almost \textit{all} objects are \texttt{np.ndarray}s. This type is so permissive of \texttt{np.ndarray}s that even matrices that do not have exactly two dimensions can be passed into the function without type errors being raised. The type signature does little to prevent runtime errors relating to the shape of the matrices.
+    \item \textbf{Concatenation} --- takes two arrays and an axis and returns the result of concatenating those arrays along the axis. For concatenation to succeed, the dimensions of the two arrays must agree for all indices except for the one on which they are concatenated.
 
-\begin{figure}
-    \centering
-    \begin{verbatim}
-import numpy as np
+    \item \textbf{Model training} \cite{sklearn} --- in supervised model training, the model is usually fed the data, $X$, and a list of labels, $y$.In order for the training to succeed, the number of data points in $X$ must match the number of labels in $y$.
+\end{itemize}
+These are just a small sample of the operations we can perform on multidimensional arrays, but they are exactly the operations we would like to more strongly type in Python.
 
-def matmul(x: np.ndarray, y: np.ndarray) -> np.ndarray: ...\end{verbatim}
-    \caption{Sample \texttt{mypy} for \texttt{matmul}}
-    \label{python-type-matmul}
-\end{figure}
+\subsection{\texttt{numpy} operations in \texttt{mypy}}
 
+We can examine how we can type some \texttt{numpy} operations using \texttt{mypy}'s current capabilities. For the \texttt{np.dot} function described above, the most specific type we can write is
+\begin{center}
+    \texttt{def dot(a: np.ndarray, b: np.ndarray) -> np.ndarray: ...}
+\end{center}
+Although this signature will prevent nonsensical calls to \texttt{np.dot} with \texttt{str} arguments, it does not capture the most interesting part of the operation. Fundamentally, what we care about is the underlying \textit{shape} of the multidimensional arrays and how those shapes do or do not match to correctly dot together. For any other multidimensional array functions, the signature will look very similar, with \texttt{mypy} only able to restrict to the class \texttt{np.ndarray} and no further.
 
-\subsection{Liquid Haskell}
+\subsection{Multidimensional arrays in Liquid Haskell}
 
-Liquid Haskell (LH) has almost the opposite mentality of \texttt{mypy}. LH can represent extremely precise types and make very powerful static deductions about what can and cannot happen at runtime. However, this power and precision is also a downside. Declaring the proper types can be cumbersome and verbose. Furthermore, using these types in function types and then type checking them can be an expensive process. As an experiment, we declared the \texttt{np.nparray} in LH such that we could refer to the dimensions of the \texttt{np.nparray} in function signatures. The representation can be found in Figure \ref{lh-nparray}.
+As an experiment in the expressivity of Liquid Haskell and the practicality of refinement types, we attempt to express a strict type for multidimensional arrays. The resulting code can be found in Figure \ref{lh-nparray}. There are a couple things to note here. First, this representation has the desired property that the shape of the multidimensional array is a part of the matrix type. Refinement and dependent types have lifted the shape value into the type, which will allow us to refer to the shape as part of our type signatures for array operations. Second, the representation is \textit{long}. LH's power and type expressivity have allowed us to express this complicated type, but there is an explosion in verbosity and complexity as a result.
 
 \begin{figure}
     \centering
@@ -285,32 +298,31 @@ head1 (h : t) = h
 tail1 :: [Int] -> [Int]
 tail1 (h : t) = t
 
-data Nparray a = N {nDims::[Int], nElts::Either a (Vector (Nparray a))}
+data Ndarray a = N {nDims::[Int], nElts::Either a (Vector (Ndarray a))}
 
 {-@ measure ords @-}
-{-@ ords :: Nparray a -> [Nat] @-}
-ords :: Nparray a -> [Int]
+{-@ ords :: Ndarray a -> [Nat] @-}
+ords :: Ndarray a -> [Int]
 ords (N nDims _nElts) = nDims
 
 {-@ measure isLeft @-}
 isLeft (Left _) = True
 isLeft (Right _) = False
 
-{-@ data Nparray a =
+{-@ data Ndarray a =
  N {nDims::[Nat],
-    nElts::{v : Either a (VectorN ({x : Nparray a | (tail1 nDims) == (ords x)}) {head1 nDims})
-            | (isLeft v && size nDims = 0) || (not (isLeft v) && size nDims > 0) }} @-}
+    nElts::{v : Either a (VectorN ({x : Ndarray a | (tail1 nDims) == (ords x)})
+                                  {head1 nDims})
+        | (isLeft v && size nDims = 0) || (not (isLeft v) && size nDims > 0) }} @-}
 
-{-@ type NparrayN a N = {v : Nparray a | nDims v = N} @-}\end{verbatim}
-
+{-@ type NdarrayN a N = {v : Ndarray a | nDims v = N} @-}\end{verbatim}
     \caption{Sample implementation of the \texttt{np.ndarray} type in LH}
     \label{lh-nparray}
-
-
 \end{figure}
 
-This is not a fun representation to work with. Admittedly, little time was spent on making this representation as compact as possible, and we do not claim to be experts in Liquid Haskell. Still, in comparison to the entire Python typing ecosystem, it is clear that bolting on a full refinement type system would be a gross violation of Python's ethos of simplicity and ease of use.
-\newpage
+\section{Related Work}
+
+
 
 \section{A Simple Type Calculus for Matrix Dimensions}
 
