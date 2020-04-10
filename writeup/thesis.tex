@@ -1,55 +1,193 @@
-\documentclass{article}
+\documentclass{book}
 
+\usepackage{float}
+\usepackage{url}
 \usepackage[doublespacing]{setspace}
-\usepackage[margin=1in]{geometry}
+\usepackage[margin=1.5in]{geometry}
 \usepackage{amsmath, amssymb}
 \usepackage{syntax}
 \usepackage{enumitem}
+\usepackage{cite}
+
 
 \begin{document}
 
 \tableofcontents
 \newpage
 
-\begin{abstract}
+% \begin{abstract}
     Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance matrix and machine learning libraries. Although initially a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types are mostly useless when typing matrix operations. In this thesis, we develop a simple type calculus and extension to Python's type system that strengthens the static guarantees of the type checker over matrix operations while not sacrificing the simplicity and ease of use that is core to Python's spirit.
-\end{abstract}
+% \end{abstract}
 
 \section{Introduction}
 
-Python is a strong and dynamically typed language focused on simplicity and ease of use. Since its invention in the late 1980s, Python has exploded in popularity recently, seeing rapid adoption in both academia and industry. Its flexibility, not its speed, made it user-friendly. An increased interest in scientific computing and machine learning from the Python community led to the creation of packages such as \texttt{numpy} and \texttt{pytorch}, which expose high level APIs for high performance C code, enabling rapid development of machine learning and scientific computing applications.
+Python is a strong and dynamically typed language focused on simplicity and ease of use. Since its invention in the late 1980s, Python has exploded in popularity, seeing rapid adoption in both academia and industry. Its flexibility and approachable syntax made it user-friendly. An increased interest in scientific computing and machine learning from the Python community led to the creation of packages such as \texttt{numpy} and \texttt{pytorch}, which expose high level APIs for high performance C code, circumventing Python's slow execution and enabling rapid development of machine learning and scientific computing applications.
 
-More recently, Python's dynamic type system has been seen as a weakness rather than a strength. Runtime errors caused by type mismatches can be annoying or potentially disastrous for people deploying Python at scale. To combat this, type annotations were added directly to Python's syntax as part of Python 3.5 in 2014, and a typechecker --- \texttt{mypy} --- was developed to statically analyze the annotations. \texttt{mypy} eliminates a whole class of type errors from Python code but still allows for matrices with incompatible dimensions to be multiplied or applied together, resulting in runtime errors in machine learning or scientific computing code.
+More recently, Python's dynamic type system has been seen as a weakness rather than a strength. Runtime errors caused by type mismatches can be annoying or potentially disastrous for people deploying Python at scale. To combat this, type annotations were added directly to Python's syntax as part of Python 3.5 in 2014, and a reference typechecker --- \texttt{mypy} --- was developed to statically analyze the annotations. \texttt{mypy} eliminates a whole class of type errors from Python code but is not powerful enough to reject matrices with incompatible dimensions from being multiplied or applied together, resulting in runtime errors in machine learning or scientific computing code.
 
 In this thesis, we propose a new extension to Python's type system that allows the expression of function signatures that respect the dimensions of matrices as they are passed into the function. This contribution further strengthens the type system and makes impossible runtime errors related to the dimensionality of matrices at function application sites.
 
-\newpage
 
-\section{Background}
+\chapter{Background and Related Work}
+
+\section{Type Systems}
+
+A type system in a programming language is a form of program analysis where labels called \textbf{types} are assigned to values and expressions. By reasoning about these types, the system can enforce properties about the execution of programs within the language. Types can be thought of as a set of values that a variable or expression can take, and type checking is the process of determining whether a value or set of values belongs to the set declared or specified. Type systems can range from the simple to the complex and are usually designed with certain properties in mind. The simply typed lambda calculus introduced by Church only had function types but guaranteed that the left sides of applications were always functions and that every expression had a normal form \cite{Church1940AFO}. In contrast, Rust-lang's ownership and type system is able to not only prove that its programs invoke functions with the correct arguments but also that concurrent accesses to memory are safe \cite{rustlang}.
+
+In the remainder of this section, we will examine several dichotomies and classes of type systems that will be relevant later in this paper.
+
+\subsection{Static versus Dynamic Type Systems}
+
+In a \textbf{static type system}, the types of a program are checked during the compilation of the program. The type of a function or variable is constant throughout the lifetime of program. The types can be annotated directly or inferred. A static system ensures that no runtime errors relating to the types will occur during the execution of a compiled program. Static type systems benefit greatly from this guarantee and can also use the type information during compilation to perform optimizations. Additionally, type information can be stripped away in the final executable, reducing the size of the resulting program. However, static type systems can be difficult to implement, and their speed slows and complexity grows as the types they seek to support become more complex. C/C++, OCaml, and Rust are examples of languages with static type systems.
+
+In a \textbf{dynamic type system}, the types of values are checked during the execution of a program. Variables can be reassigned to multiple types. Runtime errors will be thrown if there are operations between incompatible types, such as attempting to add a string and a float. Dynamic type systems are good for their flexibility and ease of implementation; there is no need for type checking or inference ahead of execution. However, their lack of runtime guarantees can be difficult to handle, especially in mission-critical software. Without knowing whether a program can fail in a myriad of ways at runtime makes it hard to have confidence in its deployment. Python (traditionally), Ruby, and Javascript are languages with dynamic type systems.
+
+\subsection{Strong versus Weak Type Systems}
+
+A \textbf{strong type system} enforces that the type expected at a particular program location exactly matches the type found. In other words, no implicit conversions are done between types to make function calls or assignments well-typed. If there are mismatches found, an error either during compilation or runtime is raised. Strong type systems prevent users from accidentally misusing variables or performing computations they did not intend. Users need to bear the additional cost of needing explicit type casts or conversions whenever a type \textit{actually} needs to be used as a different type. Python and OCaml are languages with strong type systems.
+
+A \textbf{weak type system} attempts to perform certain type conversions implicitly if types do not match as expected. This eliminates the need for constant massaging between various types --- such as when wanting to print an integer --- but can have disastrous consequences. As an example, Javascript has an infamous weak type system, leading to bizarre and unexpected results from inocuous statements like \texttt{12 + "21" == "1221"}. PHP is another example of a weakly typed language.
+
+\subsection{Other Type Systems}
+\paragraph{Duck Typing}
+
+Duck typing receives its name from the classic phrase: ``If it looks like a duck, swims like a duck, and quacks like a duck, then it probably is a duck.'' In programming languages, this means the type system does not care about the specific label or class a value belongs to as long as it has certain attributes or implements certain methods. As an example, if we have expression \texttt{x.f()} in a duck typing system, it does not matter whether \texttt{x} is of class A or B or a primitive type, as long as it has a callable method called \texttt{f}. Python is a duck typed language.
+
+\paragraph{Gradual Typing}
+
+In a gradually typed language, type annotations are optional. Wherever type annotations are present, type checking is performed. For unannotated code, type checking is either elided or a generic type of \textit{any} is inferred \cite{PythonDropbox}. Gradual type systems allow the incremental adoption of typing in a codebase. Instead of having to type every line of code in a codebase at once, small parts can be annotated and statically checked while the remaining code falls back to runtime checks. Thus, gradual typing achieves a balance between static and dynamic typing. TypeScript and Python with \texttt{mypy} are languages with gradual typing.
+
+\paragraph{Dependent and Refinement Types}
+
+Dependent type systems extend traditional type systems by allowing values from the language be a part of the type. This allows further specificity of the sets of values that can inhabit a type. As an example,the traditional type \texttt{List int} represents the set of all lists of any length that contain only integers. An analagous dependent type might be \texttt{List int 4}, denoting the set of integer lists which have exactly length 4. We can take this dependent type further with a function
+\begin{verbatim}
+def f(x: int) -> List int x: ...\end{verbatim}
+which represents a function who accepts an integer and returns a list of exactly the length provided. Dependent types allow us to powerfully reason about the static properties of our language and will useful in our reasoning about matrix dimensions later.
+
+Refinement types are a form of dependent types in which the set of values in a type can be filtered by predicates attached to a type. One refinement type system is Liquid Haskell, which embeds refinement types in the Haskell programming language \cite{Jhala2014RefinementTF}. Refinement types offer a convenient way to declare specific types, and we explore this further in a later section.
+
+\section{Python}
+
+Python's type system is largely a standard one: types generally constrain a class of values, but further granularity is not possible. In comparison, dependent types allow for ``stronger'' types that can further constrain the space of well-typed programs. Refinement types are one such dependent type system, allowing the user to write predicates over values of a particular class to constrain them. Liquid Haskell is one such project that seeks to add refinement types to the programming language Haskell.
+
+As an example, of the power of dependent types, and in particular, refinement types, consider the function that accepts a list and an integer for indexing into the list. In Python, the type of such a function can be seen in Figure \ref{python-type-indexing}.
+
+\begin{figure}
+\centering
+\begin{verbatim}
+A = TypeVar('A')
+def index(lst: List[A], i: int) -> A: ... \end{verbatim}
+\caption{\texttt{index} function type in Python}
+\label{python-type-indexing}
+\end{figure}
+Such a type prevents improper indexing where the second argument is not an integer or where the first argument is not a list. However, such a type declaration still allows for runtime errors to occur, like the invocation \texttt{index([], 1)}. This will raise an \texttt{IndexOutOfBounds} error since \texttt{1} exceeds the maximum index of the empty list.
+
+A stronger type --- one that is possible to declare in Liquid Haskell --- can statically prevent such malformed invocations. See Figure \ref{lh-type-indexing} for the declaration of the type. Although verbose, this type declaration prevents the misuse of the \texttt{index} function and statically raises a type error for the use \texttt{index [] 0}, which Python was unable to do.
+
+\begin{figure}
+    \centering
+    \begin{verbatim}
+{-@ measure size @-}
+{-@ size :: [a] -> {v : Int | v >= 0} @-}
+size :: [a] -> Int
+size [] = 0
+size (h : t) = 1 + size t
+
+{-@ index :: {l : [a] | true} -> {v : Int | v < size l && v >= 0} -> a @-}
+index :: [a] -> Int -> a
+index (h : t) i = if i == 0 then h else index t (i - 1)
+
+test1 = index [1, 2, 3] 0
+test2 = index [] 0 {- type error -}\end{verbatim}
+    \caption{\texttt{index} function type in Liquid Haskell}
+    \label{lh-type-indexing}
+\end{figure}
+
 
 \subsection{Python}
 
-Python was conceived by Guido van Rossum in 1989 and was officially released to the public in 1991. Python is an interpreted language. Python has a strongly and dynamically typed system. Implicit type conversions are generally not performed and variables can be assigned to values with different types during runtime. Duck typing is allowed: if a method or line of code accesses an object's attribute or method, the runtime is happy to accept \textit{any} object that has an appropriately named method or attribute. Python is mainly an object-oriented and imperative language although it now has aspects of functional languages as well.
+Python was conceived by Guido van Rossum in 1989 and was officially released to the public in 1991. Python is an interpreted rather than compiled language. It has a strong and dynamic type system. Implicit type conversions are generally not performed, and variables can be assigned to values with different types during runtime. Duck typing is allowed: if a method or line of code accesses an object's attribute or method, the runtime is happy to accept \textit{any} object that has the appropriately named method or attribute. Python is mainly an object-oriented and imperative language although it now has aspects of functional languages as well.
 
-Python is well-known for its simplicity, readability, and ease-of-use. Python blocks are delimited by whitespace and its syntax closely resembles pseudocode. Large companies --- including Google, Instagram, and Dropbox --- all use Python in their systems or research due to its flexibility.
-
-Some of the ethos of Python is best captured by quotes from ``The Zen of Python'' by Tim Peters (the poem can be accessed by typing \texttt{import this} into a Python REPL). ``Simple is better than complex.'' ``There should be only one-- and preferably only one --obvious way to do it.''
+Python is well-known for its simplicity, readability, and ease-of-use, and these attributes are a fundamental part of its spirit. To quote ``The Zen of Python'' by Tim Peters (which can be accessed by typing \texttt{import this} into a Python REPL), ``simple is better than complex'' and ``there should be only one --- and preferably only one --- obvious way to do it.''. Python blocks are delimited by whitespace and its syntax closely resembles pseudocode. Variable types are never explicitly declared, memory is automatically managed and garbage collected, returning different types from functions is allowed; it is seemingly the goal of Python to allow the programmer to sanely accomplish whatever they want with little friction. Large companies --- including Google, Instagram, and Dropbox --- all use Python in their systems or research.
 
 \subsection{\texttt{numpy} and other matrix libraries}
 
-Python is adored for the speed of iteration it unlocks, but it is not without its shortcomings. Since it is an interpreted language, it can be difficult to write performant code. Ahead of time compilation is largely useless because of the dynamic typing. Python does have a bytecode format, which can speed up interpretation, but ultimately it lags far behind other  compiled languages in speed.
+Python unlocks a much faster speed of iteration, but it has its shortcomings. Since it is an interpreted language, it can be difficult to achieve performant code. Python does have a bytecode format which can speed up interpretation, but it is order of magnitudes slower than other compiled languages.
 
-As more and more people began to use Python for scientific and machine learning purposes, its speed increasingly became a barrier. Methods such as JIT compilation were used to speed up execution. Additionally, the slowness led to the development of matrix libraries like \texttt{numpy} and machine learning libraries like \texttt{tensorflow} and \texttt{pytorch}. These libraries still expose high level APIs that are directly accessible from Python but call into highly optimized and parallel C code for the most expensive operations like back propagation and matrix multiplication.
+As more and more people began to use Python for scientific and machine learning purposes, its speed increasingly became a barrier. This slowness led to the development of the library \texttt{numpy} which exposes a high-level API for declaring matrices and then performing operations on those matrices. \texttt{numpy} achieves fast performance by implementing all of its algorithms in highly optimized and parallel C code and then linking those into Python. Machine learning libraries such as \texttt{pytorch} and \texttt{tensorflow} took similar approaches, providing high-level APIs for model training while using optimized GPU code to provide speed and parallelism.
 
 The advent of these libraries has allowed engineers and researchers to continue to leverage the flexibility of Python while not sacrificing the speed of their execution and model training.
 
 \subsection{\texttt{mypy} --- Python Typing}
 
-Recently, static, strong typing has made a comeback in industry. In the 2000s (citation?), companies opted for dynamic languages like Javascript and Python. But as their systems grew, the dynamicism and flexibility of the types became a footgun, threatening the stability of their systems with dreaded runtime errors. Thus, came a wave of adoption of typed languages built on top of or compiled to these languages. TypeScript became a popular choice for former Javascript shops, and while at Dropbox, Guido --- the original inventor of Python --- helped extend Python's official syntax with type annotations in version 3.5 and helped write the accompanying official typechecker, \texttt{mypy}.
+Recently, dynamic typing in Python has become seen as a weakness rather than a strength, especially in large organizations. While Python's flexibility initially made development fast and easy, this did not scale as more engineers began to work on the codebase. Not only were runtime errors possible, it was also difficult to look at functions and immediately determine their expectations for the type of their inputs and outputs. This emphasizes the fact that types not only function as a form of safety for a program but also as a form of self-documentation. Jukka Lehtosalo recognized these weaknesses and, along with the help of Guido and others, developed a static type system and checker for Python --- \texttt{mypy}. As part of PEP 484, Python was officially extended with type annotation in version 3.5 in 2015.
 
-There are now several type checkers for Python including \texttt{pyre} from Facebook and \texttt{pytype} from Google. They are all gradual typing schemes. This means that types can optionally be added anywhere in the source files. For annotated code, the types can be checked. Elsewhere, types are assumed to be dynamic or unknown. This allows the typing to be incrementally adopted throughout a codebase, making it easy for users to opt in to checking where they want it without having to type their entire codebase. As of September 2019, Dropbox had reportedly typed 4 million lines of Python internally.
+There are now several type checkers for Python including \texttt{pyre} from Facebook and \texttt{pytype} from Google. They are all gradual type checkers. Types can optionally be added anywhere in the source files. For annotated code, the types are checked. Elsewhere, types are assumed to be dynamic and are automatically accepted. This allows the typing to be incrementally adopted throughout a codebase, making it easy for users to opt in to checking where they want it without having to type their entire codebase. As of September 2019, Dropbox had reportedly typed 4 million lines of their Python code.
 
-\texttt{mypy} supports basic types as expected. There are constructs to declare standard types like \texttt{int}, \texttt{string}, \texttt{list}, \texttt{tuple}, etc. Classes are also automatically promoted as types, and subtyping follows the inheritance patterns of classes. For more advanced type features, optional types are implemented via Python's \texttt{None} type. There is no explicit \texttt{Some} constructor, but the return of a non-\texttt{None} is considered a \texttt{Some}. There are also sum/union types provided via \texttt{Union}. Function types can also be overloaded via an \texttt{@overload} operator, allowing functions to be invoked with multiple different arguments and corresponding return types. \texttt{mypy} even supports a limited form of dependent typing in the form of \texttt{Literal}, which specifies that a variable may only be statically assigned to a constant. This in combination with \texttt{@overload} can provide surprisingly strong function types.
+We now give an overview of the types that \texttt{mypy} supports.
+\begin{itemize}
+    \item \textbf{Primitives} --- Python's primitive types such as \texttt{int}, \texttt{float}, \texttt{bool}, and \texttt{str} are supported.
+
+    \item \textbf{Collections} --- Python's standard collections like lists, dictionaries, tuples, and sets are supported. They are declared as \texttt{List[Type]}, \texttt{Dict[Type, Type]}, \texttt{Tuple[Type]}, and \texttt{Set[Type]} respectively. These types are parameterized and can be instantiated with different types.
+
+    \item \textbf{Classes and Objects} --- all declared classes are automatically promoted to types, meaning that functions can accept parameters of certain classes. Furthermore, inheritance is automatically viewed as a form of subtyping. As an example,
+
+    \begin{singlespace*}
+    \begin{verbatim}
+class A:
+    pass
+
+class B(A):
+    pass
+
+def f(x: A):
+    return None
+
+b = B()
+f(b) # will type check\end{verbatim}
+    \end{singlespace*}
+    In the example, all instances of class \texttt{B} are subtypes of class \texttt{A}, so instances of class \texttt{B} can stand in for class \texttt{A} as seen in function \texttt{f} and its application to \texttt{b}.
+
+    \item \textbf{Union types} --- union types are created via the \texttt{Union[Type1, Type2]} operator, allowing a value to be assigned to something from either of the two types.
+
+    \item \textbf{Option types} --- \texttt{mypy} also provides support for option types via \texttt{Optional[Type]}. Although languages with option types typicall have explicit \texttt{None} and \texttt{Some x} constructors, Python simplifies this by having a \texttt{None} and a bare value \texttt{x} for the \texttt{Some} case.
+
+    \item \textbf{Duck typing} --- Python is a duck-typed language, and \texttt{mypy} makes this support explicit via some types. For example, the type \texttt{Iterable[Type]} accepts any object which implements the \texttt{.next()} method and returns the type \texttt{Type}. Similarly, \texttt{Mapping[Type1, Type2]} accepts any object which implements the method \texttt{.__getitem__(x: Type1)} and returns the type \texttt{Type2}. In both of these examples, the exact type of the object does not matter, only that it implements a specific set of methods.
+
+    \item \textbf{Function overloading} --- in \texttt{mypy}, function signatures can be overloaded, meaning that functions can have multiple signatures. This is enabled via the \texttt{@overload} decorator on function. As an example:
+
+    \begin{singlespace*}
+    \begin{verbatim}
+@overload
+def f(x: int) -> str: ...
+
+@overload
+def f(x: str) -> int: ...
+
+def f(x: Union[int, str]) -> Union[int, str]:
+    if isinstance(x, int):
+        return "hello"
+
+    return 1
+
+f(1) # will type check with type str
+f('hello') # will type check with type int\end{verbatim}
+    \end{singlespace*}
+    Because of the \texttt{overload}, \texttt{mypy} is able to infer a much more specific type for each of the function calls rather than just \texttt{Union[int, str]}.
+
+    \item \textbf{Literal values} --- \texttt{mypy} is not a general dependent type checker, but it does have a construct \texttt{Literal[Value]} which requires that a parameter or variable be assigned to exactly the value specified in the \texttt{Literal} constructor. For example,
+
+    \begin{singlespace*}
+        \begin{verbatim}
+x : Literal[1]
+
+x = 1 # will type check
+x = 2 # will not type check
+x = 3 - 2 # will not type check\end{verbatim}
+    \end{singlespace*}
+    Note that although in the last line above, it is ``obvious'' that \texttt{x} is being assigned to 1, \texttt{mypy} performs no reasoning or speculation about the result of $3 - 2$. This is limiting but greatly simplifies the task of checking \texttt{Literal} constructors.
+
+\end{itemize}
 
 \subsection{Dependent and Refinement Types}
 
@@ -243,7 +381,7 @@ W: Nparray[C, D]
 
 matmul(X, Y) # will fail, number of dimensions incorrect
 matmul(Y, Y) # will fail, inner dimensions don't work
-res = matmul(X, Y) # will succeed
+res = matmul(Y, Z) # will succeed
 matmul(res, W) # will succeed, res inferred to have type Nparray[A, C]\end{verbatim}
     \caption{Typing of matrix multplication with new types}
     \label{np-type-matmul}
@@ -391,5 +529,9 @@ The formalized semantics for the type checking are provided in Figure \ref{seman
 \subsection{Future Work}
 
 \section{Conclusion}
+
+
+\bibliographystyle{plain}
+\bibliography{research}
 
 \end{document}

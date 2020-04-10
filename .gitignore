@@ -10,3 +10,5 @@ _build
 .merlin
 thesis.*
 !thesis.tex
+.DS_Store
+__pycache__
