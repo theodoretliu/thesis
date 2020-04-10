@@ -1,13 +1,14 @@
-\documentclass{report}
+\documentclass[12pt]{report}
 
 \usepackage{float}
 \usepackage{url}
 \usepackage[doublespacing]{setspace}
-\usepackage[margin=1.5in]{geometry}
+\usepackage[margin=1in]{geometry}
 \usepackage{amsmath, amssymb}
 \usepackage{syntax}
 \usepackage{enumitem}
 \usepackage{cite}
+\usepackage{natbib}
 
 
 \begin{document}
@@ -49,74 +50,70 @@
 
 I would like to thank Professor Nada Amin for advising and encouraging me throughout the project. I would additionally like to thank Professors Steve Chong and Eddie Kohler for their advising in exceptional circumstances.
 
-I would like to specially thank Richard Wang for being a voice of reason and calm whenever I have needed it throughout my time at Harvard. I want to thank all of my friends --- Dan, Nenya, Jason, Joanna, more --- for being supportive and amazing and kind.
+I would like thank all my friends --- Richard, Dan, Nenya, Jason, Joanna, everyone who has been with me throughout my Harvard experience --- for being the best, most supportive, and amazing friends I could ever ask for.
 
-I would like to thank my parents and my sister, who've been there for me since the very beginning.
+I would like to thank my parents and my sister, who have been there for me since the very beginning.
 
 \chapter*{Abstract}
 
-Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance matrix and machine learning libraries. Although initially designed as a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types are mostly useless when typing multidimensional array operations. In this thesis, we develop a type calculus and extension to Python's type system that strengthens the static guarantees of the type checker over multidimensional array operations while not sacrificing the simplicity and ease of use that is core to Python's spirit.
+Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance linear algebra, multidimensional array, and machine learning libraries. Initially designed as a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types are do not provide enough information to avoid many runtime errors when typing multidimensional array operations. In this thesis, we develop a type system and extension to Python's type system that strengthens the static guarantees of the type checker over multidimensional array operations while not sacrificing the simplicity and ease of use that is core to Python's spirit.
 
 \tableofcontents
 
 \chapter{Introduction}
 
-Python is a strong and dynamically typed language focused on simplicity and ease of use. Since its invention in the late 1980s, Python has exploded in popularity, seeing rapid adoption in both academia and industry. Its flexibility and approachable syntax made it user-friendly. An increased interest in scientific computing and machine learning from the Python community led to the creation of packages such as \texttt{numpy} and \texttt{pytorch}, which expose high level APIs for high performance C code, circumventing Python's slow execution and enabling rapid development of machine learning and scientific computing applications.
+Python is a strong and dynamically typed language focused on simplicity and ease of use. Since its invention in the late 1980s, Python has exploded in popularity, seeing rapid adoption in both academia and industry for its flexibility and approachable syntax. An increased interest in scientific computing and machine learning from the Python community led to the creation of packages such as \texttt{numpy} and \texttt{pytorch}, which expose high level APIs for high performance machine code, circumventing Python's slow execution and enabling rapid development of machine learning and scientific computing applications.
 
 More recently, Python's dynamic type system has been seen as a weakness rather than a strength. Runtime errors caused by type mismatches can be annoying or potentially disastrous for people deploying Python at scale. To combat this, type annotations were added directly to Python's syntax, and a reference typechecker --- \texttt{mypy} --- was developed to statically analyze the annotations. \texttt{mypy} eliminates a whole class of type errors from Python code but is not powerful enough to reject multidimensional arrays with incompatible dimensions from being multiplied or applied together, resulting in runtime errors in machine learning or scientific computing code.
 
-In this thesis, we develop a type calculus and extension to Python's type system that allows the expression of function signatures that respect the dimensions of multidimensional arrays as they are passed into functions. This contribution further strengthens the type system and makes impossible runtime errors related to the dimensionality of matrices at function application sites.
+In this thesis, we develop a type system and extension to Python's existing type system that allows the expression of function signatures that respect the dimensions of multidimensional arrays as they are passed into functions. This contribution further strengthens the type system and makes runtime errors related to the dimensionality of arrays at function application sites impossible.
 
-Chapter 2 presents background information on type systems, Python, \texttt{mypy}, multidimensional arrays, and related work. Chapter 3 presents the new type calculus for multidimensional arrays, defining syntax and semantics. Chapter 4 evaluates the type calculus in the context of common array and machine learning operations. Chapter 5 concludes.
+Chapter 2 presents background information on type systems, Python, \texttt{mypy}, multidimensional arrays, and related work. Chapter 3 presents the new type system for multidimensional arrays, defining syntax and semantics. Chapter 4 evaluates the type system in the context of common array and machine learning operations. Chapter 5 concludes with a reflection on this thesis's contribution.
 
 \chapter{Background and Related Work}
 
 \section{Type Systems}
 
-A type system in a programming language is a form of program analysis where labels called \textbf{types} are assigned to values and expressions. By reasoning about these types, the system can enforce properties about the execution of programs within the language. Types can be thought of as a set of values that a variable or expression can take, and type checking is the process of determining whether a value or set of values belongs to the set declared or specified. Type systems can range from the simple to the complex and are usually designed with certain properties in mind. The simply typed lambda calculus introduced by Church only had function types but guaranteed that the left sides of applications were always functions and that every expression had a normal form \cite{Church1940AFO}. In contrast, Rust-lang's ownership and type system is able to not only prove that its programs invoke functions with the correct arguments but also that concurrent accesses to memory are safe \cite{rustlang}.
+A type system in a programming language is a form of program analysis where labels called \textbf{types} are assigned to values and expressions. By reasoning about these types, the system can enforce properties about the execution of programs within the language. Types can be thought of as a set of values that a variable or expression can take, and type checking is the process of determining whether a value belongs to the set declared or specified. Type systems can range from the simple to the complex and are usually designed with certain properties in mind. The simply typed lambda calculus introduced by Church only had function types but guaranteed that the left sides of applications were always functions and that every expression had a normal form \cite{Church1940AFO}. In contrast, Rust-lang's ownership and type system is able to not only prove that its programs invoke functions with correctly typed arguments but also that concurrent accesses to memory are safe \cite{rustlang}.
 
-In the remainder of this section, we will examine several dichotomies and classes of type systems that will be relevant later in this paper.
+In the remainder of this section, we will examine several dichotomies and classes of type systems that will be relevant later in this thesis.
 
 \subsection{Static versus Dynamic Type Systems}
 
-In a \textbf{static type system}, the types of a program are checked during the compilation of the program. The type of a function or variable is constant throughout the lifetime of program. The types can be annotated directly or inferred. A static system ensures that no runtime errors relating to the types will occur during the execution of a compiled program. Static type systems benefit greatly from this guarantee and can also use the type information during compilation to perform optimizations. Additionally, type information can be stripped away in the final executable, reducing the size of the resulting program. However, static type systems can be difficult to implement, and their speed slows and complexity grows as the types they seek to support become more complex. C/C++, OCaml, and Rust are examples of languages with static type systems.
+In a \textbf{static type system}, the types of a program are checked during the compilation of the program. The type of a function or variable is constant throughout the lifetime of program. The types can be annotated directly or inferred. A static system ensures that no runtime errors relating to the types will occur during the execution of a compiled program. Static type systems benefit greatly from this guarantee since programmers can run compiled code without fear of many errors. The type information during compilation can be used to perform optimizations. Additionally, type information can be stripped away in the final executable, reducing the size of the resulting program. However, static type systems can be difficult to implement since they can require detailed and subtle program analysis, and the performance of a static type checker slows and its complexity grows as the types it seek to support become more complex. C/C++, OCaml, and Rust are examples of languages with static type systems.
 
-In a \textbf{dynamic type system}, the types of values are checked during the execution of a program. Variables can be reassigned to multiple types. Runtime errors will be thrown if there are operations between incompatible types, such as attempting to add a string and a float. Dynamic type systems are good for their flexibility and ease of implementation; there is no need for type checking or inference ahead of execution. However, their lack of runtime guarantees can be difficult to handle, especially in mission-critical software. Without knowing whether a program can fail in a myriad of ways at runtime makes it hard to have confidence in its deployment. Python (traditionally), Ruby, and Javascript are languages with dynamic type systems.
+In a \textbf{dynamic type system}, the types of values are checked during the execution of a program, and variables can be reassigned to multiple different types. Dynamic type systems are good for their flexibility and ease of implementation; there is no need for type checking or inference ahead of execution. However, their lack of runtime guarantees can be difficult to handle, especially in mission-critical software. Without knowing whether a program can fail in a myriad of ways at runtime makes it hard to have confidence in its deployment. Python (traditionally), Ruby, and Javascript are languages with dynamic type systems.
 
 \subsection{Strong versus Weak Type Systems}
 
-A \textbf{strong type system} enforces that the type expected at a particular program location exactly matches the type found. In other words, no implicit conversions are done between types to make function calls or assignments well-typed. If there are mismatches found, an error either during compilation or runtime is raised. Strong type systems prevent users from accidentally misusing variables or performing computations they did not intend. Users need to bear the additional cost of needing explicit type casts or conversions whenever a type \textit{actually} needs to be used as a different type. Python and OCaml are languages with strong type systems.
+A \textbf{strong type system} enforces that the type expected at a particular program location exactly matches the type found. In other words, no implicit conversions are done between types to make function calls or assignments well-typed. If there are mismatches found, an error either during compilation or runtime is raised. Strong type systems prevent users from accidentally misusing variables or performing computations they did not intend. Users need to bear the additional cost of explicitly type casting or converting whenever a type \textit{actually} needs to be used as a different type. Python and OCaml are languages with strong type systems.
 
-A \textbf{weak type system} attempts to perform certain type conversions implicitly if types do not match as expected. This eliminates the need for constant massaging between various types --- such as when wanting to print an integer --- but can have disastrous consequences. As an example, Javascript has an infamous weak type system, leading to bizarre and unexpected results from inocuous statements like \texttt{12 + "21" == "1221"}. PHP is another example of a weakly typed language.
+A \textbf{weak type system} attempts to perform certain type conversions implicitly if types do not match as expected. This eliminates the need for constant massaging between various types but can have disastrous consequences when unintended or unknown conversions are performed. As an example, Javascript has an infamous weak type system, leading to bizarre and unexpected results from inocuous statements like \texttt{12 + "21" == "1221"}. PHP is another example of a weakly typed language.
 
 \subsection{Other Type Systems}
-\paragraph{Duck Typing}
+\begin{itemize}
 
-Duck typing receives its name from the classic phrase: ``If it looks like a duck, swims like a duck, and quacks like a duck, then it probably is a duck.'' In programming languages, this means the type system does not care about the specific label or class a value belongs to as long as it has certain attributes or implements certain methods. As an example, if we have expression \texttt{x.f()} in a duck typing system, it does not matter whether \texttt{x} is of class A or B or a primitive type, as long as it has a callable method called \texttt{f}. Python is a duck typed language.
+\item \textbf{Duck typing} --- Duck typing receives its name from the phrase: ``If it looks like a duck, swims like a duck, and quacks like a duck, then it probably is a duck.'' In programming languages, a duck type system does not care about the specific label or class a value belongs to as long as it has certain attributes or implements certain methods. As an example, if we have expression \texttt{x.f()} in a duck typing system, it does not matter whether \texttt{x} is of class A or B or a primitive type, as long as it has a callable method called \texttt{f}. Python is a duck typed language.
 
-\paragraph{Gradual Typing}
+\item \textbf{Gradual Typing} --- In a gradually typed language, type annotations are optional. Wherever type annotations are present, type checking is performed. For unannotated code, type checking is either elided or a generic type of \textit{any} is inferred \cite{PythonDropbox}. Gradual type systems allow the incremental adoption of typing in a codebase. Instead of having to type every line of code in a codebase at once, small parts can be annotated and statically checked while the remaining code falls back to runtime checks. Thus, gradual typing achieves a balance between static and dynamic typing. TypeScript and Python with \texttt{mypy} are languages with gradual typing.
 
-In a gradually typed language, type annotations are optional. Wherever type annotations are present, type checking is performed. For unannotated code, type checking is either elided or a generic type of \textit{any} is inferred \cite{PythonDropbox}. Gradual type systems allow the incremental adoption of typing in a codebase. Instead of having to type every line of code in a codebase at once, small parts can be annotated and statically checked while the remaining code falls back to runtime checks. Thus, gradual typing achieves a balance between static and dynamic typing. TypeScript and Python with \texttt{mypy} are languages with gradual typing.
-
-\paragraph{Dependent and Refinement Types}
-
-Dependent type systems extend traditional type systems by allowing values from the language be a part of the type. This allows further specificity of the sets of values that can inhabit a type. As an example,the traditional type \texttt{List int} represents the set of all lists of any length that contain only integers. An analagous dependent type might be \texttt{List int 4}, denoting the set of integer lists which have exactly length 4. We can take this dependent type further with a function
+\item \textbf{Dependent and Refinement Types} --- Dependent type systems extend traditional type systems by allowing values from the language be a part of the type. This allows further specificity of the sets of values that can inhabit a type. As an example, the traditional type \texttt{List int} represents the set of all lists of any length that contain only integers. An analagous dependent type might be \texttt{List int 4}, denoting the set of integer lists which have exactly length 4. We can take this dependent type further with a function
 
 \begin{singlespace*}\begin{center}
     \texttt{def f(x: int) -> List int x: ...}
 \end{center} \end{singlespace*}
-which represents a function who accepts an integer and returns a list of exactly the length provided. Dependent types allow us to powerfully reason about the static properties of our language and will useful in our reasoning about matrix dimensions later.
+which represents a function who accepts an integer and returns a list of exactly the length provided. Dependent types allow us to powerfully reason about the static properties of our language and will be useful in our reasoning about multidimensional arrays later.
 
-Refinement types are a form of dependent types in which the set of values in a type can be filtered by predicates attached to a type. One refinement type system is Liquid Haskell (LH), which embeds refinement types in the Haskell programming language \cite{Jhala2014RefinementTF}. Refinement types offer a convenient way to declare specific types, and we explore this further in a later section.
+Refinement types are a form of dependent types in which the set of values in a type can be filtered by predicates attached to a type. One refinement type system is Liquid Haskell (LH), which embeds refinement types in the Haskell programming language \cite{Jhala2014RefinementTF}. Refinement types offer a convenient way to declare specific types.
 
-As a demonstration of the power of refinement types (and also their potential weakness), consider the function that accepts a list and an integer for indexing into the list. In a simple type system, the type of such a function might be:
+As a demonstration of the power of refinement types (and also their potential weakness), consider the function that accepts a list and an integer for indexing into the list. In a simple type system, the type of the function might be:
 
 \begin{singlespace*}
 \begin{center} \texttt{def index(lst: List[A], i: int) -> A: ...} \end{center} \end{singlespace*}
 
-This type prevents improper indexing where the second argument is not an integer or where the first argument is not a list. However, this type declaration still allows for runtime errors to occur, like the invocation \texttt{index([], 1)}. This will raise an exception since \texttt{1} exceeds the maximum index of the empty list.
+This type prevents improper indexing where the second argument is not an integer or where the first argument is not a list. However, programs that type check with this signature will still raise runtime errors at invocations like \texttt{index([], 1)}. This will raise an exception since \texttt{1} exceeds the empty list's maximum index.
 
-A stronger type --- one that is possible to declare in Liquid Haskell --- can statically prevent such malformed invocations. See Figure \ref{lh-type-indexing} for the declaration of the type. This type declaration prevents the misuse of the \texttt{index} function and statically raises a type error for the use \texttt{index [] 0}, which Python was unable to do. However, it is clear that the cost of such expressiveness is increased verbosity in the type declaration.
+A stronger type --- one that is possible to declare in Liquid Haskell --- can statically prevent these malformed invocations. See Figure \ref{lh-type-indexing} for the declaration of the type. This type declaration prevents the misuse of the \texttt{index} function and statically raises a type error for the use \texttt{index [] 0}, which Python was unable to do. However, the cost of such expressiveness and specificity is increased verbosity in the type declaration.
 
 \begin{figure}
     \centering
@@ -137,10 +134,12 @@ test2 = index [] 0 {- type error -}\end{verbatim}
     \label{lh-type-indexing}
 \end{figure}
 
+\end{itemize}
+
 
 \section{Python}
 
-In this section, we examine some of Python's history and design philosophy, its type system, and its matrix and machine learning libraries.
+In this section, we examine some of Python's history and design philosophy, its type system, and its linear algebra and machine learning libraries.
 
 \subsection{History and Design Philosophy}
 
@@ -171,23 +170,23 @@ Python is well-known for its simplicity, readability, and ease-of-use, and these
     Namespaces are one honking great idea -- let's do more of those!
 \end{quote}
 \end{singlespace*}
-These aphorisms can be accessed from any Python REPL via the command \texttt{import this}.
+These aphorisms are so important that they are included in every Python REPL; you can access them via \texttt{import this}.
 
-Python design seems to carefully follow the above mantra. Python blocks are delimited by whitespace and its syntax closely resembles pseudocode. Variable types are never explicitly declared, memory is automatically managed and garbage collected, returning different types from functions is allowed. Python allows a programmer to sanely accomplish whatever they want with little friction. Large companies and academics --- including Google, Instagram, and Dropbox --- all use Python in their systems or research \cite{python-quotes}.
+Python's design carefully follows the above mantra. Python blocks are delimited by whitespace and its syntax closely resembles pseudocode. Variable types are never explicitly declared, memory is automatically managed and garbage collected, returning different types from functions is allowed. Python's goal is to allow a programmer to sanely accomplish whatever they want with almost no friction. Large companies and academics --- including Google, Instagram, and Dropbox --- all use Python in their systems or research \cite{python-quotes}.
 
-\subsection{\texttt{numpy} and other matrix libraries}
+\subsection{\texttt{numpy} and other numerical libraries}
 
-Python unlocks a much faster speed of iteration, but it has its shortcomings. Since it is an interpreted language, it can be difficult to achieve performant code. Python does have a bytecode format which can speed up interpretation, but it is order of magnitudes slower than other compiled languages.
+Python unlocks a much faster speed of iteration, but it has its shortcomings. Since it is an interpreted language, it can be difficult to write performant code. Typically, Python is several orders of magnitude slower than other compiled languages.
 
-As more and more people began to use Python for scientific and machine learning purposes, its speed increasingly became a barrier. This slowness led to the development of the library \texttt{numpy} which exposes a high-level API for declaring and operating on multi-dimensional matrices. \texttt{numpy} achieves fast performance by implementing all of its algorithms in highly optimized and low-level code and then linking those into Python. Machine learning libraries such as \texttt{pytorch} and \texttt{tensorflow} took similar approaches, providing high-level APIs for model training while using optimized GPU code to provide speed and parallelism. In a future section, we will further explore the objects and operations that are exposed by these libraries.
+As more and more people began to use Python for scientific computing and machine learning purposes, its speed increasingly became a barrier. This slowness led to the development of the library \texttt{numpy} which exposes a high-level API for declaring and operating on multidimensional arrays. \texttt{numpy} achieves fast performance by implementing all of its algorithms in highly optimized mahine code and then linking into Python. Machine learning libraries such as \texttt{pytorch} and \texttt{tensorflow} take similar approaches, providing high-level APIs for model training while using optimized GPU code to provide speed and parallelism \cite{Paszke2017AutomaticDI}. In a future section, we will further explore the objects and operations that are exposed by these libraries.
 
-The advent of these libraries has allowed engineers and researchers to continue to leverage the flexibility of Python while not sacrificing the speed of their execution and model training.
+The advent of these libraries has allowed engineers and researchers to leverage the flexibility of Python while not sacrificing the speed of their execution and model training.
 
 \subsection{\texttt{mypy} --- Python Typing}
 
-Recently, dynamic typing in Python has become seen as a weakness rather than a strength, especially in large organizations. While Python's flexibility initially made development fast and easy, this did not scale as more engineers began to work on the codebase. Not only were runtime type errors possible, it was also difficult to look at functions and immediately determine their expectations for the type of their inputs and outputs. This emphasizes the fact that types not only function as a form of safety for a program but also as a form of self-documentation. Jukka Lehtosalo recognized these weaknesses and, with the help of Guido and others, developed a static type system and gradual type checker for Python --- \texttt{mypy}. As part of PEP 484, Python was officially extended with type annotation in version 3.5 in 2015 \cite{pep484}.
+Recently, dynamic typing in Python has been seen as a weakness rather than a strength, especially in large organizations. While Python's flexibility initially made development fast and easy, it did not scale as the size of Python codebases grew. Not only were runtime type errors possible, it was also difficult to look at functions and immediately determine their expectations for the type of their inputs and outputs. This emphasizes the fact that types not only function as a form of safety for a program but also as a form of self-documentation. Jukka Lehtosalo recognized these weaknesses and, with the help of Guido and others, developed a static type system and gradual type checker for Python --- \texttt{mypy}. As part of PEP 484, Python was officially extended with type annotation in version 3.5 in 2015 \cite{pep484}.
 
-There are now several type checkers for Python including \texttt{pyre} from Facebook and \texttt{pytype} from Google. As of September 2019, Dropbox had reportedly typed 4 million lines of their Python code \cite{PythonDropbox}.
+There are now several type checkers for Python, including \texttt{pyre} from Facebook and \texttt{pytype} from Google. The static checkers are becoming more widespread; as of September 2019, Dropbox had reportedly typed 4 million lines of their Python code \cite{PythonDropbox}.
 
 We now give an overview of the types that \texttt{mypy} supports.
 \begin{itemize}
@@ -215,11 +214,11 @@ f(b) # will type check\end{verbatim}
 
     \item \textbf{Union types} --- union types are created via the \texttt{Union[Type1, Type2]} operator, allowing a value to be assigned to something from either of the two types.
 
-    \item \textbf{Option types} --- \texttt{mypy} also provides support for option types via \texttt{Optional[Type]}. Although languages with option types typicall have explicit \texttt{None} and \texttt{Some x} constructors, Python simplifies this by having a \texttt{None} and a bare value \texttt{x} for the \texttt{Some} case.
+    \item \textbf{Option types} --- \texttt{mypy} also provides support for option types via \texttt{Optional[Type]}. Although languages with option types typically have explicit \texttt{None} and \texttt{Some x} constructors, Python simplifies this by having a \texttt{None} and a bare value \texttt{x} for the \texttt{Some} case.
 
-    \item \textbf{Duck typing} --- Python is a duck-typed language, and \texttt{mypy} makes this support explicit. For example, the type \texttt{Iterable[Type]} accepts any object which implements the \texttt{.next()} method and returns the type \texttt{Type}. Similarly, \texttt{Mapping[Type1, Type2]} accepts any object which implements the method \texttt{.__getitem__(x: Type1)} and returns the type \texttt{Type2}. In both of these examples, the exact type of the object does not matter, only that it implements a specific set of methods.
+    \item \textbf{Duck typing} --- Python is a duck-typed language, and \texttt{mypy} makes this support explicit. For example, the type \texttt{Iterable[Type]} accepts any object which implements the \texttt{.next()} method and returns \texttt{Type}. Similarly, \texttt{Mapping[Type1, Type2]} accepts any object which implements the method \texttt{.__getitem__(x: Type1)} and returns \texttt{Type2}. In both of these examples, the exact class of the object does not matter, only that it implements a specific set of methods.
 
-    \item \textbf{Function overloading} --- in \texttt{mypy}, function signatures can be overloaded, meaning that functions can have multiple signatures. This is enabled via the \texttt{@overload} decorator on function. As an example:
+    \item \textbf{Function overloading} --- in \texttt{mypy}, function signatures can be overloaded, meaning that functions can have multiple signatures. This is enabled via the \texttt{@overload} decorator on a function. As an example:
 
     \begin{singlespace*}
     \begin{verbatim}
@@ -238,7 +237,7 @@ def f(x: Union[int, str]) -> Union[int, str]:
 f(1) # will type check with type str
 f('hello') # will type check with type int\end{verbatim}
     \end{singlespace*}
-    Because of the \texttt{overload}, \texttt{mypy} is able to infer a much more specific type for each of the function calls rather than just \texttt{Union[int, str]}.
+    Because of the \texttt{overload}, \texttt{mypy} is able to infer a more specific type for each of the function calls rather than just \texttt{Union[int, str]}.
 
     \item \textbf{Literal values} --- \texttt{mypy} is not a general dependent type checker, but it does have a construct \texttt{Literal[Value]} which requires that a parameter or variable be assigned to exactly the value specified in the \texttt{Literal} constructor. For example,
 
@@ -256,14 +255,14 @@ x = 3 - 2 # will not type check\end{verbatim}
 
 From above, we can see that Python's type system is fairly straightforward. Besides the \texttt{Literal} constructor, Python features no dependent types. This is seemingly a conscious choice; Python invokes its own ethos as described in ``The Zen of Python'' and opts for a type system that is easy to check and declare rather than one that provides the most powerful guarantees.
 
-\section{Matrix library objects and operations}
+\section{Linear Algebra Library Objects and Operations}
 
-\subsection{Multidimensional arrays}
+\subsection{Multidimensional Arrays}
 \label{multidimensional}
 
-The fundamental object for storing data in matrix and machine learning libraries like \texttt{numpy} and \texttt{pytorch} is the \textbf{multidimensional} or \textbf{N-dimensional array}. In linear algebra, the fundamental elements are vectors and matrices. Vectors are arrays of numbers. Matrices are arrays of arrays of numbers. \texttt{numpy} generalizes these constructs to an arbitrary number of ``arrays of arrays of arrays of ... of numbers.''. With this generalization, vectors are multidimensional arrays with one dimension, and matrices are multidimensional arrays with two dimensions. Solo scalars can even be represented by multidimensional arrays with zero dimensions. The number of dimensions and the size of each dimension the array is represented by a tuple of integers which is generally referred to as its \textbf{shape} \cite{ndarray}.
+The fundamental object for storing data in numerical linear algebra and machine learning libraries like \texttt{numpy} and \texttt{pytorch} is the \textbf{multidimensional} or \textbf{N-dimensional array}. In linear algebra, the fundamental elements are vectors and matrices. Vectors are arrays of numbers. Matrices are arrays of arrays of numbers. \texttt{numpy} generalizes these constructs to an arbitrary number of ``arrays of arrays of arrays of ... of numbers.'' With this generalization, vectors are multidimensional arrays with one dimension, and matrices are multidimensional arrays with two dimensions. Solo scalars can even be represented by multidimensional arrays with zero dimensions. The number of dimensions and the size of each dimension the array is represented by a tuple of integers which is generally referred to as its \textbf{shape} \cite{ndarray}.
 
-To see why this representation is useful, we look at some examples. A vector of length 10 is represented by a shape of $(10,)$. A $2 \times 2$ matrix is represented by a shape of $(2, 2)$. A dataset of 1000 $256 \times 256$ resolution images, each with distinct RGB channels, could be represented by the shape $(1000, 3, 256, 256)$. The scalar $1$ is also a multidimensional array with shape $(,)$ (the empty tuple).
+To see why this representation is useful, we can look at some examples. A vector of length 10 is represented by a shape of $(10,)$. A $2 \times 2$ matrix is represented by a shape of $(2, 2)$. A dataset of 1000 $256 \times 256$ resolution images, each with distinct RGB channels, could be represented by the shape $(1000, 3, 256, 256)$. The scalar $1$ is also a multidimensional array with shape $(,)$ (the empty tuple).
 
 \subsection{Operations on Multidimensional Arrays}
 \label{ndarray-operations}
@@ -271,7 +270,7 @@ To see why this representation is useful, we look at some examples. A vector of 
 \texttt{numpy} and related libraries define many operations over these multidimensional arrays. We cover some of the more useful and common operations here \cite{numpy-manual}.
 
 \begin{itemize}
-    \item \textbf{Broadcasting} --- a unique operation between multidimensional arrays that does not have a linear algebra interpretation. Broadcasting occurs whenever there is a binary infix operator --- such as +, -, /, etc. --- acting between two arrays or there is assignment from one array to a slice of another.
+    \item \textbf{Broadcasting} --- a unique operation between multidimensional arrays that does not have a linear algebra interpretation. Broadcasting occurs whenever there is a binary infix operator --- such as +, -, /, etc. --- acting between two arrays, or there is assignment from one array to a slice of another.
 
     To determine whether two arrays can broadcast, we start with the \textit{last} dimensions of both arrays. We continue pairing the dimensions of both arrays until one or both run out of dimensions to pair. For each pair of dimensions, the dimensions must be equal or at least one of the dimensions must be equal to one. If broadcasting succeeds, the resulting array has the same number of dimensions as the longer of the two original arrays. The dimensions of the final array are the maximum of the two original arrays' dimensions.
 
@@ -292,25 +291,25 @@ To see why this representation is useful, we look at some examples. A vector of 
 
     \item \textbf{Concatenation} --- takes two arrays and an axis and returns the result of concatenating those arrays along the axis. For concatenation to succeed, the dimensions of the two arrays must agree for all indices except for the one on which they are concatenated.
 
-    \item \textbf{Model training} \cite{sklearn} --- in supervised model training, the model is usually fed the data, $X$, and a list of labels, $y$.In order for the training to succeed, the number of data points in $X$ must match the number of labels in $y$.
+    \item \textbf{Model training} \cite{sklearn} --- in supervised model training, the model is usually fed the data, $X$, and a list of labels, $y$. In order for the training to succeed, the number of data points in $X$ must match the number of labels in $y$.
 \end{itemize}
 These are just a small sample of the operations we can perform on multidimensional arrays, but they are exactly the operations we would like to more strongly type in Python.
 
-\subsection{\texttt{numpy} operations in \texttt{mypy}}
+\subsection{\texttt{numpy} Operations in \texttt{mypy}}
 
 We can examine how we can type some \texttt{numpy} operations using \texttt{mypy}'s current capabilities. For the \texttt{np.dot} function described above, the most specific type we can write is
 \begin{center}
     \texttt{def dot(a: np.ndarray, b: np.ndarray) -> np.ndarray: ...}
 \end{center}
-Although this signature will prevent nonsensical calls to \texttt{np.dot} with \texttt{str} arguments, it does not capture the most interesting part of the operation. Fundamentally, what we care about is the underlying \textit{shape} of the multidimensional arrays and how those shapes do or do not match to correctly dot together. For any other multidimensional array functions, the signature will look very similar, with \texttt{mypy} only able to restrict to the class \texttt{np.ndarray} and no further.
+Although this signature will prevent nonsensical calls to \texttt{np.dot} with \texttt{str} arguments, it does not capture the most interesting part of the operation. Fundamentally, what we care about is the underlying \textit{shape} of the multidimensional arrays and how those shapes do or do not match to correctly dot together. For any other multidimensional array functions, the signature will look very similar, with \texttt{mypy} only able to restrict to the class \texttt{np.ndarray} and no further. It will be the goal of our new type system to overcome this barrier.
 
-\subsection{Multidimensional arrays in Liquid Haskell}
+\subsection{Multidimensional Arrays in Liquid Haskell}
 
 As an experiment in the expressivity of Liquid Haskell and the practicality of refinement types, we attempt to express a strict type for multidimensional arrays. The resulting code can be found in Figure \ref{lh-nparray}. There are a couple things to note here. First, this representation has the desired property that the shape of the multidimensional array is a part of the matrix type. Refinement and dependent types have lifted the shape value into the type, which will allow us to refer to the shape as part of our type signatures for array operations. Second, the representation is \textit{long}. LH's power and type expressivity have allowed us to express this complicated type, but there is an explosion in verbosity and complexity as a result.
 
 \begin{figure}
     \centering
-    \begin{verbatim}
+    {\small\begin{verbatim}
 {-@ LIQUID "--exact-data-con" @-}
 {-@ LIQUID "--reflection" @-}
 {-@ LIQUID "--ple" @-}
@@ -355,7 +354,7 @@ isLeft (Right _) = False
                                   {head1 nDims})
         | (isLeft v && size nDims = 0) || (not (isLeft v) && size nDims > 0) }} @-}
 
-{-@ type NdarrayN a N = {v : Ndarray a | nDims v = N} @-}\end{verbatim}
+{-@ type NdarrayN a N = {v : Ndarray a | nDims v = N} @-}\end{verbatim}}
     \caption{Sample implementation of the \texttt{np.ndarray} type in LH}
     \label{lh-nparray}
 \end{figure}
@@ -366,17 +365,17 @@ As machine learning and linear algebra routines have become more and more popula
 
 \subsection{Vector and Matrix Embeddings}
 
-Eaton makes similar observations about the benefit of highly optimized matrix library code, generally available via the BLAS interface. Using Haskell's type system, Eaton is able to embed the dimensions of vectors and matrices directly into their types. Thus, he is able to get type safe matrix operations. Eaton observes that the Haskell implementation outperforms Octave (another linear algebra programming language) and achieves performance on par with Matlab. However, he laments that the Haskell compiler can generate cryptic errors at locations far removed from the actual dimensionality bugs, making it less ergonomic than desirable \cite{Eaton2006StaticallyTL}. Other packages available on Haskell, such as HMatrix, also provided matrix types with shapes \cite{hmatrix}.
+In \cite{Eaton2006StaticallyTL}, Eaton makes similar observations about the benefit of highly optimized matrix library code, generally available via the BLAS interface. Using Haskell's type system, Eaton is able to embed the dimensions of vectors and matrices directly into their types. Thus, he is able to get type safe matrix operations. Eaton observes that the Haskell implementation outperforms Octave (another linear algebra programming language) and achieves performance on par with Matlab. However, he laments that the Haskell compiler can generate cryptic errors at locations far removed from the actual dimensionality bugs, making it less ergonomic than desirable. Other packages available on Haskell, such as HMatrix, also provided matrix types with shapes \cite{hmatrix}.
 
-Abe and Sumii achieve similar matrix and vector bindings for OCaml. What is incredible about their bindings is that they use the standard OCaml system to embed the dimension of matrices into their types. OCaml does \textit{not} have any form of dependent typing, so such an embeding is a remarkable achievement \cite{Abe2015ASA}.
+In \cite{Abe2015ASA}, Abe and Sumii achieve similar matrix and vector bindings for OCaml. What is incredible about their bindings is that they use the standard OCaml system to embed the dimension of matrices into their types. OCaml does \textit{not} have any form of dependent typing, so such an embeding is a remarkable achievement.
 
-Eaton and Abe and Sumii's results are interesting but fall short of the general goal of typing multidimensional arrays since their methods only work for vectors and matrices.
+Eaton and Abe and Sumii's results are interesting but fall short of the general goal of typing multidimensional arrays since their methods only work for vectors and matrices. This is an inherent limitation of their representation. Each dimension of their vector or matrix is passed as a separate argument to their type rather than all dimensions being passed in a single array.
 
 \subsection{Multidimensional Array Embeddings}
 
-Work has been done for the more general case of multidimensional arrays beyond just matrices. In Rink 2018, the author represents the type of multidimensional arrays as lists of integers --- analogous to the shape discussed in Section \ref{multidimensional}. Rink also identifies common operations between the shapes of multidimensional arrays. He includes swapping dimensions, dropping dimensions if they are equal, and concatenating the shapes of two arrays. However, the paper requires that the shapes contain only integers --- no abstract values --- and the arguments to the operators he declares must also be integers. Furthermore, there is no concept of array types which accept an arbitrary number of dimensions \cite{Rink2018ModelingOL}.
+Work has been done for the more general case of multidimensional arrays. In \cite{Rink2018ModelingOL}, Rink represents the type of multidimensional arrays as lists of integers --- analogous to the shape discussed in Section \ref{multidimensional}. Rink also identifies common operations between the shapes of multidimensional arrays. He includes swapping dimensions, dropping dimensions if they are equal, and concatenating the shapes of two arrays. However, the paper requires that the shapes contain only concrete integers --- no abstract values like $N$ --- and the arguments to the operators he declares must also be integers. Furthermore, there is no concept of array types which accept an arbitrary number of dimensions.
 
-Chen 2017 embeds a multidimensional array type in the Scala type system, leveraging Scala's built-in heterogenous list (HList) type. Like Rink, Chen defines and implements several operations over the shape types, including inserting a new dimension and contracting all dimensions that are equal. Unlike Rink, Chen's dimensions are abstract and do not require concrete integers. Also, Chen's dimensions allow for an arbitrary number of dimensions by having the shape be a generic subtype of an HList. Overall, Chen's embedding most closely matches the embedding we desire in Python's type system. It still lacks support for the atypical broadcast operator, and arithmetic between the dimensions of the arrays does not seem to be allowed. It is not possible to specify exact integers for the dimensions of an array if desired. Also, it appears that the use of user-provided integers is not possible in the embedding.
+\cite{Chen2017TypesafeAF} embeds a multidimensional array type in the Scala type system, leveraging Scala's built-in heterogenous list (HList) type. Like Rink, Chen defines and implements several operations over the shape types, including inserting a new dimension and contracting all dimensions that are equal. Unlike Rink, Chen's dimensions are abstract and do not require concrete integers. Also, Chen's dimensions allow for an arbitrary number of dimensions by having the shape be a generic subtype of an HList. Overall, Chen's embedding most closely matches the embedding we desire in Python's type system. It still lacks support for the atypical broadcast operator, and arithmetic between the dimensions of the arrays does not seem to be allowed. It is not possible to specify exact integers for the dimensions of an array if desired. Also, it appears that the use of user-provided integers is not possible in the embedding.
 
 \chapter{A Type Calculus for Multidimensional Arrays}
 
@@ -397,6 +396,7 @@ Having seen the semantics of multidimensional arrays and various embeddings in o
         \alt Spread <string>
         \alt Drop (<string>, (<string> | <int>)*)
         \alt Keep (<string>, (<string> | <int>)*)
+        \alt Broadcast <string>
 
         <functionarg> ::= (<string>, <type>)
 
@@ -410,21 +410,21 @@ Having seen the semantics of multidimensional arrays and various embeddings in o
 
 We present the syntax extension and give intution for the various constructs. The new major type is the \textbf{Ndarray}. This type represents a multidimensional array with certain shape. It accepts a list of \textit{dimensions} to represent the concrete or abstract dimensions of the array. \textit{dimensions} have several constructs.
 \begin{itemize}
-    \item \textbf{Id} --- declares or references an abstract dimension of an array, one that can be of any non-negative length. Can even refer to a user provided parameter name as long as the type of that parameter is a \textbf{LiteralInt}.
+    \item \textbf{Id} --- declares or references an abstract dimension of an array, one that can be of any non-negative length. It can even refer to a user provided parameter name as long as the type of that parameter is a \textbf{LiteralInt}.
 
     \item \textbf{Int} --- declares a dimension that must be exactly a certain size.
 
-    \item \textbf{Add} --- declares a dimensions that is the result of adding the sizes of previously declared dimensions. \textbf{Add} can contain other \textbf{Add}, \textbf{Mul}, \textbf{Id}, and \textbf{Int} dimensions. In Python syntax, can be represented by the \texttt{+} operator.
+    \item \textbf{Add} --- declares a dimensions that is the result of adding the sizes of previously declared dimensions. \textbf{Add} can contain other \textbf{Add}, \textbf{Mul}, \textbf{Id}, and \textbf{Int} dimensions. In Python syntax, it can be represented by the \texttt{+} operator.
 
-    \item \textbf{Mul} --- declares a dimensions that is the result of multiplying the sizes of previously declared dimensions. \textbf{Add} can contain other \textbf{Add}, \textbf{Mul}, \textbf{Id}, and \textbf{Int} dimensions. In Python, can be represented by the \texttt{*} operator.
+    \item \textbf{Mul} --- declares a dimensions that is the result of multiplying the sizes of previously declared dimensions. \textbf{Add} can contain other \textbf{Add}, \textbf{Mul}, \textbf{Id}, and \textbf{Int} dimensions. In Python, it can be represented by the \texttt{*} operator.
 
-    \item \textbf{Spread} --- declares or references an arbitrary number of dimensions that have arbitrary sizes. In Python, can be represented as \texttt{*A} where \texttt{A} could be an arbitrary variable name.
+    \item \textbf{Spread} --- declares or references an arbitrary number of dimensions that have arbitrary sizes. In Python, it can be represented as \texttt{*A} where \texttt{A} could be an arbitrary variable name.
 
     \item \textbf{Drop} --- references an arbitrary number of dimensions declared by a \textbf{Spread} operation and allows the dropping of one or more of the captured dimensions. The dimensions to be dropped can be provided as direct integers or as IDs referencing user parameters as long as those parameters are of type \textbf{LiteralInt}.
 
     \item \textbf{Keep} --- references an arbitrary number of dimensions declared by a \textbf{Spread} operation and allows keeping one or more of the captured dimensions, discarding the rest. The dimensions to be kept can be provided as direct integers or as IDs referencing user parameters as long as those parameters are of type \textbf{LiteralInt}.
 
-    \item \textbf{Broadcast} --- references an arbitrary number of dimensions mapped by a \textbf{Spread} operation. Ensures that there is a prefix of the argument dimensions that broadcasts with the dimensions.
+    \item \textbf{Broadcast} --- references an arbitrary number of dimensions mapped by a \textbf{Spread} operation. This constructor ensures that there is a prefix of the argument dimensions that broadcasts with the dimensions.
 
 \end{itemize}
 
@@ -448,16 +448,16 @@ We now provide a formal semantics for type checking the types defined above. The
 
 At a high level, checking falls into three steps:
 \begin{enumerate}[label=\arabic*.]
-    \item \textbf{Application checking} --- this checks a \textit{function type} against a list of \textit{arg types}. For each parameter in the function type, the type of the parameter is checked against the type of the corresponding argument. If each of the parameter types checks, then we can form the return type from the context. Represented by the relation
-    $$\Gamma, \Sigma, \Pi \vdash_{A} (param\_types, ret\_type), args : \Gamma', \Sigma', \Pi', \tau$$
+    \item \textbf{Application checking} --- this checks a \textit{function type} against a list of \textit{arg types}. For each parameter in the function type, the type of the parameter is checked against the type of the corresponding argument. If each of the parameter types checks, then we can form the return type from the context. It is represented by the relation
+    \[\Gamma, \Sigma, \Pi \vdash_{A} (param\_types, ret\_type), args : \Gamma', \Sigma', \Pi', \tau\]
 
-    \item \textbf{Parameter/argument checking} --- this checks a specific parameter type against the provided argument type. If the parameter type is an integer, the type checking is straightforward. We simply check that the argument type is an integer, literal integer, or \textbf{Ndarray} with 0 dimensions (which is equivalent to a scalar integer). If the parameter is a literal integer, we check that the argument type is also a literal integer of the same value. If the parameter type is an \textbf{Ndarray}, after verifying that the argument type is also an \textbf{Ndarray}, we need to do further checking of the dimensions of the parameter and argument type. Represented by the relation
+    \item \textbf{Parameter/argument checking} --- this checks a specific parameter type against the provided argument type. If the parameter type is an integer, the type checking is straightforward. We simply check that the argument type is an integer, literal integer, or \textbf{Ndarray} with 0 dimensions (which is equivalent to a scalar integer). If the parameter is a literal integer, we check that the argument type is also a literal integer of the same value. If the parameter type is an \textbf{Ndarray}, after verifying that the argument type is also an \textbf{Ndarray}, we need to do further checking of the dimensions of the parameter and argument type. It is represented by the relation
     $$\Gamma, \Sigma, \Pi \vdash_{P} (type, arg\_type) : \Gamma', \Sigma', \Pi'$$
 
 
-    \item \textbf{Dimension checking} --- this is the ``lowest'' level of the type checking. Here we will establish equalities and mappings between the dimensions required by the type and those provided in the arguments. For each of the dimension constructs, there are different typing rules. Let \textit{args} represent the dimensions of the argument type. Represented by the relation
+    \item \textbf{Dimension checking} --- this is the ``lowest'' level of the type checking. Here we will establish equalities and mappings between the dimensions required by the type and those provided in the arguments. For each of the dimension constructs, there are different typing rules. Let \textit{arg\_dims} represent the dimensions of the argument type. It is represented by the relation
     $$\Gamma, \Sigma, \Pi \vdash_{D} (dimension, arg\_dims) : \Gamma', \Sigma', \Pi', rem\_dimensions$$
-    For any proofs about equality between integers, we defer to an SMT solver (Z3). We now present informal rules for checking each of the dimension types.
+    For any proofs about equality between integers, we defer to an SMT solver (Z3). We now present informal rules for checking each of the dimension types. Let $hd$ be the standard function that gets the head of a list.
 
     \begin{itemize}
         \item \textbf{Id} \textit{i} --- if \textit{i} is not in $\Gamma$, then map $\Gamma[i \mapsto hd(arg\_dims)]$ and continue type checking the remaining argument dimensions. If \textit{i} is in $\Gamma$, then prove that $\Gamma(i) = hd(arg\_dims)$. Alternatively, if \textit{i} is in $\Pi$ and $\Pi(i) = \textbf{LiteralInt}~n$, then prove that $n = hd(arg\_dims)$.
@@ -505,6 +505,7 @@ The formalized semantics for the type checking are provided in the following fig
 \end{figure}
 
 \begin{figure}
+    {\small
     $$\textsc{CheckDimIdNotFound}~\frac{n \not\in \Gamma}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Id}~n, h :: t) : \Gamma[n \mapsto h], \Sigma, \Pi, t}$$
 
     $$\textsc{CheckDimIdFound}~\frac{n \in \Gamma \qquad \Gamma(n) = h}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Id}~n, h :: t) : \Gamma, \Sigma, \Pi, t}$$
@@ -526,11 +527,13 @@ The formalized semantics for the type checking are provided in the following fig
     $$\textsc{CheckDimKeep}~\frac{n \in \Sigma \qquad \Pi \vdash_L \ell \rightsquigarrow \ell' \qquad keep(\Sigma(n), \ell') = front}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Keep}~(n, \ell), front @ back) : \Gamma, \Sigma, \Pi, back}$$
 
     $$\textsc{CheckDimBroadcast}~\frac{n \in \Sigma \qquad \Sigma(n) =_B front}{\Gamma, \Sigma, \Pi \vdash_D (\textbf{Broadcast}~n, front @ back) : \Gamma, \Sigma, \Pi, back}$$
-
+    }
     \caption{Formal semantics of dimension checking}
     \label{semantics:dim}
 \end{figure}
+
 \begin{figure}
+    {\small
     $$\textsc{RetInt}~\frac{}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Int} : \textbf{Int}}$$
 
     $$\textsc{RetLiteralInt}~\frac{}{\Gamma, \Sigma, \Pi \vdash_R \textbf{LiteralInt}~i : \textbf{LiteralInt}~i}$$
@@ -541,9 +544,9 @@ The formalized semantics for the type checking are provided in the following fig
 
     $$\textsc{RetNdarrayFullInt}~\frac{\Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~t : \textbf{Ndarray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~(\textbf{Int}~i :: t) : \textbf{Ndarray}~()\textbf{Int}~i :: t')}$$
 
-    $$\textsc{RetNdarrayFullAdd}~\frac{\Gamma, \Pi \vdash_T d_1 \rightarrow e_1 \qquad \Gamma, \Pi \vdash_T d_2 \rightarrow e_2 \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~t : \textbf{Ndarray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~(\textbf{Add}~(d_1, d_2) :: t) : \textbf{Ndarray}~(\textbf{Add}~(e_1, e_2) :: t')}$$
+    $$\textsc{RetNdarrayFullAdd}~\frac{\begin{gathered}\Gamma, \Pi \vdash_T d_1 \rightarrow e_1 \qquad \Gamma, \Pi \vdash_T d_2 \rightarrow e_2 \\ \Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~t : \textbf{Ndarray}~t'\end{gathered}}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~(\textbf{Add}~(d_1, d_2) :: t) : \textbf{Ndarray}~(\textbf{Add}~(e_1, e_2) :: t')}$$
 
-    $$\textsc{RetNdarrayFullMul}~\frac{\Gamma, \Pi \vdash_T d_1 \rightarrow e_1 \qquad \Gamma, \Pi \vdash_T d_2 \rightarrow e_2 \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~t : \textbf{Ndarray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~(\textbf{Mul}~(d_1, d_2) :: t) : \textbf{Ndarray}~(\textbf{Mul}~(e_1, e_2) :: t')}$$
+    $$\textsc{RetNdarrayFullMul}~\frac{\begin{gathered}\Gamma, \Pi \vdash_T d_1 \rightarrow e_1 \qquad \Gamma, \Pi \vdash_T d_2 \rightarrow e_2 \\ \Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~t : \textbf{Ndarray}~t'\end{gathered}}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~(\textbf{Mul}~(d_1, d_2) :: t) : \textbf{Ndarray}~(\textbf{Mul}~(e_1, e_2) :: t')}$$
 
     $$\textsc{RetNdarrayFullSpread}~\frac{n \in \Sigma \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~t : \textbf{Ndarray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~(\textbf{Spread}~n :: t) : \Sigma(n) @ t'}$$
 
@@ -551,7 +554,7 @@ The formalized semantics for the type checking are provided in the following fig
 
     $$\textsc{RetNdarrayFullKeep}~\frac{n \in \Sigma \qquad \Pi \vdash_L \ell \rightsquigarrow \ell' \qquad \Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~t : \textbf{Ndarray}~t'}{\Gamma, \Sigma, \Pi \vdash_R \textbf{Ndarray}~(\textbf{Keep}~(n, \ell) :: t) : keep(\Sigma(n), \ell') @ t'}$$
     \caption{Formal semantics of return types}
-    \label{semantics:ret}
+    \label{semantics:ret}}
 \end{figure}
 
 \begin{figure}
@@ -581,11 +584,11 @@ The formalized semantics for the type checking are provided in the following fig
 
 \section{Implementation}
 
-We implement the above typing rules in OCaml. The code can be found online at \url{https://github.com/theodoretliu/thesis}.
+We implement the above typing rules in OCaml. We opted not to directly augment the \texttt{mypy} checker because it was a massive and difficult-to-interpret code base. OCaml lends itself nicely to implementing inference rules because of its first class support for algebraic data types. The code can be found online at \url{https://github.com/theodoretliu/thesis}.
 
 \chapter{Evaluation}
 
-We will now evaluate how well the new \textbf{Ndarray} type can annotate the functions we defined in Section \ref{ndarray-operations}. From these annotations, we will observe the strengths and weaknesses of the extension. We can then develop plans for future work.
+We will now evaluate how well the new \textbf{Ndarray} type can annotate the functions we defined in Section \ref{ndarray-operations}. From these annotations, we will observe the strengths and areas for improvement of the extension. We can then develop plans for future work.
 
 \section{Typing Multidimensional Array Operators}
 \label{type-examples}
@@ -598,12 +601,12 @@ The broadcast operator is very special. We can now write the signature of the br
 
 \begin{singlespace*}
 \begin{verbatim}
-def broadcast(x: Ndarray [*A], y: Ndarray [Broadcast [A]]) -> Ndarray ?: ...
+def broadcast(x: Ndarray[*A], y: Ndarray[Broadcast[A]]) -> Ndarray ?: ...
 
-x: Ndarray [A, B, C]
-y: Ndarray [B, C]
-z: Ndarray [1, C]
-a: Ndarray [2, C]
+x: Ndarray[A, B, C]
+y: Ndarray[B, C]
+z: Ndarray[1, C]
+a: Ndarray[2, C]
 
 broadcast(x, y) # will type check
 broadcast(x, z) # will type check
@@ -618,12 +621,12 @@ Recall that the generalized dot product has different behaviors depending on the
 \begin{singlespace*}
 \begin{verbatim}
 @overload
-def dot(x: Ndarray [A], y: Ndarray [A]) -> int: ...
+def dot(x: Ndarray[A], y: Ndarray[A]) -> int: ...
 
-x : Ndarray [A]
-y : Ndarray [A]
-z : Ndarray [4]
-a : Ndarray [5]
+x : Ndarray[A]
+y : Ndarray[A]
+z : Ndarray[4]
+a : Ndarray[5]
 
 dot(x, y) # will type check
 dot(y, z) # will not type check
@@ -635,7 +638,7 @@ With our new types, we can perfectly declare the type of this function. There is
 \begin{singlespace*}
 \begin{verbatim}
 @overload
-def dot(x: Ndarray [A, B], y: Ndarray [B, C]) -> Ndarray [A, C]: ...
+def dot(x: Ndarray[A, B], y: Ndarray[B, C]) -> Ndarray[A, C]: ...
 
 X: Ndarray[A, B, C]
 Y: Ndarray[A, B]
@@ -652,45 +655,45 @@ Again, we are able to declare and check the type of the second form of dot produ
 \begin{singlespace*}
 \begin{verbatim}
 @overload
-def dot(x: Ndarray [], y: Ndarray [*A]) -> Ndarray [*A]: ...
+def dot(x: Ndarray[], y: Ndarray[*A]) -> Ndarray[*A]: ...
 
 @overload
-def dot(x: Ndarray [*A], y: Ndarray []) -> Ndarray [*A]: ...
+def dot(x: Ndarray[*A], y: Ndarray[]) -> Ndarray[*A]: ...
 
-X: Ndarray [A, B, C]
+X: Ndarray[A, B, C]
 r: int
 
-dot(X, r) # will type check, inferred type is Ndarray [A, B, C]
-dot(r, X) # will also type check, inferred type is Ndarray [A, B, C]\end{verbatim}
+dot(X, r) # will type check, Ndarray[A, B, C]
+dot(r, X) # will also type check, Ndarray[A, B, C]\end{verbatim}
 \end{singlespace*}
-Again, we see the ambiguity here with \texttt{Ndarray []} which could also be replaced by type \texttt{int}. For the last two cases of dot:
+Again, we see the ambiguity here with \texttt{Ndarray[]} which could also be replaced by type \texttt{int}. For the last two cases of dot:
 
 \begin{singlespace*}
 \begin{verbatim}
 @overload
-def dot(x: Ndarray [*A, B], y: Ndarray [B]) -> Ndarray [*A]: ...
+def dot(x: Ndarray[*A, B], y: Ndarray[B]) -> Ndarray[*A]: ...
 
 @overload
-def dot(x: Ndarray [*A, B], y: Ndarray [*C, B, D]) -> Ndarray [*A, *C, D]: ...
+def dot(x: Ndarray[*A, B], y: Ndarray[*C, B, D]) -> Ndarray[*A, *C, D]: ...
 
-X: Ndarray [A, B, C]
-Y: Ndarray [C]
-Z: Ndarray [C, D]
+X: Ndarray[A, B, C]
+Y: Ndarray[C]
+Z: Ndarray[C, D]
 
-dot(X, Y) # will check, inferred type is Ndarray [A, B]
-dot(X, Z) # will check, inferred type is Ndarray [A, B, D]\end{verbatim}
+dot(X, Y) # will check, Ndarray[A, B]
+dot(X, Z) # will check, Ndarray[A, B, D]\end{verbatim}
 \end{singlespace*}
 Again, the new types seem to fit very well here and can accurately annotate and check the type of these generalized dot products. Overall, the generalized dot product is very well annotated by these new types.
 
-\subsection{Summation, Euclidean norm}
+\subsection{Summation, Euclidean Norm}
 Summation is also broken into two distinct function signatures, which we overload. We have
 
 \begin{singlespace*}
     \begin{verbatim}
-def sum(x: Ndarray [*A]) -> int: ...
+def sum(x: Ndarray[*A]) -> int: ...
 
-x : Ndarray [1, 2, 3]
-y : Ndarray [A]
+x : Ndarray[1, 2, 3]
+y : Ndarray[A]
 
 sum(x) # type checks, int
 sum(y) # type checks, int \end{verbatim}
@@ -699,14 +702,14 @@ The first case is very simple. The next case is interesting:
 
 \begin{singlespace*}
     \begin{verbatim}
-def sum(x: Ndarray [*A], y: int) -> Ndarray [Drop[A, [y]]]: ...
+def sum(x: Ndarray[*A], y: int) -> Ndarray[Drop[A, [y]]]: ...
 
-x: Ndarray [1, 2, 3]
-y: Ndarray [A, B, C]
+x: Ndarray[1, 2, 3]
+y: Ndarray[A, B, C]
 
-sum(x, 1) # type checks, Ndarray [1, 3]
-sum(y, 2) # type checks, Ndarray [A, B]
-sum(x, -1) # type checks, Ndarray [1, 2]
+sum(x, 1) # type checks, Ndarray[1, 3]
+sum(y, 2) # type checks, Ndarray[A, B]
+sum(x, -1) # type checks, Ndarray[1, 2]
 sum(x, 5) # fails, 5 exceeds max index
 sum(y, 3 - 2) # fails, type of second argument is not
               # determined to be LiteralInt \end{verbatim}
@@ -724,8 +727,8 @@ def zeros(k: int) -> Ndarray[k]: ...
 @overload
 def zeros(k1: int, k2: int) -> Ndarray[k1, k2]: ...
 
-zeros(2) # type checks, Ndarray [2]
-zeros(3, 4) # type checks, Ndarray [3, 4]
+zeros(2) # type checks, Ndarray[2]
+zeros(3, 4) # type checks, Ndarray[3, 4]
 zeros(3 + 2) # does not check\end{verbatim}
 \end{singlespace*}
 Even though we do not have direct access to tuples, this approximation of the zeros function allows zeros to potentially take multiple arguments and return the \textbf{Ndarray} that has the same dimension as the integer provided. Again, the integer must be inferred to be of type integer literal or the typing will not succeed.
@@ -736,18 +739,18 @@ As with the zeros function, we cannot represent all possibilities of concatenate
 \begin{singlespace*}
     \begin{verbatim}
 @overload
-def concatenate(x: Ndarray [A], y: Ndarray [B]) -> Ndarray [A + B]: ...
+def concatenate(x: Ndarray[A], y: Ndarray[B]) -> Ndarray[A + B]: ...
 
 @overload
-def concatenate(x: Ndarray [A, B],
-                y: Ndarray [A, C],
-                axis: Literal [1]) -> Ndarray [A, B + C]: ...
+def concatenate(x: Ndarray[A, B],
+                y: Ndarray[A, C],
+                axis: Literal[1]) -> Ndarray[A, B + C]: ...
 
-x: Ndarray [1]
-y: Ndarray [2]
+x: Ndarray[1]
+y: Ndarray[2]
 
-a: Ndarray [2, 4]
-b: Ndarray [2, A]
+a: Ndarray[2, 4]
+b: Ndarray[2, A]
 
 concatenate(x, y) # type checks, Ndarray [3]
 concatenate(x, x) # type checks, Ndarray [2]
@@ -800,11 +803,11 @@ def svd(M: Ndarray[m, n]) -> Tuple[Ndarray[m, m],
 
 These type annotations excel in situations where the function types will rely on a finite number of dimensions and use the dimension variables or dimension integers to express equality between the arguments' dimensions. In the examples in the previous section, the annotations seemed to capture the complete behavior of a function best when it did not excessively or esoterically use the \textbf{Spread} operator.
 
-The use of these type annotations in machine learning and linear algebra algorithms is particularly promising. In machine learning, the maximum number of dimensions in the data array is typically small. As seen in the model training example, the type annotations can assure that the number of data points is equal to the number of data labels. And the $k$-means and SVD algorithms had extremely nice types as well.
+The use of these type annotations in machine learning and linear algebra algorithms is particularly promising. In machine learning, the maximum number of dimensions in the data array is typically small. As seen in the model training example, the type annotations can assure that the number of data points is equal to the number of data labels. As an example, the $k$-means and SVD algorithms were expressed succinctly and accurately with the new type annotations.
 
-\section{Weaknesses, Shortcomings, and Future Work}
+\section{Future Work and Remaining Improvements}
 
-We now review the various weaknesses and shortcomings of the type system in reverse order, starting with the most problematic, and propose future steps to mitigate the issue.
+We now review the areas for improvement type system, starting with the most problematic, and propose future steps to mitigate the issue.
 
 \subsection{\texttt{mypy} Integration}
 
@@ -869,7 +872,9 @@ We noted in Section \ref{simplifications} that we elided a type parameter for th
 
 \chapter{Conclusion}
 
-In this thesis, we have introduced type systems and their ability to catch various kinds of bugs statically. We studied the history and design philosophy of Python and its static type checker. We motivated the need for high performance machine learning and linear algebra libraries and also observed how Python's type system did not provide the static guarantees about multidimensional that we wanted. We developed a type calculus and extension to the Python syntax that provide both strong guarantees about multidimnsional arrays while not sacrificing readability and usability. In our evaluation of the new calculus, we found that it was possible to annotate and check many of the operators available in machine learning and matrix libraries. While there are many future improvements yet to be made to the type annotations, it shows promise and utility.
+In this thesis, we have introduced a new type system for Python that enables type checking for multidimensional arrays in a compact and intuitive syntax. Although there still remain several areas for improvement within the system, it already has shown itself capable of annotating and checking the application of useful array, machine learning, and linear algebra operations. Ultimately, the improvement and use of this multidimensional array type system will allow engineers and academics to worry less about debugging the dimensions of their datasets and transformations and worry more about their models and ideas, leading to faster iteration and innovation.
+
+% ave introduced type systems and their ability to catch various kinds of bugs statically. We studied the history and design philosophy of Python and its static type checker. We motivated the need for high performance machine learning and linear algebra libraries and also observed how Python's type system did not provide the static guarantees about multidimensional that we wanted. We developed a type calculus and extension to the Python syntax that provide both strong guarantees about multidimnsional arrays while not sacrificing readability and usability. In our evaluation of the new calculus, we found that it was possible to annotate and check many of the operators available in machine learning and matrix libraries. While there are many future improvements yet to be made to the type annotations, it shows promise and utility.
 
 \bibliographystyle{plain}
 \bibliography{research}
