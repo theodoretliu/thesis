@@ -12,21 +12,62 @@
 
 \begin{document}
 
+\begin{titlepage}
+   \begin{center}
+       \vspace*{1cm}
+
+       \vfill
+       {\large\textbf{A Type System for Multidimensional Arrays}}
+
+
+       \vspace{1.5cm}
+
+       \textbf{Theodore Liu}
+
+       \vspace{1.5cm}
+
+       submitted in partial fulfillment of the requirements \\
+       for the degree of Bachelor of Arts with honors \\
+       in Computer Science
+
+       \vspace{1.5cm}
+
+       Advisor: Professor Nada Amin
+
+       \vspace{0.8cm}
+
+
+       Harvard University\\
+       April 2020
+
+       \vfill
+       \vspace*{1cm}
+   \end{center}
+\end{titlepage}
+
+\chapter*{Acknowledgements}
+
+I would like to thank Professor Nada Amin for advising and encouraging me throughout the project. I would additionally like to thank Professors Steve Chong and Eddie Kohler for their advising in exceptional circumstances.
+
+I would like to specially thank Richard Wang for being a voice of reason and calm whenever I have needed it throughout my time at Harvard. I want to thank all of my friends --- Dan, Nenya, Jason, Joanna, more --- for being supportive and amazing and kind.
+
+I would like to thank my parents and my sister, who've been there for me since the very beginning.
+
+\chapter*{Abstract}
+
+Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance matrix and machine learning libraries. Although initially designed as a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types are mostly useless when typing multidimensional array operations. In this thesis, we develop a type calculus and extension to Python's type system that strengthens the static guarantees of the type checker over multidimensional array operations while not sacrificing the simplicity and ease of use that is core to Python's spirit.
+
 \tableofcontents
-\newpage
 
-% \begin{abstract}
-    Python is an extremely popular programming language used by many companies and academics around the world. Historically a slow language, it has gained popularity as an interface with high performance matrix and machine learning libraries. Although initially a strong, dynamically typed language, recent additions to Python have introduced a static type checker; however, the types are mostly useless when typing matrix operations. In this thesis, we develop a simple type calculus and extension to Python's type system that strengthens the static guarantees of the type checker over matrix operations while not sacrificing the simplicity and ease of use that is core to Python's spirit.
-% \end{abstract}
-
-\section{Introduction}
+\chapter{Introduction}
 
 Python is a strong and dynamically typed language focused on simplicity and ease of use. Since its invention in the late 1980s, Python has exploded in popularity, seeing rapid adoption in both academia and industry. Its flexibility and approachable syntax made it user-friendly. An increased interest in scientific computing and machine learning from the Python community led to the creation of packages such as \texttt{numpy} and \texttt{pytorch}, which expose high level APIs for high performance C code, circumventing Python's slow execution and enabling rapid development of machine learning and scientific computing applications.
 
-More recently, Python's dynamic type system has been seen as a weakness rather than a strength. Runtime errors caused by type mismatches can be annoying or potentially disastrous for people deploying Python at scale. To combat this, type annotations were added directly to Python's syntax as part of Python 3.5 in 2014, and a reference typechecker --- \texttt{mypy} --- was developed to statically analyze the annotations. \texttt{mypy} eliminates a whole class of type errors from Python code but is not powerful enough to reject matrices with incompatible dimensions from being multiplied or applied together, resulting in runtime errors in machine learning or scientific computing code.
+More recently, Python's dynamic type system has been seen as a weakness rather than a strength. Runtime errors caused by type mismatches can be annoying or potentially disastrous for people deploying Python at scale. To combat this, type annotations were added directly to Python's syntax, and a reference typechecker --- \texttt{mypy} --- was developed to statically analyze the annotations. \texttt{mypy} eliminates a whole class of type errors from Python code but is not powerful enough to reject multidimensional arrays with incompatible dimensions from being multiplied or applied together, resulting in runtime errors in machine learning or scientific computing code.
 
-In this thesis, we propose a new extension to Python's type system that allows the expression of function signatures that respect the dimensions of matrices as they are passed into the function. This contribution further strengthens the type system and makes impossible runtime errors related to the dimensionality of matrices at function application sites.
+In this thesis, we develop a type calculus and extension to Python's type system that allows the expression of function signatures that respect the dimensions of multidimensional arrays as they are passed into functions. This contribution further strengthens the type system and makes impossible runtime errors related to the dimensionality of matrices at function application sites.
 
+Chapter 2 presents background information on type systems, Python, \texttt{mypy}, multidimensional arrays, and related work. Chapter 3 presents the new type calculus for multidimensional arrays, defining syntax and semantics. Chapter 4 evaluates the type calculus in the context of common array and machine learning operations. Chapter 5 concludes.
 
 \chapter{Background and Related Work}
 
@@ -392,6 +433,7 @@ We represent a function parameter type is a pair between a string --- the name o
 See Figure \ref{syntax} for the formal syntax.
 
 \section{Simplifications}
+\label{simplifications}
 
 We choose not to parameterize the \textbf{Ndarray} type with the type of its contents and instead assume that all \textbf{Ndarray}s are filled with integers. Since our main concern is the shape of the arrays, we elided this parameterization, but it should not be difficult to add in the future.
 
@@ -546,6 +588,7 @@ We implement the above typing rules in OCaml. The code can be found online at \u
 We will now evaluate how well the new \textbf{Ndarray} type can annotate the functions we defined in Section \ref{ndarray-operations}. From these annotations, we will observe the strengths and weaknesses of the extension. We can then develop plans for future work.
 
 \section{Typing Multidimensional Array Operators}
+\label{type-examples}
 
 We can go one by one over the functions of interest in Section \ref{ndarray-operations}.
 
@@ -765,7 +808,68 @@ We now review the various weaknesses and shortcomings of the type system in reve
 
 \subsection{\texttt{mypy} Integration}
 
+A type system is only useful if people actually \textit{use} it. While we have defined the semantics for type checking and implemented a checker in OCaml, it still remains for this syntax to be approved and integrated into \texttt{mypy}, the official Python type checker. Until this integration happens, this project will never bring the benefits of its type system to real users. It will be our goal to incorporate this project into the main \texttt{mypy} source tree, even if in a more limited form, so that people can start typing real code and real use cases. This will further unlock more insights into the type annotations that people actually want, need, and use for multidimensional array typing.
+
+\subsection{Restrictions on Argument Types}
+
+As previously stated in Section \ref{simplifications}, we restrict the types of arguments to the finite length dimension constructors. To see the problem with removing such a restriction, consider the following function type and application:
+
+\begin{singlespace*}
+    \begin{verbatim}
+def f(x: Ndarray[*A, *B]) -> Ndarray[*A]: ...
+
+y: Ndarray[*C]
+f(y) # ???\end{verbatim}
+\end{singlespace*}
+In the example above, what should we map \texttt{A} to? What should we map \texttt{B} to? There are infinitely many solutions and mappings possible. We could split up \texttt{C} in infinite ways since we do not generally know anything about its structure.
+
+This issue with \textbf{Spread} and related dimension constructors in argument positions also prevents certain function body checking. Consider if the above declaration for \texttt{f}, and we also add
+
+\begin{singlespace*}
+    \begin{verbatim}
+def g(y: Ndarray[*C]) -> Ndarray[*C]:
+    # y has type Ndarray[*C] in the body of g
+    ...
+    f(y) # if we encounter this invokation, we cannot do anything
+    ...\end{verbatim}
+
+\end{singlespace*}
+A challenge and improvement going forward would be solving this type checking problem, either by developing appropriate semantics for type checking or more elegantly circumventing the issue. We would have to exercise caution when developing semantics because we would not want to accidentally cause a complexity explosion, making the type checker run slowly and/or making the surface syntax more complicated.
+
+Even without directly fixing this, function body checking where the parameters of the function are fixed dimension arrays is still possible. Also, \texttt{mypy} supports a \texttt{.pyi} file format where function types are declared, but the function body is completely omitted, so function body checking might not even be that important in the first place.
+
+\subsection{Strict Dimension Checking}
+
+When presented with two dimensions, the type checker attempts to \textit{prove} that the two dimensions are equal. In certain cases, there is not information to prove that an abstract dimension is equal to a particular integer and type checking will fail. As a simple example:
+
+\begin{singlespace*}
+    \begin{verbatim}
+def f(x: Ndarray[2]): ...
+
+y: Ndarray[A]
+
+f(y) # will fail, can't prove that A == 2\end{verbatim}
+\end{singlespace*}
+
+One of the original goals of this thesis was for the new type system to align with Python's ethos. If the type checker is this strict, will it make it difficult to use these type annotations? Future work would either relax this constraint or determine that the constraint is not an impediment to the use of the annotations.
+
+\subsection{Supporting Zeros, Concatenate Fully}
+
+As demonstrated in the examples in Section \ref{type-examples}, the current type annotations are unable to support the zeros and concatenate functions fully. If we extend the annotations to support the full functions, we can reason more powerfully about the dimensions of arrays in our system.
+
+That being said, it might be the case that people rarely make zero arrays of more than five or so dimensions, and people rarely concatenate arrays of more than four dimensions. If that were true, then we could actually get away with simply overloading the function a few times to capture all the practical cases that people use. There is precedent for this in \texttt{mypy}. In the typing stubs for the \texttt{zip} function in Python --- which can actually take an arbitrary number of arguments --- the function is simply overloaded six times to support receiving one through six arguments.
+
+\subsection{Building Primitives for Broadcast Outputs}
+
+As noted in Section \ref{ndarray-operations}, the broadcast is one of the more unusual but also useful operations available on multidimensional arrays. We should incorporate another primitive to the dimension language to represent the ``max'' operation that occurs during broadcasting. This would enable the return types of broadcasts to be correctly inferred, which will strengthen our type system.
+
+\subsection{Parameterizing the Ndarray Type}
+
+We noted in Section \ref{simplifications} that we elided a type parameter for the \textbf{Ndarray} which would parameterize the type of data stored in the array. We should add this type parameter to fully capture the nature of multidimensional arrays and allow us to better understand the return types of reductions on arrays of integers versus floats.
+
 \chapter{Conclusion}
+
+In this thesis, we have introduced type systems and their ability to catch various kinds of bugs statically. We studied the history and design philosophy of Python and its static type checker. We motivated the need for high performance machine learning and linear algebra libraries and also observed how Python's type system did not provide the static guarantees about multidimensional that we wanted. We developed a type calculus and extension to the Python syntax that provide both strong guarantees about multidimnsional arrays while not sacrificing readability and usability. In our evaluation of the new calculus, we found that it was possible to annotate and check many of the operators available in machine learning and matrix libraries. While there are many future improvements yet to be made to the type annotations, it shows promise and utility.
 
 \bibliographystyle{plain}
 \bibliography{research}
