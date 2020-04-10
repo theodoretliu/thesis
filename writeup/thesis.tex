@@ -734,11 +734,36 @@ The type annotations capture the variation we might have in our dataset and trai
 
 \subsection{More types}
 
-As a further test of
+As a further test of the types' flexibility, we can declare the types of other interesting functions.
+
+\paragraph{$k$-means clustering}
+Given a set of $N$ $d$-dimensional points, return the $k$ centroids.
+
+\begin{singlespace*}
+    \begin{verbatim}
+def kmeans(X: Ndarray[N, d], k: int) -> Ndarray[k, d]: ... \end{verbatim}
+\end{singlespace*}
+
+\paragraph{Singular value decomposition}
+Given a matrix $M$ of size $m \times n$, decompose it into $U\Sigma V^*$.
+\begin{singlespace*}
+    \begin{verbatim}
+def svd(M: Ndarray[m, n]) -> Tuple[Ndarray[m, m],
+                                   Ndarray[m, n],
+                                   Ndarray[n, n]]: ...\end{verbatim}
+\end{singlespace*}
 
 \section{Strengths}
 
+These type annotations excel in situations where the function types will rely on a finite number of dimensions and use the dimension variables or dimension integers to express equality between the arguments' dimensions. In the examples in the previous section, the annotations seemed to capture the complete behavior of a function best when it did not excessively or esoterically use the \textbf{Spread} operator.
+
+The use of these type annotations in machine learning and linear algebra algorithms is particularly promising. In machine learning, the maximum number of dimensions in the data array is typically small. As seen in the model training example, the type annotations can assure that the number of data points is equal to the number of data labels. And the $k$-means and SVD algorithms had extremely nice types as well.
+
 \section{Weaknesses, Shortcomings, and Future Work}
+
+We now review the various weaknesses and shortcomings of the type system in reverse order, starting with the most problematic, and propose future steps to mitigate the issue.
+
+\subsection{\texttt{mypy} Integration}
 
 \chapter{Conclusion}
 
