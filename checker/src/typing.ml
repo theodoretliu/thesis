@@ -13,6 +13,7 @@ type entry =
 | Drop of string * (string, int) either list
 | Keep of string * (string, int) either list
 | Int of int
+| Broadcast of string
 [@@deriving show]
 
 type typ =
@@ -91,7 +92,11 @@ let rec check_entry_signature ((vars, spread_vars, param_var_mapping) as orig : 
         then raise (KindError "Arguments to drop are not integers")
         else orig
 
-    | Int _i -> orig
+  | Int _i -> orig
+  | Broadcast s -> if not (StringSet.mem s spread_vars)
+                   then raise (KindError "Argument to broadcast is not already a spread var")
+                   else orig
+
 
 
 let check_args_signature (funargtyps : (string * typ) list) : StringSet.t * StringSet.t * typ StringMap.t =
@@ -310,6 +315,34 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
           else None
       end
 
+  | Broadcast s ->
+      let arr = StringMap.find s spread_mapping in
+      let rev_arr = List.rev arr in
+
+      let splits = Utils.all_splits s2 in
+
+      let rec prove_broadcast l1 l2 =
+      match l1, l2 with
+      | [], _ | _, [] -> true
+      | h1 :: t1, h2 :: t2 ->
+          (prove_int_eq (mk_int h1) (mk_int h2)
+           || prove_int_eq (mk_int h1) (mk_int_numeral 1)
+           || prove_int_eq (mk_int h2) (mk_int_numeral 1))
+          && prove_broadcast t1 t2 in
+
+      let rec try_splits l =
+        match l with
+        | [] -> None
+        | (front, back) :: t ->
+            let rev = List.rev front in
+            if prove_broadcast rev rev_arr then
+              begin match check_and_update_mapping (Nparray restentries) (Dimensions back) mapping restfunargstyps restargtyps with
+              | None -> try_splits t
+              | Some x -> Some x
+              end
+            else try_splits t in
+
+      try_splits splits
 
 let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, param_mapping) : mapping_type) : arg =
   match rettyp with
@@ -356,6 +389,8 @@ let check_ret_type_with_mapping (rettyp : typ) ((var_mapping, spread_mapping, pa
                 let gend_var = mk_int_var i in
 
                 gend_var :: (check_ret_type_with_mapping' t)
+
+            | Broadcast _ -> raise (TypeError "Broadcast in return type")
 
             end
       in

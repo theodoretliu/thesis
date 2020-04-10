@@ -428,3 +428,15 @@ let _ =
   let _ = assert (check_app use_typ [res] = Dimensions []) in
 
   ()
+
+let _ =
+  let a, b, c, d, e, f = mk_string(), mk_string(), mk_string(),
+                         mk_string(), mk_string(), mk_string()  in
+  let broadcast_typ = [a, Nparray [Spread b]; c, Nparray[Broadcast b]], Nparray [] in
+  let _ =
+    assert (check_app broadcast_typ [Dimensions [a; b]; Dimensions [b]] = Dimensions []) in
+
+  let _ =
+    assert (check_app broadcast_typ [Dimensions [a; b]; Dimensions [mk_int_var 1]] = Dimensions []) in
+
+  ()
