@@ -543,58 +543,204 @@ We implement the above typing rules in OCaml. The code can be found online at \u
 
 \chapter{Evaluation}
 
-We will now evaluate how well the new \textbf{Ndarray} type can annotate the functions we defined in Section \ref{ndarray-operations}. From
+We will now evaluate how well the new \textbf{Ndarray} type can annotate the functions we defined in Section \ref{ndarray-operations}. From these annotations, we will observe the strengths and weaknesses of the extension. We can then develop plans for future work.
 
-\subsection{Examples}
+\section{Typing Multidimensional Array Operators}
 
-Suppose we would like to annotate the matrix multiplication function in Python with this new syntax. As a general description, matrix multiplication acts on two matrices with two dimensions each. The ``inner'' dimensions of the two matrices must be the same size. The result of the multiplication will be a matrix of two dimensions which correspond to the ``outer'' dimensions of the two original matrices. The definition along with some applications can be found, quite succinctly, in Figure \ref{np-type-matmul}. Here, we can see that the previous weaknesses in \texttt{mypy} allowing for the incorrect number of dimensions or dimensions that do not match has been caught statically.
+We can go one by one over the functions of interest in Section \ref{ndarray-operations}.
 
-\begin{figure}
-    \centering
-    \begin{verbatim}
-def matmul(X: Ndarray[A, B], Y: Ndarray[B, C]) -> Ndarray[A, C]: ...
+\subsection{Broadcast}
+
+The broadcast operator is very special. We can now write the signature of the broadcast function as
+
+\begin{singlespace*}
+\begin{verbatim}
+def broadcast(x: Ndarray [*A], y: Ndarray [Broadcast [A]]) -> Ndarray ?: ...
+
+x: Ndarray [A, B, C]
+y: Ndarray [B, C]
+z: Ndarray [1, C]
+a: Ndarray [2, C]
+
+broadcast(x, y) # will type check
+broadcast(x, z) # will type check
+broadcast(y, z) # will type check
+broadcast(x, a) # will not type check\end{verbatim}
+\end{singlespace*}
+Our ``hard-coded'' dimension constructor for broadcasting makes this signature easy to declare. We can see that our type checker is able to determine exactly the cases that \textit{should} broadcast and rejects the ones that do not. However, we still do not have a proper construct for the \textit{return} type of broadcast. None of the constructors we have created can represent the return type of a broadcast.
+
+\subsection{Generalized dot product}
+Recall that the generalized dot product has different behaviors depending on the shapes of the arguments it is provided. We can use the \texttt{overload} construct in \texttt{mypy} to declare the different function types one by one. For vector dot products:
+
+\begin{singlespace*}
+\begin{verbatim}
+@overload
+def dot(x: Ndarray [A], y: Ndarray [A]) -> int: ...
+
+x : Ndarray [A]
+y : Ndarray [A]
+z : Ndarray [4]
+a : Ndarray [5]
+
+dot(x, y) # will type check
+dot(y, z) # will not type check
+dot(z, a) # will not type check
+\end{verbatim}
+\end{singlespace*}
+With our new types, we can perfectly declare the type of this function. There is some ambiguity in the return type; we could also have returned type \texttt{Ndarray []}, a multidimensional array with no dimensions, which is also an integer scalar. For matrix multiplication:
+
+\begin{singlespace*}
+\begin{verbatim}
+@overload
+def dot(x: Ndarray [A, B], y: Ndarray [B, C]) -> Ndarray [A, C]: ...
 
 X: Ndarray[A, B, C]
 Y: Ndarray[A, B]
 Z: Ndarray[B, C]
 W: Ndarray[C, D]
 
-matmul(X, Y) # will fail, number of dimensions incorrect
-matmul(Y, Y) # will fail, inner dimensions don't work
-res = matmul(Y, Z) # will succeed
-matmul(res, W) # will succeed, res inferred to have type Ndarray[A, C]\end{verbatim}
-    \caption{Typing of matrix multplication with new types}
-    \label{np-type-matmul}
-\end{figure}
+dot(X, Y) # will fail, number of dimensions incorrect
+dot(Y, Y) # will fail, inner dimensions don't work
+res = dot(Y, Z) # will succeed
+dot(res, W) # will succeed, res inferred to have type Ndarray[A, C]\end{verbatim}
+\end{singlespace*}
+Again, we are able to declare and check the type of the second form of dot product. We can even infer the result of the return type and propagate that type information into another call to dot without explicit type annotations. Continuing with the scalar cases:
 
-As a demonstration of the \textbf{Spread} operator, we can also provide a typing annotation for one case of the \texttt{numpy.dot} operator. In this particular case, the first matrix can have an arbitrary number of dimensions. The second matrix must have exactly one dimension, which matches the last dimension of the first matrix. The return type is a matrix which has the same dimensions as the first matrix except the last dimension is removed. All this can be expressed in the type found in Figure \ref{np-type-dot}.
+\begin{singlespace*}
+\begin{verbatim}
+@overload
+def dot(x: Ndarray [], y: Ndarray [*A]) -> Ndarray [*A]: ...
 
-\begin{figure}
+@overload
+def dot(x: Ndarray [*A], y: Ndarray []) -> Ndarray [*A]: ...
+
+X: Ndarray [A, B, C]
+r: int
+
+dot(X, r) # will type check, inferred type is Ndarray [A, B, C]
+dot(r, X) # will also type check, inferred type is Ndarray [A, B, C]\end{verbatim}
+\end{singlespace*}
+Again, we see the ambiguity here with \texttt{Ndarray []} which could also be replaced by type \texttt{int}. For the last two cases of dot:
+
+\begin{singlespace*}
+\begin{verbatim}
+@overload
+def dot(x: Ndarray [*A, B], y: Ndarray [B]) -> Ndarray [*A]: ...
+
+@overload
+def dot(x: Ndarray [*A, B], y: Ndarray [*C, B, D]) -> Ndarray [*A, *C, D]: ...
+
+X: Ndarray [A, B, C]
+Y: Ndarray [C]
+Z: Ndarray [C, D]
+
+dot(X, Y) # will check, inferred type is Ndarray [A, B]
+dot(X, Z) # will check, inferred type is Ndarray [A, B, D]\end{verbatim}
+\end{singlespace*}
+Again, the new types seem to fit very well here and can accurately annotate and check the type of these generalized dot products. Overall, the generalized dot product is very well annotated by these new types.
+
+\subsection{Summation, Euclidean norm}
+Summation is also broken into two distinct function signatures, which we overload. We have
+
+\begin{singlespace*}
     \begin{verbatim}
-def dot(X: Ndarray[*A, B], Y: Ndarray[B]) -> Ndarray[*A]: ...
+def sum(x: Ndarray [*A]) -> int: ...
 
-X: Ndarray[1, 2, 3, 4]
-Y: Ndarray[5]
-Z: Ndarray[4]
-W: Ndarray[A, A, 5]
+x : Ndarray [1, 2, 3]
+y : Ndarray [A]
 
-dot(X, Y) # will fail, last dimension doesn't match
-dot(X, Z) # will succeed, result is Ndarray[1, 2, 3]
-dot(W, Y) # will succeed, result is Ndarray[A, A]\end{verbatim}
-    \caption{Typing of \texttt{np.dot} with new types}
-    \label{np-type-dot}
-\end{figure}
+sum(x) # type checks, int
+sum(y) # type checks, int \end{verbatim}
+\end{singlespace*}
+The first case is very simple. The next case is interesting:
 
-\subsection{Practicality}
+\begin{singlespace*}
+    \begin{verbatim}
+def sum(x: Ndarray [*A], y: int) -> Ndarray [Drop[A, [y]]]: ...
 
-\subsection{Implementation}
+x: Ndarray [1, 2, 3]
+y: Ndarray [A, B, C]
 
-\subsection{Shortcomings}
+sum(x, 1) # type checks, Ndarray [1, 3]
+sum(y, 2) # type checks, Ndarray [A, B]
+sum(x, -1) # type checks, Ndarray [1, 2]
+sum(x, 5) # fails, 5 exceeds max index
+sum(y, 3 - 2) # fails, type of second argument is not
+              # determined to be LiteralInt \end{verbatim}
+\end{singlespace*}
+This case is the first time we have reason to use our \textbf{Drop} constructor to remove dimensions from a multidimensional array. If integer literals are provided as the parameter \texttt{y}, the type checker is able to use that integer literal to drop the correct axis. However, if \texttt{y} is the result of some computation, its type cannot be inferred as integer literal and the type checking fails.
 
-\subsection{Future Work}
+\subsection{Zeros, Ones}
+The current type system extension does not have support for tuples, so a fully correct version of zeros cannot be implemented. However, using some overloads, we can get part of the way there:
 
-\section{Conclusion}
+\begin{singlespace*}
+    \begin{verbatim}
+@overload
+def zeros(k: int) -> Ndarray[k]: ...
 
+@overload
+def zeros(k1: int, k2: int) -> Ndarray[k1, k2]: ...
+
+zeros(2) # type checks, Ndarray [2]
+zeros(3, 4) # type checks, Ndarray [3, 4]
+zeros(3 + 2) # does not check\end{verbatim}
+\end{singlespace*}
+Even though we do not have direct access to tuples, this approximation of the zeros function allows zeros to potentially take multiple arguments and return the \textbf{Ndarray} that has the same dimension as the integer provided. Again, the integer must be inferred to be of type integer literal or the typing will not succeed.
+
+\subsection{Concatenation}
+As with the zeros function, we cannot represent all possibilities of concatenate, but we can approximate it with overloading.
+
+\begin{singlespace*}
+    \begin{verbatim}
+@overload
+def concatenate(x: Ndarray [A], y: Ndarray [B]) -> Ndarray [A + B]: ...
+
+@overload
+def concatenate(x: Ndarray [A, B],
+                y: Ndarray [A, C],
+                axis: Literal [1]) -> Ndarray [A, B + C]: ...
+
+x: Ndarray [1]
+y: Ndarray [2]
+
+a: Ndarray [2, 4]
+b: Ndarray [2, A]
+
+concatenate(x, y) # type checks, Ndarray [3]
+concatenate(x, x) # type checks, Ndarray [2]
+
+concatenate(a, b, 1) # type checks, Ndarray [2, A + 4]
+concatenate(x, a) # fails\end{verbatim}
+\end{singlespace*}
+The inability to completely capture all possible cases of concatenation is a cause for concern.
+
+\subsection{Model training}
+Model training can be annotated well:
+\begin{singlespace*}
+    \begin{verbatim}
+def fit(X: Ndarray[N, *A], y: Ndarray[N, B]) -> None: ...
+
+data: Ndarray[N, 5]
+labels: Ndarray[N, 1]
+
+fit(data, labels) # type checks
+
+data2: Ndarray[N, 3, 256, 256]
+labels2: Ndarray[N, 5]
+
+fit(data2, labels2) # type checks\end{verbatim}
+\end{singlespace*}
+The type annotations capture the variation we might have in our dataset and training label shapes.
+
+\subsection{More types}
+
+As a further test of
+
+\section{Strengths}
+
+\section{Weaknesses, Shortcomings, and Future Work}
+
+\chapter{Conclusion}
 
 \bibliographystyle{plain}
 \bibliography{research}
