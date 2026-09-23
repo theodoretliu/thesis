@@ -8,6 +8,7 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 | Step | Gap | Status | Note |
 |---|---|---|---|
 | 0 | Solidify: bugs on `main` | done | [01-solidify.md](01-solidify.md) |
+| 1 | Type-level arithmetic (`-`, `//`) | done | [02-arithmetic.md](02-arithmetic.md) |
 
 Run everything with:
 

@@ -5,7 +5,9 @@ type ('a, 'b) either = Left of 'a | Right of 'b [@@deriving show]
 type entry =
   | Id of string
   | Add of entry * entry
+  | Sub of entry * entry
   | Mul of entry * entry
+  | Div of entry * entry (* floor division; divisor must be provably positive *)
   | Spread of string
   | Drop of string * (string, int) either list
   | Keep of string * (string, int) either list
@@ -56,7 +58,7 @@ let rec check_arith_signature
       if not (StringSet.mem x vars || is_int_param x param_var_mapping) then
         raise (KindError ("Unbound variable " ^ x ^ " in arithmetic dimension"))
   | Int _ -> ()
-  | Add (e1, e2) | Mul (e1, e2) ->
+  | Add (e1, e2) | Sub (e1, e2) | Mul (e1, e2) | Div (e1, e2) ->
       check_arith_signature (vars, _spread_vars, param_var_mapping) e1;
       check_arith_signature (vars, _spread_vars, param_var_mapping) e2
   | Spread _ | Drop _ | Keep _ | Broadcast _ ->
@@ -65,9 +67,9 @@ let rec check_arith_signature
 (* given a set of already declared variables and spread variables, this
 function checks that the entry type is well-kinded. particularly, it ensures
 a few things:
-   - new variables are not introduced under Add and Mul
+   - new variables are not introduced under arithmetic
    - introduction of new variables do not shadow spread variables and vice versa
-   - Spread, Drop, Keep and Broadcast do not occur under Add or Mul
+   - Spread, Drop, Keep and Broadcast do not occur under arithmetic
    - Id may reference an integer parameter (thesis rule CheckDimIdFoundInParams)
    - Drop needs a spread variable as its first argument and only vars mapping to TypeInts as its second *)
 let rec check_entry_signature
@@ -86,7 +88,7 @@ let rec check_entry_signature
         else (StringSet.add x vars, spread_vars, param_var_mapping)
       else if StringSet.mem x vars then (vars, spread_vars, param_var_mapping)
       else raise (KindError "Attempt to intro new variable in bad context")
-  | Add _ | Mul _ ->
+  | Add _ | Sub _ | Mul _ | Div _ ->
       check_arith_signature orig e;
       orig
   | Spread x ->
@@ -174,26 +176,44 @@ let int_param_expr (x : string) (param_mapping : arg StringMap.t) :
   | Some (LiteralInt i) -> Some (mk_int_numeral i)
   | _ -> None
 
-(* translate an arithmetic dimension into a Z3 expression. None means the
-   dimension mentions an integer parameter whose value is unknown *)
+type dim_error =
+  | Unknown_param of string (* an integer parameter with no known value *)
+  | Bad_divisor of entry (* a divisor not provably positive *)
+
+let show_dim_error = function
+  | Unknown_param x -> "integer parameter " ^ x ^ " has no known value"
+  | Bad_divisor e -> "divisor " ^ show_entry e ^ " may not be positive"
+
+(* translate an arithmetic dimension into a Z3 expression *)
 let rec expr_of_dim (s : entry) (var_mapping : Z3.Expr.expr StringMap.t)
-    (param_mapping : arg StringMap.t) : Z3.Expr.expr option =
+    (param_mapping : arg StringMap.t) : (Z3.Expr.expr, dim_error) result =
+  let ( let* ) = Result.bind in
   let binop mk e1 e2 =
-    match
-      ( expr_of_dim e1 var_mapping param_mapping,
-        expr_of_dim e2 var_mapping param_mapping )
-    with
-    | Some l, Some r -> Some (mk Z3utils.ctx [ l; r ])
-    | _ -> None
+    let* l = expr_of_dim e1 var_mapping param_mapping in
+    let* r = expr_of_dim e2 var_mapping param_mapping in
+    Ok (mk l r)
   in
   match s with
   | Id x -> (
       match StringMap.find_opt x var_mapping with
-      | Some e -> Some e
-      | None -> int_param_expr x param_mapping)
-  | Int i -> Some (mk_int_numeral i)
-  | Add (s1, s2) -> binop Z3.Arithmetic.mk_add s1 s2
-  | Mul (s1, s2) -> binop Z3.Arithmetic.mk_mul s1 s2
+      | Some e -> Ok e
+      | None ->
+          Option.to_result ~none:(Unknown_param x)
+            (int_param_expr x param_mapping))
+  | Int i -> Ok (mk_int_numeral i)
+  | Add (s1, s2) ->
+      binop (fun l r -> Z3.Arithmetic.mk_add Z3utils.ctx [ l; r ]) s1 s2
+  | Sub (s1, s2) ->
+      binop (fun l r -> Z3.Arithmetic.mk_sub Z3utils.ctx [ l; r ]) s1 s2
+  | Mul (s1, s2) ->
+      binop (fun l r -> Z3.Arithmetic.mk_mul Z3utils.ctx [ l; r ]) s1 s2
+  | Div (s1, s2) ->
+      let* l = expr_of_dim s1 var_mapping param_mapping in
+      let* r = expr_of_dim s2 var_mapping param_mapping in
+      (* z3 integer division is floor division for positive divisors *)
+      if Z3utils.prove (Z3.Arithmetic.mk_gt Z3utils.ctx r (mk_int_numeral 0))
+      then Ok (Z3.Arithmetic.mk_div Z3utils.ctx l r)
+      else Error (Bad_divisor s2)
   | _ -> raise (TypeError "Called with wrong argument")
 
 let get_concrete_indices (indices : (string, int) either list)
@@ -279,13 +299,13 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
               else None
           end
       end
-  | Add _ | Mul _ ->
+  | Add _ | Sub _ | Mul _ | Div _ ->
       begin match s2 with
       | [] -> None (* no more args left, intractable *)
       | h :: t -> (
           (* there are args left, try to prove the equality *)
           match expr_of_dim s1 var_mapping param_mapping with
-          | Some expr_e when Z3utils.prove_int_eq expr_e (Z3utils.mk_int h) ->
+          | Ok expr_e when Z3utils.prove_int_eq expr_e (Z3utils.mk_int h) ->
               check_and_update_mapping (Nparray restentries) (Dimensions t)
                 mapping restfunargstyps restargtyps
           | _ -> None)
@@ -433,13 +453,25 @@ let check_ret_type_with_mapping (rettyp : typ)
         | [] -> []
         | h :: t ->
             begin match h with
-            | Id _ | Add _ | Mul _ ->
-                (* an integer parameter of unknown value yields a fresh,
-                   unconstrained dimension *)
+            | Id _ | Add _ | Sub _ | Mul _ | Div _ ->
                 let bound_name =
                   match expr_of_dim h var_mapping param_mapping with
-                  | Some e -> Z3utils.add_to_solver e
-                  | None -> Z3utils.fresh_dim ()
+                  | Ok e ->
+                      (* returned dimensions must be natural numbers *)
+                      if
+                        not
+                          (Z3utils.prove
+                             (Z3.Arithmetic.mk_ge Z3utils.ctx e
+                                (mk_int_numeral 0)))
+                      then
+                        raise
+                          (TypeError
+                             ("Dimension " ^ show_entry h ^ " may be negative"));
+                      Z3utils.add_to_solver e
+                  (* an integer parameter of unknown value yields a fresh,
+                     unconstrained dimension *)
+                  | Error (Unknown_param _) -> Z3utils.fresh_dim ()
+                  | Error err -> raise (TypeError (show_dim_error err))
                 in
                 bound_name :: check_ret_type_with_mapping' t
             | Spread v ->

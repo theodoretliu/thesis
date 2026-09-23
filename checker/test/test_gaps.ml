@@ -120,3 +120,96 @@ let () =
       rejects ~kind:true
         ([ ("X", Nparray [ Id "a" ]) ], Nparray [ Id "X" ])
         [ Dimensions (dims 1) ])
+
+(* ---- step 1: type-level arithmetic ---- *)
+
+(* conv2d(x: [n, c, h, w], k: [o, c, kh, kw]) -> [n, o, h - kh + 1, w - kw + 1] *)
+let conv2d =
+  ( [
+      ("X", Nparray [ Id "n"; Id "c"; Id "h"; Id "w" ]);
+      ("K", Nparray [ Id "o"; Id "c"; Id "kh"; Id "kw" ]);
+    ],
+    Nparray
+      [
+        Id "n";
+        Id "o";
+        Add (Sub (Id "h", Id "kh"), Int 1);
+        Add (Sub (Id "w", Id "kw"), Int 1);
+      ] )
+
+let lits = List.map mk_int_var
+
+let () =
+  expect "conv2d concrete" (fun () ->
+      dims_equal
+        (check_app conv2d
+           [
+             Dimensions (lits [ 2; 3; 32; 32 ]);
+             Dimensions (lits [ 8; 3; 5; 5 ]);
+           ])
+        [ n 2; n 8; n 28; n 28 ]);
+  expect "conv2d kernel larger than image rejected" (fun () ->
+      rejects conv2d
+        [ Dimensions (lits [ 2; 3; 4; 4 ]); Dimensions (lits [ 8; 3; 6; 6 ]) ]);
+  expect "conv2d unrelated symbolic sizes rejected (may be negative)" (fun () ->
+      let b, c, h, w, o, kh, kw =
+        ( mk_string (),
+          mk_string (),
+          mk_string (),
+          mk_string (),
+          mk_string (),
+          mk_string (),
+          mk_string () )
+      in
+      rejects conv2d [ Dimensions [ b; c; h; w ]; Dimensions [ o; c; kh; kw ] ]);
+  expect "conv2d symbolic image, concrete kernel, known lower bound" (fun () ->
+      let b, c, o = (mk_string (), mk_string (), mk_string ()) in
+      (* an image whose side is 4 + something *)
+      let s = mk_string () in
+      assume_dim s;
+      let h = add_to_solver (Z3.Arithmetic.mk_add ctx [ v s; n 4 ]) in
+      dims_equal
+        (check_app conv2d
+           [
+             Dimensions [ b; c; h; h ];
+             Dimensions [ o; c; mk_int_var 3; mk_int_var 3 ];
+           ])
+        [
+          v b;
+          v o;
+          Z3.Arithmetic.mk_add ctx [ v s; n 2 ];
+          Z3.Arithmetic.mk_add ctx [ v s; n 2 ];
+        ])
+
+(* max_pool(x: [*B, h, w], s: int) -> [*B, h // s, w // s] *)
+let pool =
+  ( [ ("X", Nparray [ Spread "B"; Id "h"; Id "w" ]); ("s", TypeInt) ],
+    Nparray [ Spread "B"; Div (Id "h", Id "s"); Div (Id "w", Id "s") ] )
+
+let () =
+  let b = mk_string () in
+  expect "pool floors" (fun () ->
+      dims_equal
+        (check_app pool [ Dimensions (b :: lits [ 33; 32 ]); LiteralInt 2 ])
+        [ v b; n 16; n 16 ]);
+  expect "pool by zero rejected" (fun () ->
+      rejects pool [ Dimensions (b :: lits [ 32; 32 ]); LiteralInt 0 ]);
+  expect "pool by unknown stride gives fresh dims" (fun () ->
+      match check_app pool [ Dimensions (b :: lits [ 32; 32 ]); Int ] with
+      | Dimensions [ _; _; _ ] -> true
+      | _ -> false)
+
+(* subtraction and division in argument position *)
+let () =
+  let f =
+    ( [
+        ("X", Nparray [ Id "a" ]);
+        ("Y", Nparray [ Sub (Id "a", Int 1); Div (Id "a", Int 2) ]);
+      ],
+      Nparray [] )
+  in
+  expect "sub/div in argument" (fun () ->
+      check_app f [ Dimensions (lits [ 9 ]); Dimensions (lits [ 8; 4 ]) ]
+      = Dimensions []);
+  expect "sub/div in argument mismatch" (fun () ->
+      rejects f [ Dimensions (lits [ 9 ]); Dimensions (lits [ 8; 5 ]) ])
