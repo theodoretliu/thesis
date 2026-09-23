@@ -15,12 +15,18 @@ type entry =
   | Broadcast of string
   | Broadcasted of string list
     (* the broadcast of already-bound spreads, e.g. the result of x + y *)
+  | Permute of string * (string, int) either list (* result[i] = A[p[i]] *)
+  | SetAt of string * (string, int) either list * entry
+    (* replace dims at indices, e.g. keepdim=True *)
+  | InsertAt of string * (string, int) either * entry
+    (* insert a dim, e.g. unsqueeze *)
 [@@deriving show]
 
 type typ =
   | Nparray of entry list
   | TypeInt
   | IntExpr of entry (* an int whose value is the given dimension expression *)
+  | TypeLiteralInt of int (* python Literal[i]; bools are 0 and 1 *)
 [@@deriving show]
 
 type funtyp = (string * typ) list * typ
@@ -56,7 +62,11 @@ type mapping_type =
 
 let is_int_param (x : string) (param_var_mapping : typ StringMap.t) : bool =
   match StringMap.find_opt x param_var_mapping with
-  | Some TypeInt | Some (Nparray []) | Some (IntExpr _) -> true
+  | Some TypeInt
+  | Some (Nparray [])
+  | Some (IntExpr _)
+  | Some (TypeLiteralInt _) ->
+      true
   | _ -> false
 
 (* arithmetic dimensions may only mention already-bound dimension variables,
@@ -72,7 +82,8 @@ let rec check_arith_signature
   | Add (e1, e2) | Sub (e1, e2) | Mul (e1, e2) | Div (e1, e2) ->
       check_arith_signature (vars, _spread_vars, param_var_mapping) e1;
       check_arith_signature (vars, _spread_vars, param_var_mapping) e2
-  | Spread _ | Drop _ | Keep _ | Broadcast _ | Broadcasted _ ->
+  | Spread _ | Drop _ | Keep _ | Broadcast _ | Broadcasted _ | Permute _
+  | SetAt _ | InsertAt _ ->
       raise (KindError ("List dimension inside arithmetic: " ^ show_entry e))
 
 (* given a set of already declared variables and spread variables, this
@@ -112,7 +123,16 @@ let rec check_entry_signature
       else if StringSet.mem x spread_vars then
         (vars, spread_vars, param_var_mapping)
       else raise (KindError "Attempt to intro new variable in bad context")
-  | Drop (arr, indices) | Keep (arr, indices) ->
+  | Drop _ | Keep _ | Permute _ | SetAt _ | InsertAt _ ->
+      (* list functions of a bound spread, indexed by literals or int params *)
+      let arr, indices, inserted =
+        match e with
+        | Drop (arr, indices) | Keep (arr, indices) | Permute (arr, indices) ->
+            (arr, indices, None)
+        | SetAt (arr, indices, d) -> (arr, indices, Some d)
+        | InsertAt (arr, index, d) -> (arr, [ index ], Some d)
+        | _ -> failwith "impossible"
+      in
       if not (StringSet.mem arr spread_vars) then
         raise
           (KindError
@@ -124,8 +144,11 @@ let rec check_entry_signature
             | Left s -> not (is_int_param s param_var_mapping)
             | Right _ -> false)
           indices
-      then raise (KindError "Arguments to drop are not integers")
-      else orig
+      then
+        raise (KindError ("Indices to " ^ show_entry e ^ " are not integers"))
+      else (
+        Option.iter (check_arith_signature orig) inserted;
+        orig)
   | Int i ->
       if i < 0 then raise (KindError "Negative dimension literal") else orig
   | Broadcast s ->
@@ -157,7 +180,7 @@ let check_args_signature (funargtyps : (string * typ) list) :
       in
 
       match arg with
-      | TypeInt -> (vars, spread_vars, new_param_var_mapping)
+      | TypeInt | TypeLiteralInt _ -> (vars, spread_vars, new_param_var_mapping)
       | IntExpr e ->
           (* e may only mention what earlier parameters bound *)
           check_arith_signature (vars, spread_vars, param_var_mapping) e;
@@ -180,7 +203,7 @@ let check_signature ((funargtyps, rettyp) : funtyp) : unit =
   let vars, spread_vars, param_vars = check_args_signature funargtyps in
 
   match rettyp with
-  | TypeInt -> ()
+  | TypeInt | TypeLiteralInt _ -> ()
   | IntExpr e -> check_arith_signature (vars, spread_vars, param_vars) e
   | Nparray l ->
       ignore
@@ -284,9 +307,19 @@ let broadcast_pair (a : string list) (b : string list) : string list option =
 
 (* list-valued dimensions computed from already-bound spreads. None means
    the computation is undefined for these spreads *)
-let derived_dims (e : entry) ((_, spread_mapping, param_mapping) : mapping_type)
-    : string list option =
+let derived_dims (e : entry)
+    ((var_mapping, spread_mapping, param_mapping) : mapping_type) :
+    string list option =
   let spread v = StringMap.find v spread_mapping in
+  (* a new dimension variable for an arithmetic entry, if provably natural *)
+  let new_dim d =
+    match expr_of_dim d var_mapping param_mapping with
+    | Ok e
+      when Z3utils.prove (Z3.Arithmetic.mk_ge Z3utils.ctx e (mk_int_numeral 0))
+      ->
+        Some (Z3utils.add_to_solver e)
+    | _ -> None
+  in
   match e with
   | Drop (v, indices) ->
       Utils.drop (spread v) (get_concrete_indices indices param_mapping)
@@ -299,6 +332,16 @@ let derived_dims (e : entry) ((_, spread_mapping, param_mapping) : mapping_type)
           List.fold_left
             (fun acc l -> Option.bind acc (fun acc -> broadcast_pair acc l))
             (Some first) rest)
+  | Permute (v, indices) ->
+      Utils.permute (spread v) (get_concrete_indices indices param_mapping)
+  | SetAt (v, indices, d) ->
+      Option.bind (new_dim d) (fun d ->
+          Utils.set_at (spread v) (get_concrete_indices indices param_mapping) d)
+  | InsertAt (v, index, d) ->
+      Option.bind (new_dim d) (fun d ->
+          match get_concrete_indices [ index ] param_mapping with
+          | [ i ] -> Utils.insert_at (spread v) i d
+          | _ -> None)
   | _ -> invalid_arg "derived_dims"
 
 (* if s2 starts with dimensions provably equal to l, return the rest *)
@@ -330,6 +373,11 @@ and check_and_update_mapping (curr_typ : typ) (l2 : arg)
   (* the type is int and an int was provided *)
   | TypeInt, (LiteralInt _ | Int | SymInt _ | Dimensions [])
   | Nparray [], (LiteralInt _ | Int | SymInt _) ->
+      check_app' restfunargstyps restargtyps mapping
+  | TypeLiteralInt i, LiteralInt j when i = j ->
+      check_app' restfunargstyps restargtyps mapping
+  | TypeLiteralInt i, SymInt v
+    when Z3utils.prove_int_eq (Z3utils.mk_int v) (mk_int_numeral i) ->
       check_app' restfunargstyps restargtyps mapping
   (* the int must provably equal the expression *)
   | IntExpr e, (LiteralInt _ | SymInt _) ->
@@ -447,7 +495,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
           | None -> None
           end
       end
-  | Drop _ | Keep _ | Broadcasted _ ->
+  | Drop _ | Keep _ | Broadcasted _ | Permute _ | SetAt _ | InsertAt _ ->
       begin match
         Option.bind (derived_dims s1 mapping) (fun l -> strip_equal_prefix l s2)
       with
@@ -510,6 +558,7 @@ let check_ret_type_with_mapping (rettyp : typ)
     arg =
   match rettyp with
   | TypeInt -> Int
+  | TypeLiteralInt i -> LiteralInt i
   | IntExpr e -> (
       match expr_of_dim e var_mapping param_mapping with
       | Ok e ->
@@ -549,7 +598,8 @@ let check_ret_type_with_mapping (rettyp : typ)
             | Spread v ->
                 let args = StringMap.find v spread_mapping in
                 args @ check_ret_type_with_mapping' t
-            | Drop _ | Keep _ | Broadcasted _ ->
+            | Drop _ | Keep _ | Broadcasted _ | Permute _ | SetAt _ | InsertAt _
+              ->
                 begin match derived_dims h mapping with
                 | None ->
                     raise
@@ -594,3 +644,11 @@ let check_app ((funargtyps, rettyp) : funtyp) (argtyps : arg list) : arg =
     match final_mapping with
     | None -> raise (TypeError "Could not type check")
     | Some mapping -> check_ret_type_with_mapping rettyp mapping
+
+(* the first overload whose signature accepts the arguments, like @overload *)
+let check_overloads (overloads : funtyp list) (argtyps : arg list) : arg =
+  let rec go = function
+    | [] -> raise (TypeError "No overload matches the arguments")
+    | f :: rest -> ( try check_app f argtyps with TypeError _ -> go rest)
+  in
+  go overloads

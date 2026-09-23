@@ -78,3 +78,29 @@ let keep (l : 'a list) (indices : int list) : 'a list option =
     in
 
     keep' l sorted_indices 0
+
+(* python-style index normalization for a list of length len *)
+let normalize_index (len : int) (i : int) : int = if i >= 0 then i else len + i
+
+(* result.(i) = l.(perm.(i)); perm must be a permutation of the indices *)
+let permute (l : 'a list) (perm : int list) : 'a list option =
+  let len = List.length l in
+  let perm = List.map (normalize_index len) perm in
+  if List.sort compare perm <> List.init len Fun.id then None
+  else Some (List.map (List.nth l) perm)
+
+(* replace the elements at indices with x *)
+let set_at (l : 'a list) (indices : int list) (x : 'a) : 'a list option =
+  let len = List.length l in
+  let indices = List.map (normalize_index len) indices in
+  if List.exists (fun i -> i < 0 || i >= len) indices then None
+  else Some (List.mapi (fun i y -> if List.mem i indices then x else y) l)
+
+(* insert x so that it ends up at index (numpy expand_dims semantics) *)
+let insert_at (l : 'a list) (index : int) (x : 'a) : 'a list option =
+  let len = List.length l in
+  let i = normalize_index (len + 1) index in
+  if i < 0 || i > len then None
+  else
+    let front, back = take_n l i in
+    Some (front @ (x :: back))

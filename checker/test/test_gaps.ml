@@ -389,3 +389,99 @@ let () =
         [ v x ]);
   expect "[n] still rejects []" (fun () ->
       rejects ([ ("X", Nparray [ Id "n" ]) ], Nparray []) [ Dimensions [] ])
+
+(* ---- step 4: list functions, axis and flag arguments ---- *)
+
+let () =
+  let a, b, c = (mk_string (), mk_string (), mk_string ()) in
+  (* x.permute(p0, p1, p2) *)
+  let permute3 =
+    ( [
+        ("X", Nparray [ Spread "A" ]);
+        ("p0", TypeInt);
+        ("p1", TypeInt);
+        ("p2", TypeInt);
+      ],
+      Nparray [ Permute ("A", [ Left "p0"; Left "p1"; Left "p2" ]) ] )
+  in
+  expect "permute(0, 2, 1)" (fun () ->
+      dims_equal
+        (check_app permute3
+           [ Dimensions [ a; b; c ]; LiteralInt 0; LiteralInt 2; LiteralInt 1 ])
+        [ v a; v c; v b ]);
+  expect "permute with negative axis" (fun () ->
+      dims_equal
+        (check_app permute3
+           [
+             Dimensions [ a; b; c ]; LiteralInt (-1); LiteralInt 0; LiteralInt 1;
+           ])
+        [ v c; v a; v b ]);
+  expect "permute with repeated axis rejected" (fun () ->
+      rejects permute3
+        [ Dimensions [ a; b; c ]; LiteralInt 0; LiteralInt 0; LiteralInt 1 ]);
+  expect "permute of wrong rank rejected" (fun () ->
+      rejects permute3
+        [ Dimensions [ a; b ]; LiteralInt 0; LiteralInt 1; LiteralInt 2 ]);
+  (* unsqueeze(x, dim) *)
+  let unsqueeze =
+    ( [ ("X", Nparray [ Spread "A" ]); ("d", TypeInt) ],
+      Nparray [ InsertAt ("A", Left "d", Int 1) ] )
+  in
+  expect "unsqueeze(x, -1)" (fun () ->
+      dims_equal
+        (check_app unsqueeze [ Dimensions [ a; b ]; LiteralInt (-1) ])
+        [ v a; v b; n 1 ]);
+  expect "unsqueeze(x, 3) on rank 2 rejected" (fun () ->
+      rejects unsqueeze [ Dimensions [ a; b ]; LiteralInt 3 ]);
+  (* repeat_interleave-like: insert a computed dim *)
+  let insert2 =
+    ( [ ("X", Nparray [ Spread "A"; Id "n" ]) ],
+      Nparray [ InsertAt ("A", Right 0, Mul (Id "n", Int 2)) ] )
+  in
+  expect "insert computed dim" (fun () ->
+      dims_equal
+        (check_app insert2 [ Dimensions [ a; b; c ] ])
+        [ Z3.Arithmetic.mk_mul ctx [ v c; n 2 ]; v a; v b ])
+
+(* sum(x, dim, keepdim) as overloads on a Literal flag *)
+let sum_overloads =
+  [
+    ( [
+        ("X", Nparray [ Spread "A" ]);
+        ("dim", TypeInt);
+        ("keepdim", TypeLiteralInt 1);
+      ],
+      Nparray [ SetAt ("A", [ Left "dim" ], Int 1) ] );
+    ( [
+        ("X", Nparray [ Spread "A" ]);
+        ("dim", TypeInt);
+        ("keepdim", TypeLiteralInt 0);
+      ],
+      Nparray [ Drop ("A", [ Left "dim" ]) ] );
+  ]
+
+let () =
+  let a, b, c = (mk_string (), mk_string (), mk_string ()) in
+  expect "sum keepdim=True" (fun () ->
+      dims_equal
+        (check_overloads sum_overloads
+           [ Dimensions [ a; b; c ]; LiteralInt (-2); LiteralInt 1 ])
+        [ v a; n 1; v c ]);
+  expect "sum keepdim=False" (fun () ->
+      dims_equal
+        (check_overloads sum_overloads
+           [ Dimensions [ a; b; c ]; LiteralInt 1; LiteralInt 0 ])
+        [ v a; v c ]);
+  expect "sum with unknown keepdim matches no overload" (fun () ->
+      try
+        ignore
+          (check_overloads sum_overloads
+             [ Dimensions [ a; b; c ]; LiteralInt 1; SymInt (mk_string ()) ]);
+        false
+      with TypeError _ -> true);
+  expect "Literal parameter accepts determined SymInt" (fun () ->
+      let one = check_app isub [ LiteralInt 3; LiteralInt 2 ] in
+      dims_equal
+        (check_overloads sum_overloads
+           [ Dimensions [ a; b; c ]; LiteralInt 0; one ])
+        [ n 1; v b; v c ])

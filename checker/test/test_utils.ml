@@ -139,3 +139,17 @@ let _ =
   let _ = assert (keeping = None) in
 
   ()
+
+(* permute, set_at, insert_at *)
+let _ =
+  assert (permute [ "a"; "b"; "c" ] [ 2; 0; 1 ] = Some [ "c"; "a"; "b" ]);
+  assert (permute [ "a"; "b"; "c" ] [ 0; -1; 1 ] = Some [ "a"; "c"; "b" ]);
+  assert (permute [ "a"; "b"; "c" ] [ 0; 0; 1 ] = None);
+  assert (permute [ "a"; "b" ] [ 0 ] = None);
+  assert (set_at [ 1; 2; 3 ] [ 1; -1 ] 0 = Some [ 1; 0; 0 ]);
+  assert (set_at [ 1; 2; 3 ] [ 3 ] 0 = None);
+  assert (insert_at [ 1; 2 ] 0 9 = Some [ 9; 1; 2 ]);
+  assert (insert_at [ 1; 2 ] 2 9 = Some [ 1; 2; 9 ]);
+  assert (insert_at [ 1; 2 ] (-1) 9 = Some [ 1; 2; 9 ]);
+  assert (insert_at [ 1; 2 ] (-3) 9 = Some [ 9; 1; 2 ]);
+  assert (insert_at [ 1; 2 ] 3 9 = None)
