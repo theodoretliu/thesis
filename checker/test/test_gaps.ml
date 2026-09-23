@@ -485,3 +485,139 @@ let () =
         (check_overloads sum_overloads
            [ Dimensions [ a; b; c ]; LiteralInt 0; one ])
         [ n 1; v b; v c ])
+
+(* ---- step 5: prod/rank, refinements, existentials ---- *)
+
+let sg ?(requires = []) ?(exists = []) ?(ensures = []) (params, ret) =
+  { params; ret; requires; exists; ensures }
+
+(* flatten(x: [b, *A]) -> [b, prod(A)]; linear(x: [n, 6272]) *)
+let flatten1 =
+  ([ ("X", Nparray [ Id "b"; Spread "A" ]) ], Nparray [ Id "b"; Prod "A" ])
+
+let linear =
+  ([ ("X", Nparray [ Id "n"; Int 6272 ]) ], Nparray [ Id "n"; Int 10 ])
+
+let () =
+  let b = mk_string () in
+  expect "conv -> flatten -> linear" (fun () ->
+      let y =
+        check_app conv2d
+          [
+            Dimensions (b :: lits [ 1; 30; 30 ]);
+            Dimensions (lits [ 8; 1; 3; 3 ]);
+          ]
+      in
+      dims_equal (check_app linear [ check_app flatten1 [ y ] ]) [ v b; n 10 ]);
+  expect "flatten wrong size rejected by linear" (fun () ->
+      rejects linear
+        [ check_app flatten1 [ Dimensions (b :: lits [ 8; 28; 27 ]) ] ]);
+  expect "flatten of [b] is [b, 1]" (fun () ->
+      dims_equal (check_app flatten1 [ Dimensions [ b ] ]) [ v b; n 1 ])
+
+(* reshape(x: [*A], shape: [*B]) -> [*B] requires prod(A) = prod(B); int tuples are passed as dims *)
+let reshape =
+  sg
+    ~requires:[ Eq (Prod "A", Prod "B") ]
+    ( [ ("X", Nparray [ Spread "A" ]); ("shape", Nparray [ Spread "B" ]) ],
+      Nparray [ Spread "B" ] )
+
+let () =
+  let a, b = (mk_string (), mk_string ()) in
+  expect "reshape [2,3,4] -> [6,4]" (fun () ->
+      dims_equal
+        (check_sig reshape
+           [ Dimensions (lits [ 2; 3; 4 ]); Dimensions (lits [ 6; 4 ]) ])
+        [ n 6; n 4 ]);
+  expect "reshape [2,3,4] -> [5,5] rejected" (fun () ->
+      try
+        ignore
+          (check_sig reshape
+             [ Dimensions (lits [ 2; 3; 4 ]); Dimensions (lits [ 5; 5 ]) ]);
+        false
+      with TypeError _ -> true);
+  expect "reshape [a, b] -> [b, a] (symbolic)" (fun () ->
+      dims_equal
+        (check_sig reshape [ Dimensions [ a; b ]; Dimensions [ b; a ] ])
+        [ v b; v a ])
+
+(* conv2d with the precondition PyTorch actually enforces: kh <= h *)
+let conv2d_strict =
+  let params, ret = conv2d in
+  sg ~requires:[ Le (Id "kh", Id "h"); Le (Id "kw", Id "w") ] (params, ret)
+
+let () =
+  expect "strict conv rejects kernel one larger than image" (fun () ->
+      try
+        ignore
+          (check_sig conv2d_strict
+             [
+               Dimensions (lits [ 2; 3; 4; 4 ]);
+               Dimensions (lits [ 8; 3; 5; 5 ]);
+             ]);
+        false
+      with TypeError _ -> true);
+  expect "strict conv accepts valid kernel" (fun () ->
+      dims_equal
+        (check_sig conv2d_strict
+           [
+             Dimensions (lits [ 2; 3; 5; 5 ]); Dimensions (lits [ 8; 3; 5; 5 ]);
+           ])
+        [ n 2; n 8; n 1; n 1 ])
+
+(* nonzero(x: [*A]) -> exists k. [k, rank(A)], k <= prod(A)
+   unique(x: [n]) -> exists m. [m], m <= n
+   head(x: [n], y: [m]) requires m <= n *)
+let nonzero =
+  sg ~exists:[ "k" ]
+    ~ensures:[ Le (Id "k", Prod "A") ]
+    ([ ("X", Nparray [ Spread "A" ]) ], Nparray [ Id "k"; Rank "A" ])
+
+let unique =
+  sg ~exists:[ "m" ]
+    ~ensures:[ Le (Id "m", Id "n") ]
+    ([ ("X", Nparray [ Id "n" ]) ], Nparray [ Id "m" ])
+
+let head =
+  sg
+    ~requires:[ Le (Id "m", Id "n") ]
+    ( [ ("X", Nparray [ Id "n" ]); ("Y", Nparray [ Id "m" ]) ],
+      Nparray [ Id "m" ] )
+
+let same =
+  ([ ("X", Nparray [ Id "a" ]); ("Y", Nparray [ Id "a" ]) ], Nparray [ Id "a" ])
+
+let () =
+  let x = dims 1 in
+  expect "nonzero gives [k, rank]" (fun () ->
+      match check_sig nonzero [ Dimensions (lits [ 3; 4; 5 ]) ] with
+      | Dimensions [ k; r ] ->
+          prove_int_eq (v r) (n 3)
+          && prove (Z3.Arithmetic.mk_le ctx (v k) (n 60))
+          && not (prove_int_eq (v k) (n 60))
+      | _ -> false);
+  expect "unique(x) satisfies head's precondition" (fun () ->
+      match
+        check_sig head [ Dimensions x; check_sig unique [ Dimensions x ] ]
+      with
+      | Dimensions [ _ ] -> true
+      | _ -> false);
+  expect "head precondition fails for unrelated y" (fun () ->
+      try
+        ignore (check_sig head [ Dimensions x; Dimensions (dims 1) ]);
+        false
+      with TypeError _ -> true);
+  expect "two unique() calls are not known equal" (fun () ->
+      rejects same
+        [ check_sig unique [ Dimensions x ]; check_sig unique [ Dimensions x ] ]);
+  expect "prod of unbound spread is kind error" (fun () ->
+      rejects ~kind:true ([], Nparray [ Prod "A" ]) []);
+  expect "existential shadowing a param dim is kind error" (fun () ->
+      try
+        ignore
+          (check_sig
+             (sg ~exists:[ "n" ]
+                ([ ("X", Nparray [ Id "n" ]) ], Nparray [ Id "n" ]))
+             [ Dimensions x ]);
+        false
+      with KindError _ -> true)

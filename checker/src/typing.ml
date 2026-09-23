@@ -20,6 +20,8 @@ type entry =
     (* replace dims at indices, e.g. keepdim=True *)
   | InsertAt of string * (string, int) either * entry
     (* insert a dim, e.g. unsqueeze *)
+  | Prod of string (* product of a bound spread's dims, e.g. flatten *)
+  | Rank of string (* number of dims in a bound spread *)
 [@@deriving show]
 
 type typ =
@@ -30,6 +32,22 @@ type typ =
 [@@deriving show]
 
 type funtyp = (string * typ) list * typ
+
+(* relations between arithmetic dimensions *)
+type constr = Eq of entry * entry | Le of entry * entry | Lt of entry * entry
+[@@deriving show]
+
+(* a function type with refinements:
+   - requires: must be provable from the arguments (preconditions)
+   - exists: fresh dimensions the result may use (data-dependent shapes)
+   - ensures: assumed about the exists dims afterwards (postconditions) *)
+type signature = {
+  params : (string * typ) list;
+  ret : typ;
+  requires : constr list;
+  exists : string list;
+  ensures : constr list;
+}
 
 type arg =
   | Dimensions of string list
@@ -79,6 +97,9 @@ let rec check_arith_signature
       if not (StringSet.mem x vars || is_int_param x param_var_mapping) then
         raise (KindError ("Unbound variable " ^ x ^ " in arithmetic dimension"))
   | Int _ -> ()
+  | Prod a | Rank a ->
+      if not (StringSet.mem a _spread_vars) then
+        raise (KindError (show_entry e ^ " needs an already-bound spread var"))
   | Add (e1, e2) | Sub (e1, e2) | Mul (e1, e2) | Div (e1, e2) ->
       check_arith_signature (vars, _spread_vars, param_var_mapping) e1;
       check_arith_signature (vars, _spread_vars, param_var_mapping) e2
@@ -110,7 +131,7 @@ let rec check_entry_signature
         else (StringSet.add x vars, spread_vars, param_var_mapping)
       else if StringSet.mem x vars then (vars, spread_vars, param_var_mapping)
       else raise (KindError "Attempt to intro new variable in bad context")
-  | Add _ | Sub _ | Mul _ | Div _ ->
+  | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ ->
       check_arith_signature orig e;
       orig
   | Spread x ->
@@ -199,18 +220,39 @@ let check_args_signature (funargtyps : (string * typ) list) :
     (StringSet.empty, StringSet.empty, StringMap.empty)
     funargtyps
 
-let check_signature ((funargtyps, rettyp) : funtyp) : unit =
-  let vars, spread_vars, param_vars = check_args_signature funargtyps in
+let check_constr_signature ctx (c : constr) : unit =
+  match c with
+  | Eq (e1, e2) | Le (e1, e2) | Lt (e1, e2) ->
+      check_arith_signature ctx e1;
+      check_arith_signature ctx e2
 
-  match rettyp with
+let check_signature (sg : signature) : unit =
+  let ((vars, spread_vars, param_vars) as ctx) =
+    check_args_signature sg.params
+  in
+  List.iter (check_constr_signature ctx) sg.requires;
+
+  (* exists dims behave like dimension variables bound by the parameters *)
+  let vars =
+    List.fold_left
+      (fun vars x ->
+        if
+          StringSet.mem x vars
+          || StringSet.mem x spread_vars
+          || StringMap.mem x param_vars
+        then raise (KindError ("Existential " ^ x ^ " shadows another name"))
+        else StringSet.add x vars)
+      vars sg.exists
+  in
+  let ctx = (vars, spread_vars, param_vars) in
+  List.iter (check_constr_signature ctx) sg.ensures;
+
+  match sg.ret with
   | TypeInt | TypeLiteralInt _ -> ()
-  | IntExpr e -> check_arith_signature (vars, spread_vars, param_vars) e
+  | IntExpr e -> check_arith_signature ctx e
   | Nparray l ->
       ignore
-        (List.fold_left
-           (fun acc e -> check_entry_signature acc e false)
-           (vars, spread_vars, param_vars)
-           l)
+        (List.fold_left (fun acc e -> check_entry_signature acc e false) ctx l)
 
 (* the value of an integer parameter's argument as a Z3 expression, if known *)
 let int_param_expr (x : string) (param_mapping : arg StringMap.t) :
@@ -229,12 +271,13 @@ let show_dim_error = function
   | Bad_divisor e -> "divisor " ^ show_entry e ^ " may not be positive"
 
 (* translate an arithmetic dimension into a Z3 expression *)
-let rec expr_of_dim (s : entry) (var_mapping : Z3.Expr.expr StringMap.t)
-    (param_mapping : arg StringMap.t) : (Z3.Expr.expr, dim_error) result =
+let rec expr_of_dim (s : entry)
+    ((var_mapping, spread_mapping, param_mapping) as mapping : mapping_type) :
+    (Z3.Expr.expr, dim_error) result =
   let ( let* ) = Result.bind in
   let binop mk e1 e2 =
-    let* l = expr_of_dim e1 var_mapping param_mapping in
-    let* r = expr_of_dim e2 var_mapping param_mapping in
+    let* l = expr_of_dim e1 mapping in
+    let* r = expr_of_dim e2 mapping in
     Ok (mk l r)
   in
   match s with
@@ -252,12 +295,19 @@ let rec expr_of_dim (s : entry) (var_mapping : Z3.Expr.expr StringMap.t)
   | Mul (s1, s2) ->
       binop (fun l r -> Z3.Arithmetic.mk_mul Z3utils.ctx [ l; r ]) s1 s2
   | Div (s1, s2) ->
-      let* l = expr_of_dim s1 var_mapping param_mapping in
-      let* r = expr_of_dim s2 var_mapping param_mapping in
+      let* l = expr_of_dim s1 mapping in
+      let* r = expr_of_dim s2 mapping in
       (* z3 integer division is floor division for positive divisors *)
       if Z3utils.prove (Z3.Arithmetic.mk_gt Z3utils.ctx r (mk_int_numeral 0))
       then Ok (Z3.Arithmetic.mk_div Z3utils.ctx l r)
       else Error (Bad_divisor s2)
+  | Prod a -> (
+      match List.map Z3utils.mk_int (StringMap.find a spread_mapping) with
+      | [] -> Ok (mk_int_numeral 1)
+      | [ d ] -> Ok d
+      | ds -> Ok (Z3.Arithmetic.mk_mul Z3utils.ctx ds))
+  | Rank a ->
+      Ok (mk_int_numeral (List.length (StringMap.find a spread_mapping)))
   | _ -> raise (TypeError "Called with wrong argument")
 
 let get_concrete_indices (indices : (string, int) either list)
@@ -308,12 +358,12 @@ let broadcast_pair (a : string list) (b : string list) : string list option =
 (* list-valued dimensions computed from already-bound spreads. None means
    the computation is undefined for these spreads *)
 let derived_dims (e : entry)
-    ((var_mapping, spread_mapping, param_mapping) : mapping_type) :
+    ((_, spread_mapping, param_mapping) as mapping : mapping_type) :
     string list option =
   let spread v = StringMap.find v spread_mapping in
   (* a new dimension variable for an arithmetic entry, if provably natural *)
   let new_dim d =
-    match expr_of_dim d var_mapping param_mapping with
+    match expr_of_dim d mapping with
     | Ok e
       when Z3utils.prove (Z3.Arithmetic.mk_ge Z3utils.ctx e (mk_int_numeral 0))
       ->
@@ -381,14 +431,13 @@ and check_and_update_mapping (curr_typ : typ) (l2 : arg)
       check_app' restfunargstyps restargtyps mapping
   (* the int must provably equal the expression *)
   | IntExpr e, (LiteralInt _ | SymInt _) ->
-      let var_mapping, _, param_mapping = mapping in
       let value =
         match l2 with
         | LiteralInt i -> mk_int_numeral i
         | SymInt v -> Z3utils.mk_int v
         | _ -> failwith "impossible"
       in
-      begin match expr_of_dim e var_mapping param_mapping with
+      begin match expr_of_dim e mapping with
       | Ok expected when Z3utils.prove_int_eq expected value ->
           check_app' restfunargstyps restargtyps mapping
       | _ -> None
@@ -443,12 +492,12 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
               else None
           end
       end
-  | Add _ | Sub _ | Mul _ | Div _ ->
+  | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ ->
       begin match s2 with
       | [] -> None (* no more args left, intractable *)
       | h :: t -> (
           (* there are args left, try to prove the equality *)
-          match expr_of_dim s1 var_mapping param_mapping with
+          match expr_of_dim s1 mapping with
           | Ok expr_e when Z3utils.prove_int_eq expr_e (Z3utils.mk_int h) ->
               check_and_update_mapping (Nparray restentries) (Dimensions t)
                 mapping restfunargstyps restargtyps
@@ -560,7 +609,7 @@ let check_ret_type_with_mapping (rettyp : typ)
   | TypeInt -> Int
   | TypeLiteralInt i -> LiteralInt i
   | IntExpr e -> (
-      match expr_of_dim e var_mapping param_mapping with
+      match expr_of_dim e mapping with
       | Ok e ->
           let name = Z3utils.mk_string () in
           Z3.Solver.add Z3utils.solver
@@ -574,9 +623,9 @@ let check_ret_type_with_mapping (rettyp : typ)
         | [] -> []
         | h :: t ->
             begin match h with
-            | Id _ | Add _ | Sub _ | Mul _ | Div _ ->
+            | Id _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ ->
                 let bound_name =
-                  match expr_of_dim h var_mapping param_mapping with
+                  match expr_of_dim h mapping with
                   | Ok e ->
                       (* returned dimensions must be natural numbers *)
                       if
@@ -618,19 +667,28 @@ let check_ret_type_with_mapping (rettyp : typ)
 
       Dimensions (check_ret_type_with_mapping' l)
 
-let check_app ((funargtyps, rettyp) : funtyp) (argtyps : arg list) : arg =
-  check_signature (funargtyps, rettyp);
-  if List.length funargtyps <> List.length argtyps then
+let constr_expr (c : constr) (mapping : mapping_type) :
+    (Z3.Expr.expr, dim_error) result =
+  let ( let* ) = Result.bind in
+  let rel mk e1 e2 =
+    let* l = expr_of_dim e1 mapping in
+    let* r = expr_of_dim e2 mapping in
+    Ok (mk Z3utils.ctx l r)
+  in
+  match c with
+  | Eq (e1, e2) -> rel Z3.Boolean.mk_eq e1 e2
+  | Le (e1, e2) -> rel Z3.Arithmetic.mk_le e1 e2
+  | Lt (e1, e2) -> rel Z3.Arithmetic.mk_lt e1 e2
+
+let check_sig (sg : signature) (argtyps : arg list) : arg =
+  check_signature sg;
+  if List.length sg.params <> List.length argtyps then
     raise (TypeError "Incorrect number of arguments to function")
   else
-    let param_names = List.map fst funargtyps in
-
-    let param_arg_pairings = List.combine param_names argtyps in
-
     let param_mapping =
-      List.fold_left
-        (fun map (param_name, arg) -> StringMap.add param_name arg map)
-        StringMap.empty param_arg_pairings
+      List.fold_left2
+        (fun map (param_name, _) arg -> StringMap.add param_name arg map)
+        StringMap.empty sg.params argtyps
     in
 
     List.iter
@@ -638,12 +696,41 @@ let check_app ((funargtyps, rettyp) : funtyp) (argtyps : arg list) : arg =
       argtyps;
 
     let final_mapping =
-      check_app' funargtyps argtyps
+      check_app' sg.params argtyps
         (StringMap.empty, StringMap.empty, param_mapping)
     in
     match final_mapping with
     | None -> raise (TypeError "Could not type check")
-    | Some mapping -> check_ret_type_with_mapping rettyp mapping
+    | Some mapping ->
+        List.iter
+          (fun c ->
+            match constr_expr c mapping with
+            | Ok e when Z3utils.prove e -> ()
+            | Ok _ ->
+                raise
+                  (TypeError ("Precondition not provable: " ^ show_constr c))
+            | Error err -> raise (TypeError (show_dim_error err)))
+          sg.requires;
+
+        let var_mapping, spread_mapping, param_mapping = mapping in
+        let var_mapping =
+          List.fold_left
+            (fun m x ->
+              StringMap.add x (Z3utils.mk_int (Z3utils.fresh_dim ())) m)
+            var_mapping sg.exists
+        in
+        let mapping = (var_mapping, spread_mapping, param_mapping) in
+        List.iter
+          (fun c ->
+            match constr_expr c mapping with
+            | Ok e -> Z3.Solver.add Z3utils.solver [ e ]
+            | Error err -> raise (TypeError (show_dim_error err)))
+          sg.ensures;
+
+        check_ret_type_with_mapping sg.ret mapping
+
+let check_app ((params, ret) : funtyp) (argtyps : arg list) : arg =
+  check_sig { params; ret; requires = []; exists = []; ensures = [] } argtyps
 
 (* the first overload whose signature accepts the arguments, like @overload *)
 let check_overloads (overloads : funtyp list) (argtyps : arg list) : arg =

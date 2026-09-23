@@ -12,6 +12,7 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 | 2 | Values in types (`SymInt`, `IntExpr`, computed axes) | done | [03-values-in-types.md](03-values-in-types.md) |
 | 3 | Broadcast result shapes (`Broadcasted`) | done | [04-broadcasting.md](04-broadcasting.md) |
 | 4 | List functions (`Permute`, `SetAt`, `InsertAt`), `Literal` flags, overloads | done | [05-list-functions.md](05-list-functions.md) |
+| 5 | `Prod`/`Rank` (reshape, flatten), refinements, existentials | done | [06-refinements.md](06-refinements.md) |
 
 Run everything with:
 
