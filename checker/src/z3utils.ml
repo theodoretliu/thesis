@@ -27,9 +27,17 @@ let prove_int_eq i1 i2 = prove (Z3.Boolean.mk_eq ctx i1 i2)
 let add_int (xs : string list) = Z3.Arithmetic.mk_add ctx (List.map mk_int xs)
 let mul_int (xs : string list) = Z3.Arithmetic.mk_mul ctx (List.map mk_int xs)
 
+(* dimensions are natural numbers *)
+let assume_dim (name : string) =
+  Z3.Solver.add solver
+    [ Z3.Arithmetic.mk_ge ctx (mk_int name) (mk_int_numeral 0) ]
+
+let fresh_dim () =
+  let name = mk_string () in
+  assume_dim name;
+  name
+
 let add_to_solver (e : Z3.Expr.expr) =
-  let new_var_name = mk_string () in
-  let new_var = mk_int new_var_name in
-  let equality = Z3.Boolean.mk_eq ctx new_var e in
-  Z3.Solver.add solver [ equality ];
+  let new_var_name = fresh_dim () in
+  Z3.Solver.add solver [ Z3.Boolean.mk_eq ctx (mk_int new_var_name) e ];
   new_var_name
