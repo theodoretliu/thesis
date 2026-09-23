@@ -92,7 +92,10 @@ let string_of_expr (e : Z3.Expr.expr) : string =
   | Some i -> string_of_int i
   | None -> Z3.Expr.to_string e
 
-let string_of_dim (v : string) : string = string_of_expr (Z3utils.mk_int v)
+let string_of_dim (v : string) : string =
+  if Z3utils.is_list_var v then "*" ^ Z3utils.list_label v
+  else string_of_expr (Z3utils.mk_int v)
+
 let string_of_dims l = "[" ^ String.concat ", " (List.map string_of_dim l) ^ "]"
 
 let string_of_typ = function
@@ -351,12 +354,24 @@ let rec expr_of_dim (s : entry)
       then Ok (Z3.Arithmetic.mk_div Z3utils.ctx l r)
       else Error (Bad_divisor s2)
   | Prod a -> (
-      match List.map Z3utils.mk_int (StringMap.find a spread_mapping) with
+      let factor x =
+        if Z3utils.is_list_var x then Z3utils.prod_of_list x
+        else Z3utils.mk_int x
+      in
+      match List.map factor (StringMap.find a spread_mapping) with
       | [] -> Ok (mk_int_numeral 1)
       | [ d ] -> Ok d
       | ds -> Ok (Z3.Arithmetic.mk_mul Z3utils.ctx ds))
   | Rank a ->
-      Ok (mk_int_numeral (List.length (StringMap.find a spread_mapping)))
+      let lists, dims =
+        List.partition Z3utils.is_list_var (StringMap.find a spread_mapping)
+      in
+      if lists = [] then Ok (mk_int_numeral (List.length dims))
+      else
+        Ok
+          (Z3.Arithmetic.mk_add Z3utils.ctx
+             (mk_int_numeral (List.length dims)
+             :: List.map Z3utils.rank_of_list lists))
   | _ -> raise (TypeError "Called with wrong argument")
 
 let get_concrete_indices (indices : (string, int) either list)
@@ -384,6 +399,10 @@ let broadcast_pair (a : string list) (b : string list) : string list option =
   let rec go ra rb acc =
     match (ra, rb) with
     | [], rest | rest, [] -> Some (List.rev_append rest acc)
+    (* a list variable only broadcasts with itself: anything else would
+       depend on its unknown length *)
+    | x :: ra', y :: rb' when Z3utils.is_list_var x || Z3utils.is_list_var y ->
+        if x = y then go ra' rb' (x :: acc) else None
     | x :: ra', y :: rb' ->
         let ex, ey = (Z3utils.mk_int x, Z3utils.mk_int y) in
         let eq = Z3.Boolean.mk_eq Z3utils.ctx in
@@ -404,6 +423,30 @@ let broadcast_pair (a : string list) (b : string list) : string list option =
   in
   go (List.rev a) (List.rev b) []
 
+(* the position python index i refers to in items, provided no list variable
+   makes it ambiguous. for insertion, the list is one longer *)
+let resolve_index ?(insert = false) (items : string list) (i : int) : int option
+    =
+  let len = List.length items + if insert then 1 else 0 in
+  let p = Utils.normalize_index len i in
+  (* positions whose lengths the index depends on: before it for i >= 0,
+     from it to the end for i < 0 *)
+  let depends j = if i >= 0 then j < p || ((not insert) && j = p) else j >= p in
+  if p < 0 || p >= len then None
+  else if
+    List.exists Fun.id
+      (List.mapi (fun j x -> depends j && Z3utils.is_list_var x) items)
+  then None
+  else Some p
+
+let resolve_indices (items : string list) (indices : int list) : int list option
+    =
+  List.fold_right
+    (fun i acc ->
+      Option.bind acc (fun acc ->
+          Option.map (fun p -> p :: acc) (resolve_index items i)))
+    indices (Some [])
+
 (* list-valued dimensions computed from already-bound spreads. None means
    the computation is undefined for these spreads *)
 let derived_dims (e : entry)
@@ -419,11 +462,16 @@ let derived_dims (e : entry)
         Some (Z3utils.add_to_solver e)
     | _ -> None
   in
+  (* apply f to v's dims and the resolved positions of indices *)
+  let at v indices f =
+    let items = spread v in
+    Option.bind
+      (resolve_indices items (get_concrete_indices indices param_mapping))
+      (f items)
+  in
   match e with
-  | Drop (v, indices) ->
-      Utils.drop (spread v) (get_concrete_indices indices param_mapping)
-  | Keep (v, indices) ->
-      Utils.keep (spread v) (get_concrete_indices indices param_mapping)
+  | Drop (v, indices) -> at v indices Utils.drop
+  | Keep (v, indices) -> at v indices Utils.keep
   | Broadcasted names -> (
       match List.map spread names with
       | [] -> None
@@ -432,14 +480,18 @@ let derived_dims (e : entry)
             (fun acc l -> Option.bind acc (fun acc -> broadcast_pair acc l))
             (Some first) rest)
   | Permute (v, indices) ->
-      Utils.permute (spread v) (get_concrete_indices indices param_mapping)
+      if List.exists Z3utils.is_list_var (spread v) then None
+      else at v indices Utils.permute
   | SetAt (v, indices, d) ->
       Option.bind (new_dim d) (fun d ->
-          Utils.set_at (spread v) (get_concrete_indices indices param_mapping) d)
+          at v indices (fun items ps -> Utils.set_at items ps d))
   | InsertAt (v, index, d) ->
       Option.bind (new_dim d) (fun d ->
+          let items = spread v in
           match get_concrete_indices [ index ] param_mapping with
-          | [ i ] -> Utils.insert_at (spread v) i d
+          | [ i ] ->
+              Option.bind (resolve_index ~insert:true items i) (fun p ->
+                  Utils.insert_at items p d)
           | _ -> None)
   | _ -> invalid_arg "derived_dims"
 
@@ -451,7 +503,10 @@ let strip_equal_prefix (l : string list) (s2 : string list) : string list option
     let front, back = Utils.take_n s2 (List.length l) in
     if
       List.for_all2
-        (fun x y -> Z3utils.prove_int_eq (Z3utils.mk_int x) (Z3utils.mk_int y))
+        (fun x y ->
+          (* list variables are only equal to themselves *)
+          if Z3utils.is_list_var x || Z3utils.is_list_var y then x = y
+          else Z3utils.prove_int_eq (Z3utils.mk_int x) (Z3utils.mk_int y))
         l front
     then Some back
     else None
@@ -590,6 +645,12 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       restfunargstyps restargtyps
   in
   match s1 with
+  | (Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _)
+    when match s2 with h :: _ -> Z3utils.is_list_var h | [] -> false ->
+      fail_here (fun () ->
+          "can't match " ^ string_of_entry s1 ^ " against "
+          ^ string_of_dim (List.hd s2)
+          ^ ", which has an unknown number of dimensions")
   | Id x
     when (not (StringMap.mem x var_mapping)) && StringMap.mem x param_mapping ->
       (* x names an integer parameter: the dimension must equal its value *)
@@ -711,6 +772,9 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       let rec prove_broadcast l1 l2 =
         match (l1, l2) with
         | [], _ | _, [] -> true
+        | h1 :: t1, h2 :: t2
+          when Z3utils.is_list_var h1 || Z3utils.is_list_var h2 ->
+            h1 = h2 && prove_broadcast t1 t2
         | h1 :: t1, h2 :: t2 ->
             (prove_int_eq (mk_int h1) (mk_int h2)
             || prove_int_eq (mk_int h1) (mk_int_numeral 1)
@@ -843,7 +907,13 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
     in
 
     List.iter
-      (function Dimensions l -> List.iter Z3utils.assume_dim l | _ -> ())
+      (function
+        | Dimensions l ->
+            List.iter
+              (fun d ->
+                if not (Z3utils.is_list_var d) then Z3utils.assume_dim d)
+              l
+        | _ -> ())
       argtyps;
 
     best_failure := None;
@@ -915,3 +985,7 @@ let check_overloads (overloads : funtyp list) (argtyps : arg list) : arg =
                         Printf.sprintf "\n  overload %d: %s" (i + 1) msg
                     | Ok _ -> "")
                   attempts)))
+
+(* an array whose shape is entirely unknown, e.g. the result of an unannotated
+   library call (Any): a single list variable *)
+let unknown_shape () : arg = Dimensions [ Z3utils.fresh_list ~label:"?" () ]

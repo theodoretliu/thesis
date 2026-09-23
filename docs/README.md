@@ -14,6 +14,27 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 | 4 | List functions (`Permute`, `SetAt`, `InsertAt`), `Literal` flags, overloads | done | [05-list-functions.md](05-list-functions.md) |
 | 5 | `Prod`/`Rank` (reshape, flatten), refinements, existentials | done | [06-refinements.md](06-refinements.md) |
 | 6 | Readable diagnostics | done | [07-diagnostics.md](07-diagnostics.md) |
+| 7 | Symbolic variadic arguments (function bodies, `Any`) | done | [08-symbolic-variadics.md](08-symbolic-variadics.md) |
+
+## Scorecard after steps 0–7
+
+| Gap | `main` | Now |
+|---|---|---|
+| Type-level arithmetic | `+ *` (and `Int` inside crashed) | `+ - * //`, `Prod`, `Rank`, well-definedness proofs |
+| Type-level functions | `Drop`, `Keep` | + `Permute`, `SetAt`, `InsertAt`, `Broadcasted` |
+| One variadic per param list | already solved | unchanged |
+| Two variadics under broadcasting | check only | result shapes (`Broadcasted`), batched matmul |
+| Values in types | none (spec'd param refs unimplemented) | `SymInt`, `IntExpr`, param refs, refinements, existentials |
+| Axis/flag args | literal axes | determined symbolic axes, `Literal` flags, overloads, `keepdim` |
+| `Any` leaks | args needed a known number of dims | list variables; `Any = [*fresh]` is used soundly or rejected |
+| Unreadable diagnostics | "Could not type check" | parameter, signature, shape, and the specific expectation |
+
+Not attempted: list unification (see step 7), dtypes, a frontend (jaxtyping strings + Python AST), and
+source-level names in messages. The next steps, in order:
+1. A jaxtyping-string parser that emits `signature` values.
+2. An intraprocedural walk over marked Python functions that threads `Dimensions`/`SymInt`/list vars
+   through calls.
+3. A signature file for the torch/numpy ops in use.
 
 Run everything with:
 

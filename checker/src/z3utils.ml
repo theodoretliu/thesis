@@ -56,3 +56,25 @@ let determined_int (e : Z3.Expr.expr) : int option =
               int_of_string_opt (Z3.Arithmetic.Integer.numeral_to_string value)
           | _ -> None))
   | _ -> None
+
+(* list variables: a symbolic, unknown-length run of dimensions inside an
+   argument's shape, like *B in the body of def f(x: [*B, d]). they share the
+   namespace of dimension names; label is the user-facing name *)
+let list_vars : (string, string) Hashtbl.t = Hashtbl.create 16
+let is_list_var (name : string) = Hashtbl.mem list_vars name
+let list_label (name : string) = Hashtbl.find list_vars name
+
+(* the product and number of a list variable's dimensions *)
+let prod_of_list (name : string) = mk_int ("prod_" ^ name)
+let rank_of_list (name : string) = mk_int ("rank_" ^ name)
+
+let fresh_list ?(label = "") () =
+  let name = "list" ^ mk_string () in
+  Hashtbl.add list_vars name (if label = "" then name else label);
+  let zero = mk_int_numeral 0 in
+  Z3.Solver.add solver
+    [
+      Z3.Arithmetic.mk_ge ctx (prod_of_list name) zero;
+      Z3.Arithmetic.mk_ge ctx (rank_of_list name) zero;
+    ];
+  name

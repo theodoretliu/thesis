@@ -684,3 +684,95 @@ let () =
     (fun () ->
       check_app sum_axis [ Dimensions (dims 2); SymInt (mk_string ()) ])
     [ "Index axis must have a statically known value" ]
+
+(* ---- step 7: symbolic variadic arguments (function bodies, Any) ---- *)
+
+(* inside def f(x: [*B, d], w: [d, p]): x has shape [*B, d] with B unknown *)
+let sum_all = ([ ("X", Nparray [ Spread "A" ]) ], Nparray [])
+
+(* linear(x: [*A, k], w: [k, p]) -> [*A, p] *)
+let linear_any =
+  ( [ ("X", Nparray [ Spread "A"; Id "k" ]); ("W", Nparray [ Id "k"; Id "p" ]) ],
+    Nparray [ Spread "A"; Id "p" ] )
+
+let () =
+  let bl = fresh_list ~label:"B" () and d = mk_string () and p = mk_string () in
+  let x = Dimensions [ bl; d ] in
+  (* list variables by name, dimensions by proof *)
+  let is_shape r expected =
+    match r with
+    | Dimensions l ->
+        List.length l = List.length expected
+        && List.for_all2
+             (fun a b ->
+               if is_list_var a || is_list_var b then a = b
+               else prove_int_eq (v a) (v b))
+             l expected
+    | _ -> false
+  in
+  expect "sum(x, -1) on [*B, d] gives [*B]" (fun () ->
+      is_shape (check_app sum_axis [ x; LiteralInt (-1) ]) [ bl ]);
+  expect "sum(x, 0) on [*B, d] rejected (position depends on B)" (fun () ->
+      rejects sum_axis [ x; LiteralInt 0 ]);
+  expect "linear(x, w) on [*B, d] x [d, p] gives [*B, p]" (fun () ->
+      is_shape (check_app linear_any [ x; Dimensions [ d; p ] ]) [ bl; p ]);
+  expect "batched matmul needs an m that [*B, d] doesn't provably have"
+    (fun () -> rejects matmul [ x; Dimensions [ d; p ] ]);
+  expect "x + x keeps [*B, d]" (fun () ->
+      is_shape (check_app badd [ x; x ]) [ bl; d ]);
+  expect "x + bias[d] gives [*B, d]" (fun () ->
+      is_shape (check_app badd [ x; Dimensions [ d ] ]) [ bl; d ]);
+  expect "x + y with a different unknown batch rejected" (fun () ->
+      rejects badd [ x; Dimensions [ fresh_list ~label:"C" (); d ] ]);
+  expect "unsqueeze(x, -1) gives [*B, d, 1]" (fun () ->
+      match
+        check_app
+          ( [ ("X", Nparray [ Spread "A" ]); ("i", TypeInt) ],
+            Nparray [ InsertAt ("A", Left "i", Int 1) ] )
+          [ x; LiteralInt (-1) ]
+      with
+      | Dimensions [ b'; d'; one ] ->
+          b' = bl && d' = d && prove_int_eq (v one) (n 1)
+      | _ -> false);
+  expect "[n, *R] can't take n from *B" (fun () -> rejects shape0 [ x ]);
+  expect "error explains the unknown length" (fun () ->
+      contains
+        (error_of (fun () -> check_app shape0 [ x ]))
+        "*B, which has an unknown number of dimensions");
+  expect "permute of [*B, d] rejected" (fun () ->
+      rejects
+        ( [ ("X", Nparray [ Spread "A" ]); ("i", TypeInt); ("j", TypeInt) ],
+          Nparray [ Permute ("A", [ Left "i"; Left "j" ]) ] )
+        [ x; LiteralInt 1; LiteralInt 0 ])
+
+let () =
+  let bl = fresh_list ~label:"B" () and d = mk_string () in
+  expect "flatten [n, *B] is [n, prod(B)] and matches itself" (fun () ->
+      let nn = mk_string () in
+      let y1 = check_app flatten1 [ Dimensions [ nn; bl ] ]
+      and y2 = check_app flatten1 [ Dimensions [ nn; bl ] ] in
+      check_app same
+        [
+          Dimensions (match y1 with Dimensions [ _; q ] -> [ q ] | _ -> []);
+          Dimensions (match y2 with Dimensions [ _; q ] -> [ q ] | _ -> []);
+        ]
+      |> function
+      | Dimensions [ _ ] -> true
+      | _ -> false);
+  expect "flatten [n, *B] into linear(6272) rejected" (fun () ->
+      rejects linear [ check_app flatten1 [ Dimensions [ mk_string (); bl ] ] ]);
+  expect "rank([*B, d]) is rank(B) + 1" (fun () ->
+      match check_sig nonzero [ Dimensions [ bl; d ] ] with
+      | Dimensions [ _; r ] ->
+          prove_int_eq (v r) (Z3.Arithmetic.mk_add ctx [ rank_of_list bl; n 1 ])
+      | _ -> false)
+
+(* Any: a completely unknown shape is one fresh list variable *)
+let () =
+  let u = unknown_shape () in
+  expect "sum(any) is fine" (fun () -> check_app sum_all [ u ] = Dimensions []);
+  expect "any + same any is fine" (fun () -> check_app badd [ u; u ] = u);
+  expect "any @ w is rejected, not silently accepted" (fun () ->
+      rejects matmul [ u; Dimensions (dims 2) ]);
+  expect "any + other any is rejected" (fun () ->
+      rejects badd [ u; unknown_shape () ])
