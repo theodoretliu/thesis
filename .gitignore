@@ -13,3 +13,4 @@ thesis.*
 !thesis.pdf
 .DS_Store
 __pycache__
+_opam
