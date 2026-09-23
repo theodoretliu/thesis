@@ -15,10 +15,19 @@ type entry =
   | Broadcast of string
 [@@deriving show]
 
-type typ = Nparray of entry list | TypeInt [@@deriving show]
+type typ =
+  | Nparray of entry list
+  | TypeInt
+  | IntExpr of entry (* an int whose value is the given dimension expression *)
+[@@deriving show]
+
 type funtyp = (string * typ) list * typ
 
-type arg = Dimensions of string list | LiteralInt of int | Int
+type arg =
+  | Dimensions of string list
+  | LiteralInt of int
+  | Int (* an int with no known value or identity *)
+  | SymInt of string (* an int whose value is the named z3 variable *)
 [@@deriving show]
 
 exception TypeError of string
@@ -45,7 +54,7 @@ type mapping_type =
 
 let is_int_param (x : string) (param_var_mapping : typ StringMap.t) : bool =
   match StringMap.find_opt x param_var_mapping with
-  | Some TypeInt | Some (Nparray []) -> true
+  | Some TypeInt | Some (Nparray []) | Some (IntExpr _) -> true
   | _ -> false
 
 (* arithmetic dimensions may only mention already-bound dimension variables,
@@ -110,9 +119,7 @@ let rec check_entry_signature
         List.exists
           (fun index ->
             match index with
-            | Left s ->
-                let found = StringMap.find_opt s param_var_mapping in
-                found <> Some TypeInt && found <> Some (Nparray [])
+            | Left s -> not (is_int_param s param_var_mapping)
             | Right _ -> false)
           indices
       then raise (KindError "Arguments to drop are not integers")
@@ -143,6 +150,10 @@ let check_args_signature (funargtyps : (string * typ) list) :
 
       match arg with
       | TypeInt -> (vars, spread_vars, new_param_var_mapping)
+      | IntExpr e ->
+          (* e may only mention what earlier parameters bound *)
+          check_arith_signature (vars, spread_vars, param_var_mapping) e;
+          (vars, spread_vars, new_param_var_mapping)
       | Nparray l ->
           let new_vars, new_spread_vars, new_param_var_mapping =
             List.fold_left
@@ -162,6 +173,7 @@ let check_signature ((funargtyps, rettyp) : funtyp) : unit =
 
   match rettyp with
   | TypeInt -> ()
+  | IntExpr e -> check_arith_signature (vars, spread_vars, param_vars) e
   | Nparray l ->
       ignore
         (List.fold_left
@@ -174,6 +186,7 @@ let int_param_expr (x : string) (param_mapping : arg StringMap.t) :
     Z3.Expr.expr option =
   match StringMap.find_opt x param_mapping with
   | Some (LiteralInt i) -> Some (mk_int_numeral i)
+  | Some (SymInt v) -> Some (Z3utils.mk_int v)
   | _ -> None
 
 type dim_error =
@@ -222,9 +235,14 @@ let get_concrete_indices (indices : (string, int) either list)
     (fun index ->
       match index with
       | Left s ->
-          begin match StringMap.find s param_mapping with
-          | LiteralInt i -> i
-          | _ -> raise (TypeError "Literal integer needed as argument to drop")
+          (* a symbolic int is fine as long as the constraints pin it down *)
+          begin match
+            Option.bind (int_param_expr s param_mapping) Z3utils.determined_int
+          with
+          | Some i -> i
+          | None ->
+              raise
+                (TypeError ("Index " ^ s ^ " must have a statically known value"))
           end
       | Right asdf -> asdf)
     indices
@@ -243,12 +261,23 @@ and check_and_update_mapping (curr_typ : typ) (l2 : arg)
     (restargtyps : arg list) : mapping_type option =
   match (curr_typ, l2) with
   (* the type is int and an int was provided *)
-  | TypeInt, LiteralInt _
-  | TypeInt, Int
-  | TypeInt, Dimensions []
-  | Nparray [], LiteralInt _
-  | Nparray [], Int ->
+  | TypeInt, (LiteralInt _ | Int | SymInt _ | Dimensions [])
+  | Nparray [], (LiteralInt _ | Int | SymInt _) ->
       check_app' restfunargstyps restargtyps mapping
+  (* the int must provably equal the expression *)
+  | IntExpr e, (LiteralInt _ | SymInt _) ->
+      let var_mapping, _, param_mapping = mapping in
+      let value =
+        match l2 with
+        | LiteralInt i -> mk_int_numeral i
+        | SymInt v -> Z3utils.mk_int v
+        | _ -> failwith "impossible"
+      in
+      begin match expr_of_dim e var_mapping param_mapping with
+      | Ok expected when Z3utils.prove_int_eq expected value ->
+          check_app' restfunargstyps restargtyps mapping
+      | _ -> None
+      end
   (* the type is nparray and list of dimensions was provided *)
   | Nparray l1, Dimensions l2 ->
       begin match (l1, l2) with
@@ -447,6 +476,15 @@ let check_ret_type_with_mapping (rettyp : typ)
     ((var_mapping, spread_mapping, param_mapping) : mapping_type) : arg =
   match rettyp with
   | TypeInt -> Int
+  | IntExpr e -> (
+      match expr_of_dim e var_mapping param_mapping with
+      | Ok e ->
+          let name = Z3utils.mk_string () in
+          Z3.Solver.add Z3utils.solver
+            [ Z3.Boolean.mk_eq Z3utils.ctx (Z3utils.mk_int name) e ];
+          SymInt name
+      | Error (Unknown_param _) -> Int
+      | Error err -> raise (TypeError (show_dim_error err)))
   | Nparray l ->
       let rec check_ret_type_with_mapping' (l : entry list) : string list =
         match l with

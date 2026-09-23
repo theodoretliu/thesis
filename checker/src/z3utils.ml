@@ -41,3 +41,18 @@ let add_to_solver (e : Z3.Expr.expr) =
   let new_var_name = fresh_dim () in
   Z3.Solver.add solver [ Z3.Boolean.mk_eq ctx (mk_int new_var_name) e ];
   new_var_name
+
+(* the unique integer value the solver's assertions force e to take, if any *)
+let determined_int (e : Z3.Expr.expr) : int option =
+  match Z3.Solver.check solver [] with
+  | Z3.Solver.SATISFIABLE -> (
+      match Z3.Solver.get_model solver with
+      | None -> None
+      | Some model -> (
+          match Z3.Model.eval model e true with
+          | Some value
+            when Z3.Arithmetic.is_int_numeral value
+                 && prove (Z3.Boolean.mk_eq ctx e value) ->
+              int_of_string_opt (Z3.Arithmetic.Integer.numeral_to_string value)
+          | _ -> None))
+  | _ -> None

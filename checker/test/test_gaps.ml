@@ -213,3 +213,71 @@ let () =
       = Dimensions []);
   expect "sub/div in argument mismatch" (fun () ->
       rejects f [ Dimensions (lits [ 9 ]); Dimensions (lits [ 8; 5 ]) ])
+
+(* ---- step 2: values in types ---- *)
+
+(* shape0(x: [n, *R]) -> int{n};  zeros(k: int) -> [k];  size(x: [a, b]) -> int{a * b} *)
+let shape0 = ([ ("X", Nparray [ Id "n"; Spread "R" ]) ], IntExpr (Id "n"))
+let zeros = ([ ("k", TypeInt) ], Nparray [ Id "k" ])
+
+let size2 =
+  ([ ("X", Nparray [ Id "a"; Id "b" ]) ], IntExpr (Mul (Id "a", Id "b")))
+
+let iadd = ([ ("i", TypeInt); ("j", TypeInt) ], IntExpr (Add (Id "i", Id "j")))
+let isub = ([ ("i", TypeInt); ("j", TypeInt) ], IntExpr (Sub (Id "i", Id "j")))
+
+(* scale(x: [n, d], w: [n]) -> [d] *)
+let scale =
+  ( [ ("X", Nparray [ Id "n"; Id "d" ]); ("W", Nparray [ Id "n" ]) ],
+    Nparray [ Id "d" ] )
+
+let () =
+  let x = dims 2 in
+  expect "x.shape[0] flows into zeros" (fun () ->
+      let k = check_app shape0 [ Dimensions x ] in
+      let w = check_app zeros [ k ] in
+      dims_equal (check_app scale [ Dimensions x; w ]) [ v (List.nth x 1) ]);
+  expect "zeros(x.shape[0] + 1) mismatches x" (fun () ->
+      let k =
+        check_app iadd [ check_app shape0 [ Dimensions x ]; LiteralInt 1 ]
+      in
+      rejects scale [ Dimensions x; check_app zeros [ k ] ]);
+  expect "size(x) is a*b" (fun () ->
+      match check_app size2 [ Dimensions x ] with
+      | SymInt s -> prove_int_eq (v s) (Z3.Arithmetic.mk_mul ctx (List.map v x))
+      | _ -> false)
+
+(* sum(x: [*A], axis: int) -> [Drop(A, axis)] *)
+let sum_axis =
+  ( [ ("X", Nparray [ Spread "A" ]); ("axis", TypeInt) ],
+    Nparray [ Drop ("A", [ Left "axis" ]) ] )
+
+let () =
+  let x = dims 3 in
+  expect "computed axis 3 - 2 is statically known (thesis example)" (fun () ->
+      let axis = check_app isub [ LiteralInt 3; LiteralInt 2 ] in
+      dims_equal
+        (check_app sum_axis [ Dimensions x; axis ])
+        [ v (List.nth x 0); v (List.nth x 2) ]);
+  expect "undetermined symbolic axis rejected" (fun () ->
+      rejects sum_axis [ Dimensions x; SymInt (mk_string ()) ])
+
+let () =
+  expect "zeros of unconstrained symbolic int rejected (may be negative)"
+    (fun () -> rejects zeros [ SymInt (mk_string ()) ]);
+  expect "zeros of opaque Int still gives fresh dim" (fun () ->
+      match check_app zeros [ Int ] with Dimensions [ _ ] -> true | _ -> false)
+
+(* IntExpr in parameter position: at(x: [n], i: int{n - 1}) *)
+let () =
+  let f =
+    ( [ ("X", Nparray [ Id "n" ]); ("i", IntExpr (Sub (Id "n", Int 1))) ],
+      TypeInt )
+  in
+  let x = mk_int_var 5 in
+  expect "IntExpr parameter accepts equal value" (fun () ->
+      check_app f [ Dimensions [ x ]; LiteralInt 4 ] = Int);
+  expect "IntExpr parameter rejects other value" (fun () ->
+      rejects f [ Dimensions [ x ]; LiteralInt 5 ]);
+  expect "IntExpr parameter can't intro vars" (fun () ->
+      rejects ~kind:true ([ ("i", IntExpr (Id "m")) ], TypeInt) [ LiteralInt 1 ])

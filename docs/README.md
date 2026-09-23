@@ -9,6 +9,7 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 |---|---|---|---|
 | 0 | Solidify: bugs on `main` | done | [01-solidify.md](01-solidify.md) |
 | 1 | Type-level arithmetic (`-`, `//`) | done | [02-arithmetic.md](02-arithmetic.md) |
+| 2 | Values in types (`SymInt`, `IntExpr`, computed axes) | done | [03-values-in-types.md](03-values-in-types.md) |
 
 Run everything with:
 
