@@ -1,5 +1,6 @@
 (library
-    (name numpy_checking)
-    (flags (-cclib -lstdc++))
-    (libraries z3)
-    (preprocess (pps ppx_deriving.show)))
+ (name numpy_checking)
+ (public_name numpy_checking)
+ (libraries z3)
+ (preprocess
+  (pps ppx_deriving.show)))

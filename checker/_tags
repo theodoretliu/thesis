@@ -1,1 +1,0 @@
-true: package(z3), thread, debug, package(ppx_deriving.std)

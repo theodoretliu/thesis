@@ -1,1 +1,27 @@
-(lang dune 2.4)
+(lang dune 3.24)
+
+(name numpy_checking)
+
+(generate_opam_files true)
+
+(source
+ (github theodoretliu/thesis))
+
+(authors "Teddy Liu <theodoretliu@gmail.com>")
+
+(maintainers "Teddy Liu <theodoretliu@gmail.com>")
+
+(package
+ (name numpy_checking)
+ (synopsis "Z3-backed shape checker for numpy array programs")
+ (depends
+  (ocaml
+   (>= 5.5))
+  (z3
+   (>= 4.16))
+  (ppx_deriving
+   (>= 6.2))
+  (ocamlformat
+   (and
+    :with-dev-setup
+    (= 0.29.0)))))
