@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "opam env --switch=\"$CLAUDE_PROJECT_DIR/checker\" --set-switch >> \"$CLAUDE_ENV_FILE\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}
