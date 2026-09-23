@@ -3,6 +3,7 @@ opam-version: "2.0"
 synopsis: "Z3-backed shape checker for numpy array programs"
 maintainer: ["Teddy Liu <theodoretliu@gmail.com>"]
 authors: ["Teddy Liu <theodoretliu@gmail.com>"]
+license: "MIT"
 homepage: "https://github.com/theodoretliu/thesis"
 bug-reports: "https://github.com/theodoretliu/thesis/issues"
 depends: [

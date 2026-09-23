@@ -11,6 +11,8 @@
 
 (maintainers "Teddy Liu <theodoretliu@gmail.com>")
 
+(license MIT)
+
 (package
  (name numpy_checking)
  (synopsis "Z3-backed shape checker for numpy array programs")
