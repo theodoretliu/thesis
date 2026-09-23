@@ -4,6 +4,7 @@ This branch patches the existing OCaml checker (`checker/src/typing.ml`) one gap
 adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 
 - [00-evaluation.md](00-evaluation.md): evaluation of `main` and the recommendation to solidify first.
+- [09-future-work.md](09-future-work.md): remaining work, including checking variadic function bodies.
 
 | Step | Gap | Status | Note |
 |---|---|---|---|
@@ -29,12 +30,9 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 | `Any` leaks | args needed a known number of dims | list variables; `Any = [*fresh]` is used soundly or rejected |
 | Unreadable diagnostics | "Could not type check" | parameter, signature, shape, and the specific expectation |
 
-Not attempted: list unification (see step 7), dtypes, a frontend (jaxtyping strings + Python AST), and
-source-level names in messages. The next steps, in order:
-1. A jaxtyping-string parser that emits `signature` values.
-2. An intraprocedural walk over marked Python functions that threads `Dimensions`/`SymInt`/list vars
-   through calls.
-3. A signature file for the torch/numpy ops in use.
+Not attempted: the body checker, list unification, dtypes, a frontend (jaxtyping strings + Python AST), and
+source-level names in messages. [09-future-work.md](09-future-work.md) lists all remaining work in order,
+including the design for checking the bodies of variadic functions.
 
 Run everything with:
 
