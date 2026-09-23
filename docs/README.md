@@ -13,6 +13,7 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 | 3 | Broadcast result shapes (`Broadcasted`) | done | [04-broadcasting.md](04-broadcasting.md) |
 | 4 | List functions (`Permute`, `SetAt`, `InsertAt`), `Literal` flags, overloads | done | [05-list-functions.md](05-list-functions.md) |
 | 5 | `Prod`/`Rank` (reshape, flatten), refinements, existentials | done | [06-refinements.md](06-refinements.md) |
+| 6 | Readable diagnostics | done | [07-diagnostics.md](07-diagnostics.md) |
 
 Run everything with:
 

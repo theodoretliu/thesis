@@ -621,3 +621,66 @@ let () =
              [ Dimensions x ]);
         false
       with KindError _ -> true)
+
+(* ---- step 6: diagnostics ---- *)
+
+let error_of f =
+  match f () with _ -> "" | exception (TypeError m | KindError m) -> m
+
+let contains s sub =
+  let n = String.length sub in
+  let rec go i =
+    i + n <= String.length s && (String.sub s i n = sub || go (i + 1))
+  in
+  go 0
+
+let expect_error name f subs =
+  expect name (fun () ->
+      let m = error_of f in
+      List.for_all (contains m) subs
+      ||
+      (print_endline ("  got: " ^ m);
+       false))
+
+let () =
+  expect_error "conv channel mismatch names param, dim and values"
+    (fun () ->
+      check_app conv2d
+        [ Dimensions (lits [ 2; 3; 32; 32 ]); Dimensions (lits [ 8; 4; 5; 5 ]) ])
+    [
+      "parameter K";
+      "array[o, c, kh, kw]";
+      "[8, 4, 5, 5]";
+      "expected c = 3, got 4";
+    ];
+  expect_error "negative return dim shows its value"
+    (fun () ->
+      check_app conv2d
+        [ Dimensions (lits [ 2; 3; 4; 4 ]); Dimensions (lits [ 8; 3; 6; 6 ]) ])
+    [ "(h - kh) + 1 = -1"; "negative" ];
+  expect_error "broadcast failure shows the spreads"
+    (fun () ->
+      check_app badd [ Dimensions (lits [ 3 ]); Dimensions (lits [ 4 ]) ])
+    [ "Broadcasted(A, B)"; "A = [3]"; "B = [4]" ];
+  expect_error "precondition failure shows values"
+    (fun () ->
+      check_sig conv2d_strict
+        [ Dimensions (lits [ 2; 3; 4; 4 ]); Dimensions (lits [ 8; 3; 5; 5 ]) ])
+    [ "Precondition not provable: kh = 5 <= h = 4" ];
+  expect_error "matmul inner mismatch reported at k, not as running out of dims"
+    (fun () ->
+      check_app matmul
+        [ Dimensions (lits [ 2; 3 ]); Dimensions (lits [ 4; 5 ]) ])
+    [ "parameter Y"; "expected k = 3, got 4" ];
+  expect_error "int passed where an array is expected"
+    (fun () -> check_app shape0 [ LiteralInt 1 ])
+    [ "parameter X"; "expected an array" ];
+  expect_error "overload failures listed per overload"
+    (fun () ->
+      check_overloads sum_overloads
+        [ Dimensions (lits [ 2; 3 ]); LiteralInt 5; LiteralInt 1 ])
+    [ "overload 1"; "overload 2" ];
+  expect_error "undetermined axis names the index"
+    (fun () ->
+      check_app sum_axis [ Dimensions (dims 2); SymInt (mk_string ()) ])
+    [ "Index axis must have a statically known value" ]
