@@ -281,3 +281,111 @@ let () =
       rejects f [ Dimensions [ x ]; LiteralInt 5 ]);
   expect "IntExpr parameter can't intro vars" (fun () ->
       rejects ~kind:true ([ ("i", IntExpr (Id "m")) ], TypeInt) [ LiteralInt 1 ])
+
+(* ---- step 3: broadcast result shapes ---- *)
+
+(* add(x: [*A], y: [*B]) -> [Broadcasted(A, B)] *)
+let badd =
+  ( [ ("X", Nparray [ Spread "A" ]); ("Y", Nparray [ Spread "B" ]) ],
+    Nparray [ Broadcasted [ "A"; "B" ] ] )
+
+(* matmul(x: [*A, m, k], y: [*B, k, p]) -> [Broadcasted(A, B), m, p] *)
+let matmul =
+  ( [
+      ("X", Nparray [ Spread "A"; Id "m"; Id "k" ]);
+      ("Y", Nparray [ Spread "B"; Id "k"; Id "p" ]);
+    ],
+    Nparray [ Broadcasted [ "A"; "B" ]; Id "m"; Id "p" ] )
+
+let () =
+  let c = mk_string () in
+  expect "broadcast [3, 1, c] + [4, c] = [3, 4, c]" (fun () ->
+      dims_equal
+        (check_app badd
+           [
+             Dimensions (lits [ 3; 1 ] @ [ c ]); Dimensions (lits [ 4 ] @ [ c ]);
+           ])
+        [ n 3; n 4; v c ]);
+  expect "broadcast with scalar" (fun () ->
+      dims_equal (check_app badd [ Dimensions [ c ]; Dimensions [] ]) [ v c ]);
+  expect "broadcast [3] + [4] rejected" (fun () ->
+      rejects badd [ Dimensions (lits [ 3 ]); Dimensions (lits [ 4 ]) ]);
+  expect "broadcast of unrelated symbolic dims rejected" (fun () ->
+      rejects badd [ Dimensions (dims 1); Dimensions (dims 1) ]);
+  expect "broadcast of d with 1 or d (disjunctive) uses ite" (fun () ->
+      (* e is known to be 1 or d, but not which *)
+      let d = mk_string () and e = mk_string () in
+      Z3.Solver.add solver
+        [
+          Z3.Boolean.mk_or ctx
+            [
+              Z3.Boolean.mk_eq ctx (v e) (n 1); Z3.Boolean.mk_eq ctx (v e) (v d);
+            ];
+        ];
+      dims_equal (check_app badd [ Dimensions [ d ]; Dimensions [ e ] ]) [ v d ])
+
+let () =
+  let m, k, p = (mk_string (), mk_string (), mk_string ()) in
+  expect "batched matmul broadcasts batch dims" (fun () ->
+      dims_equal
+        (check_app matmul
+           [
+             Dimensions (lits [ 2; 1 ] @ [ m; k ]);
+             Dimensions (lits [ 5 ] @ [ k; p ]);
+           ])
+        [ n 2; n 5; v m; v p ]);
+  expect "batched matmul incompatible batch rejected" (fun () ->
+      rejects matmul
+        [
+          Dimensions (lits [ 3 ] @ [ m; k ]); Dimensions (lits [ 4 ] @ [ k; p ]);
+        ]);
+  expect "batched matmul inner mismatch rejected" (fun () ->
+      rejects matmul [ Dimensions [ m; k ]; Dimensions [ p; p ] ])
+
+(* Broadcasted in argument position: where(c: [*A], x: [*B], out: [Broadcasted(A, B)]) *)
+let () =
+  let f =
+    ( [
+        ("C", Nparray [ Spread "A" ]);
+        ("X", Nparray [ Spread "B" ]);
+        ("O", Nparray [ Broadcasted [ "A"; "B" ] ]);
+      ],
+      Nparray [] )
+  in
+  let d = mk_string () in
+  expect "Broadcasted in argument position" (fun () ->
+      check_app f
+        [
+          Dimensions (lits [ 1 ] @ [ d ]);
+          Dimensions (lits [ 7; 1 ]);
+          Dimensions (lits [ 7 ] @ [ d ]);
+        ]
+      = Dimensions []);
+  expect "Broadcasted in argument position mismatch" (fun () ->
+      rejects f
+        [
+          Dimensions (lits [ 1 ] @ [ d ]);
+          Dimensions (lits [ 7; 1 ]);
+          Dimensions (lits [ 1 ] @ [ d ]);
+        ]);
+  expect "Broadcasted of unbound spread is kind error" (fun () ->
+      rejects ~kind:true
+        ([ ("X", Nparray [ Spread "A" ]) ], Nparray [ Broadcasted [ "A"; "Z" ] ])
+        [ Dimensions [] ])
+
+(* bug on main, found in step 3: a spread could never capture zero trailing dims *)
+let () =
+  let x = mk_string () in
+  expect "spread matches 0-d array" (fun () ->
+      check_app
+        ([ ("X", Nparray [ Spread "A" ]) ], Nparray [ Spread "A" ])
+        [ Dimensions [] ]
+      = Dimensions []);
+  expect "[n, *R] matches [n]" (fun () ->
+      dims_equal
+        (check_app
+           ([ ("X", Nparray [ Id "n"; Spread "R" ]) ], Nparray [ Id "n" ])
+           [ Dimensions [ x ] ])
+        [ v x ]);
+  expect "[n] still rejects []" (fun () ->
+      rejects ([ ("X", Nparray [ Id "n" ]) ], Nparray []) [ Dimensions [] ])

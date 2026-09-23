@@ -13,6 +13,8 @@ type entry =
   | Keep of string * (string, int) either list
   | Int of int
   | Broadcast of string
+  | Broadcasted of string list
+    (* the broadcast of already-bound spreads, e.g. the result of x + y *)
 [@@deriving show]
 
 type typ =
@@ -70,7 +72,7 @@ let rec check_arith_signature
   | Add (e1, e2) | Sub (e1, e2) | Mul (e1, e2) | Div (e1, e2) ->
       check_arith_signature (vars, _spread_vars, param_var_mapping) e1;
       check_arith_signature (vars, _spread_vars, param_var_mapping) e2
-  | Spread _ | Drop _ | Keep _ | Broadcast _ ->
+  | Spread _ | Drop _ | Keep _ | Broadcast _ | Broadcasted _ ->
       raise (KindError ("List dimension inside arithmetic: " ^ show_entry e))
 
 (* given a set of already declared variables and spread variables, this
@@ -129,6 +131,12 @@ let rec check_entry_signature
   | Broadcast s ->
       if not (StringSet.mem s spread_vars) then
         raise (KindError "Argument to broadcast is not already a spread var")
+      else orig
+  | Broadcasted names ->
+      if
+        names = []
+        || not (List.for_all (fun s -> StringSet.mem s spread_vars) names)
+      then raise (KindError "Broadcasted needs already-bound spread vars")
       else orig
 
 let check_args_signature (funargtyps : (string * typ) list) :
@@ -247,6 +255,65 @@ let get_concrete_indices (indices : (string, int) either list)
       | Right asdf -> asdf)
     indices
 
+(* right-aligned numpy broadcasting of two dimension lists. each aligned pair
+   must provably be equal or have a 1; the result is ite(x = 1, y, x) *)
+let broadcast_pair (a : string list) (b : string list) : string list option =
+  let one = mk_int_numeral 1 in
+  let rec go ra rb acc =
+    match (ra, rb) with
+    | [], rest | rest, [] -> Some (List.rev_append rest acc)
+    | x :: ra', y :: rb' ->
+        let ex, ey = (Z3utils.mk_int x, Z3utils.mk_int y) in
+        let eq = Z3.Boolean.mk_eq Z3utils.ctx in
+        if
+          not
+            (Z3utils.prove
+               (Z3.Boolean.mk_or Z3utils.ctx [ eq ex ey; eq ex one; eq ey one ]))
+        then None
+        else
+          let r =
+            if Z3utils.prove_int_eq ex ey || Z3utils.prove_int_eq ey one then x
+            else if Z3utils.prove_int_eq ex one then y
+            else
+              Z3utils.add_to_solver
+                (Z3.Boolean.mk_ite Z3utils.ctx (eq ex one) ey ex)
+          in
+          go ra' rb' (r :: acc)
+  in
+  go (List.rev a) (List.rev b) []
+
+(* list-valued dimensions computed from already-bound spreads. None means
+   the computation is undefined for these spreads *)
+let derived_dims (e : entry) ((_, spread_mapping, param_mapping) : mapping_type)
+    : string list option =
+  let spread v = StringMap.find v spread_mapping in
+  match e with
+  | Drop (v, indices) ->
+      Utils.drop (spread v) (get_concrete_indices indices param_mapping)
+  | Keep (v, indices) ->
+      Utils.keep (spread v) (get_concrete_indices indices param_mapping)
+  | Broadcasted names -> (
+      match List.map spread names with
+      | [] -> None
+      | first :: rest ->
+          List.fold_left
+            (fun acc l -> Option.bind acc (fun acc -> broadcast_pair acc l))
+            (Some first) rest)
+  | _ -> invalid_arg "derived_dims"
+
+(* if s2 starts with dimensions provably equal to l, return the rest *)
+let strip_equal_prefix (l : string list) (s2 : string list) : string list option
+    =
+  if List.length l > List.length s2 then None
+  else
+    let front, back = Utils.take_n s2 (List.length l) in
+    if
+      List.for_all2
+        (fun x y -> Z3utils.prove_int_eq (Z3utils.mk_int x) (Z3utils.mk_int y))
+        l front
+    then Some back
+    else None
+
 let rec check_app' (funargtyps : (string * typ) list) (argtyps : arg list)
     (mappings : mapping_type) : mapping_type option =
   match (funargtyps, argtyps) with
@@ -283,7 +350,7 @@ and check_and_update_mapping (curr_typ : typ) (l2 : arg)
       begin match (l1, l2) with
       | [], [] -> check_app' restfunargstyps restargtyps mapping
       | [], _ -> None
-      | _, [] -> None
+      (* even with no dimensions left, h may be a spread that captures [] *)
       | h :: t, args ->
           check_and_update_individual_mapping h args mapping restfunargstyps
             restargtyps t
@@ -371,57 +438,23 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
 
           try_splits split_rem
       | Some l ->
-          (* we've already mapped the spread variable to a list of vars *)
-          if List.length l > List.length s2 then None
-          else (* there aren't enough variables left *)
-            let front, back = Utils.take_n s2 (List.length l) in
-
-            (* check if we can determine equality between the two lists *)
-            if
-              List.combine l front
-              |> List.fold_left
-                   (fun acc (left, right) ->
-                     acc
-                     && Z3utils.prove_int_eq (Z3utils.mk_int left)
-                          (Z3utils.mk_int right))
-                   true
-            (* if yes, then we can continue the type checking *)
-            then
+          (* we've already mapped the spread variable to a list of vars;
+             check the next dimensions are provably equal to them *)
+          begin match strip_equal_prefix l s2 with
+          | Some back ->
               check_and_update_mapping (Nparray restentries) (Dimensions back)
                 mapping restfunargstyps restargtyps
-            (* if no, we have to bail out *)
-              else None
+          | None -> None
+          end
       end
-  | Drop (arr_name, indices) | Keep (arr_name, indices) ->
-      let arr = StringMap.find arr_name spread_mapping in
-      let concrete_indices = get_concrete_indices indices param_mapping in
-
-      let func =
-        match s1 with
-        | Drop _ -> Utils.drop
-        | Keep _ -> Utils.keep
-        | _ -> failwith "panic"
-      in
-
-      begin match func arr concrete_indices with
+  | Drop _ | Keep _ | Broadcasted _ ->
+      begin match
+        Option.bind (derived_dims s1 mapping) (fun l -> strip_equal_prefix l s2)
+      with
+      | Some back ->
+          check_and_update_mapping (Nparray restentries) (Dimensions back)
+            mapping restfunargstyps restargtyps
       | None -> None
-      | Some reduced_arr ->
-          if List.length reduced_arr > List.length s2 then None
-          else
-            let front, back = Utils.take_n s2 (List.length reduced_arr) in
-
-            if
-              List.combine front reduced_arr
-              |> List.fold_left
-                   (fun acc (left, right) ->
-                     acc
-                     && Z3utils.prove_int_eq (Z3utils.mk_int left)
-                          (Z3utils.mk_int right))
-                   true
-            then
-              check_and_update_mapping (Nparray restentries) (Dimensions back)
-                mapping restfunargstyps restargtyps
-            else None
       end
   | Int i ->
       begin match s2 with
@@ -473,7 +506,8 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       try_splits splits
 
 let check_ret_type_with_mapping (rettyp : typ)
-    ((var_mapping, spread_mapping, param_mapping) : mapping_type) : arg =
+    ((var_mapping, spread_mapping, param_mapping) as mapping : mapping_type) :
+    arg =
   match rettyp with
   | TypeInt -> Int
   | IntExpr e -> (
@@ -515,26 +549,13 @@ let check_ret_type_with_mapping (rettyp : typ)
             | Spread v ->
                 let args = StringMap.find v spread_mapping in
                 args @ check_ret_type_with_mapping' t
-            | Drop (arr_name, indices) | Keep (arr_name, indices) ->
-                let arr = StringMap.find arr_name spread_mapping in
-
-                let concrete_indices =
-                  get_concrete_indices indices param_mapping
-                in
-
-                let func =
-                  match h with
-                  | Drop _ -> Utils.drop
-                  | Keep _ -> Utils.keep
-                  | _ -> failwith "panic"
-                in
-
-                let new_arr = func arr concrete_indices in
-
-                begin match new_arr with
+            | Drop _ | Keep _ | Broadcasted _ ->
+                begin match derived_dims h mapping with
                 | None ->
                     raise
-                      (TypeError "Provided indices exceeded length of variable")
+                      (TypeError
+                         ("Cannot compute " ^ show_entry h
+                        ^ " for these arguments"))
                 | Some res -> res @ check_ret_type_with_mapping' t
                 end
             | Int i ->
