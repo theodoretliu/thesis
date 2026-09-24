@@ -20,6 +20,11 @@ cd frontend && python -m shapecheck ../examples/pass/*.py
 End-to-end tests are `examples/pass/*.py` and `examples/fail/*.py`. Each fail file has `# expect-error:`
 lines. Remaining frontend work is in [09-future-work.md § Frontend](09-future-work.md#frontend).
 
+**The next goal** is to check the Transformer from "Attention Is All You Need",
+[`examples/goal/transformer.py`](../examples/goal/transformer.py). The gaps, the decisions they need, and an
+order of attack are in [12-transformer-goal.md](12-transformer-goal.md). `frontend/tests/test_goal.py` is the
+failing spec.
+
 | Step | Gap | Status | Note |
 |---|---|---|---|
 | 0 | Solidify: bugs on `main` | done | [01-solidify.md](01-solidify.md) |
@@ -32,6 +37,7 @@ lines. Remaining frontend work is in [09-future-work.md § Frontend](09-future-w
 | 7 | Symbolic variadic arguments (function bodies, `Any`) | done | [08-symbolic-variadics.md](08-symbolic-variadics.md) |
 | 8 | Checking whole function bodies, rank-guided unfolding | done | [10-function-bodies.md](10-function-bodies.md) |
 | 9 | A jaxtyping frontend (Python → JSON IR → OCaml CLI) | done | [11-frontend.md](11-frontend.md) |
+| goal | Check the Transformer ("Attention Is All You Need") | 0 of 24 | [12-transformer-goal.md](12-transformer-goal.md) |
 
 ## Scorecard after steps 0–9
 

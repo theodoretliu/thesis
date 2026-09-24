@@ -40,3 +40,7 @@ uvx ruff format . && uvx ruff check .
 
 `examples/pass/*.py` must check, and each `examples/fail/*.py` must fail with
 every `# expect-error:` substring in its output.
+
+`examples/goal/transformer.py` is the goal (docs/12-transformer-goal.md).
+`frontend/tests/test_goal.py` ratchets which of its functions check: when one
+starts checking, add it to `PASSING`.
