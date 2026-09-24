@@ -104,7 +104,9 @@ The architecture (Python frontend → JSON IR → OCaml CLI), operator desugarin
 errors for unsupported constructs, and the `examples/pass`/`examples/fail` harness are as proposed. See
 [11-frontend.md](11-frontend.md) and [frontend/README.md](../frontend/README.md).
 
-Remaining frontend work, most useful first:
+Remaining frontend work, most useful first. [12-transformer-goal.md](12-transformer-goal.md) orders the
+same work around one target, the Transformer, and adds what it needs (modules, instance dims, `-1`,
+`transpose(i, j)`):
 
 1. **Asserts as assumptions.** `assert n >= 0` or `assert x.shape[0] == n` should inform the rest of the
    body. Today `torch.zeros(n)` for `n: int` is rejected.

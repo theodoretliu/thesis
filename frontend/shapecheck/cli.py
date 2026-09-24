@@ -27,6 +27,7 @@ class Report:
     errors: list[str]  # "path:line: message"
     notes: list[str]
     checked: int  # functions whose bodies went to the checker
+    passed: list[str]  # functions whose bodies checked without errors
 
 
 def checker_path(explicit: str | None = None) -> Path:
@@ -67,11 +68,17 @@ def check_file(path: Path, stubs: Stubs, checker: Path) -> Report:
         else:
             errors.append((lines.get(r["name"], 1), r["error"]))
     checked = sum(f["body"] is not None for f in program["functions"])
+    failed = {r["name"] for r in results if r["error"] is not None}
+    passed = [
+        f["name"] for f in program["functions"]
+        if f["body"] is not None and f["name"] not in failed
+    ]  # fmt: skip
     errors.sort(key=lambda e: e[0])
     return Report(
         errors=[f"{path}:{line}: {msg}" for line, msg in errors],
         notes=[f"{path}:{n.line}: note: {n.message}" for n in t.notes],
         checked=checked,
+        passed=passed,
     )
 
 
