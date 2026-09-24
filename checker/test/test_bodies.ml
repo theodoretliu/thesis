@@ -80,6 +80,20 @@ let expand_to =
     ( [ ("X", arr [ Spread "A" ]); ("Y", arr [ Broadcast "A" ]) ],
       arr [ Spread "A" ] )
 
+(* zeros_n(size: [*S]) -> [*S], where the frontend passes an int tuple as a
+   shape *)
+let zeros_n = sg ([ ("size", arr [ Spread "S" ]) ], arr [ Spread "S" ])
+
+(* conv-like: the kernel must fit; the int overload is tried second *)
+let fit =
+  Overloads
+    [
+      sg
+        ~requires:[ Le (Id "k", Id "n") ]
+        ([ ("X", arr [ Id "n" ]); ("K", arr [ Id "k" ]) ], arr [ Id "n" ]);
+      sg ([ ("X", arr [ Id "n" ]); ("i", TypeInt) ], arr [ Id "n" ]);
+    ]
+
 let env =
   [
     ("linear", Sig linear);
@@ -93,6 +107,8 @@ let env =
     ("unique", Sig unique);
     ("head", Sig head);
     ("expand_to", Sig expand_to);
+    ("zeros_n", Sig zeros_n);
+    ("fit", fit);
   ]
 
 let call f args = Call (f, args)
@@ -465,3 +481,65 @@ let () =
            [ ("x", arr [ Spread "B" ]) ]
            (arr [ Spread "B" ])
            [ Return (call "loop" [ var "x" ]) ]))
+
+(* ---- what the frontend emits: shapes from ints, floats, locations ---- *)
+
+let () =
+  let n_param = [ ("n", TypeLiteralInt 3) ] in
+  expect "a tuple of ints is a shape" (fun () ->
+      checks
+        (def "f" n_param
+           (arr [ Int 3; Int 2 ])
+           [ Return (call "zeros_n" [ Shape [ var "n"; Lit 2 ] ]) ]));
+  expect "a shape of the wrong size is caught" (fun () ->
+      rejects ~saying:[ "expected 2, got 3" ]
+        (def "f" n_param (arr [ Int 2 ])
+           [ Return (call "zeros_n" [ Shape [ var "n" ] ]) ]));
+  expect "-1 in a shape isn't inferred" (fun () ->
+      rejects
+        ~saying:[ "shape entry -1 is negative" ]
+        (def "f" [] (arr [ Int 2 ])
+           [ Return (call "zeros_n" [ Shape [ Lit (-1) ] ]) ]));
+  expect "an int parameter may be negative" (fun () ->
+      rejects
+        ~saying:[ "shape entry k may be negative" ]
+        (def "f"
+           [ ("k", TypeInt) ]
+           (arr [ Id "m" ]) ~exists:[ "m" ]
+           [ Return (call "zeros_n" [ Shape [ var "k" ] ]) ]));
+  expect "an array isn't a shape entry" (fun () ->
+      rejects
+        ~saying:[ "expected an int in a shape" ]
+        (def "f"
+           [ ("x", arr [ Id "n" ]) ]
+           (arr [ Id "n" ])
+           [ Return (call "zeros_n" [ Shape [ var "x" ] ]) ]));
+  expect "a float broadcasts like a 0-d array" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ Spread "B"; Id "d" ]) ]
+           (arr [ Spread "B"; Id "d" ])
+           [ Return (call "add" [ var "x"; Scalar ]) ]));
+  expect "errors name the source line and text" (fun () ->
+      rejects
+        ~saying:[ "in f, line 7, `y = x @ x`: matmul:" ]
+        (def "f"
+           [ ("x", arr [ Id "n" ]) ]
+           (arr [ Id "n" ])
+           [
+             At (7, "y = x @ x", Let ("y", call "matmul" [ var "x"; var "x" ]));
+             At (8, "return y", Return (var "y"));
+           ]));
+  expect "overloads may have requires" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ Int 5 ]); ("k", arr [ Int 3 ]) ]
+           (arr [ Int 5 ])
+           [ Return (call "fit" [ var "x"; var "k" ]) ]));
+  expect "an overload's requires is checked" (fun () ->
+      rejects
+        ~saying:[ "Precondition not provable: k = 6 <= n = 5" ]
+        (def "f"
+           [ ("x", arr [ Int 5 ]); ("k", arr [ Int 6 ]) ]
+           (arr [ Int 5 ])
+           [ Return (call "fit" [ var "x"; var "k" ]) ]))

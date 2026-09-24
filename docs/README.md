@@ -6,22 +6,19 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 - [00-evaluation.md](00-evaluation.md): evaluation of `main` and the recommendation to solidify first.
 - [09-future-work.md](09-future-work.md): remaining work, including checking variadic function bodies.
 
-## Next goal: a jaxtyping frontend that hands off to the OCaml core
+## A jaxtyping frontend that hands off to the OCaml core
 
-The checker core is done enough to use: it checks whole function bodies (step 8). What's missing is a way in
-from real Python. The next goal has two parts:
+Step 9 connects the checker to real Python. The frontend (`frontend/`, see its
+[README](../frontend/README.md)) reads ordinary jaxtyping-annotated files (`Float[Tensor, "*batch d"]`),
+translates the supported subset to the checker's IR as JSON, and runs the OCaml CLI (`checker/bin`) on it.
 
-1. **A lightweight Python frontend.** It reads ordinary jaxtyping-annotated files
-   (`Float[Tensor, "*batch d"]`) with the stdlib `ast` module and parses the shape strings. It translates the
-   supported subset (calls, operators, assignments, `return`, `assert`) and rejects anything else with a
-   clear error.
-2. **A handoff to the OCaml core.** The frontend emits the checker's IR (`signature`, `fundef`) as JSON. A
-   small OCaml CLI reads it and runs `check_program`, and errors come back to the user. The IR is the
-   contract: the frontend never type-checks, and the core never sees Python.
+```sh
+(cd checker && dune build)
+cd frontend && python -m shapecheck ../examples/pass/*.py
+```
 
-End-to-end tests will be `examples/pass/*.py` and `examples/fail/*.py`, each fail file with an
-`# expect-error:` line. Details, the syntax mapping, and the guidance on refinements are in
-[09-future-work.md § Frontend](09-future-work.md#frontend).
+End-to-end tests are `examples/pass/*.py` and `examples/fail/*.py`. Each fail file has `# expect-error:`
+lines. Remaining frontend work is in [09-future-work.md § Frontend](09-future-work.md#frontend).
 
 | Step | Gap | Status | Note |
 |---|---|---|---|
@@ -34,8 +31,9 @@ End-to-end tests will be `examples/pass/*.py` and `examples/fail/*.py`, each fai
 | 6 | Readable diagnostics | done | [07-diagnostics.md](07-diagnostics.md) |
 | 7 | Symbolic variadic arguments (function bodies, `Any`) | done | [08-symbolic-variadics.md](08-symbolic-variadics.md) |
 | 8 | Checking whole function bodies, rank-guided unfolding | done | [10-function-bodies.md](10-function-bodies.md) |
+| 9 | A jaxtyping frontend (Python → JSON IR → OCaml CLI) | done | [11-frontend.md](11-frontend.md) |
 
-## Scorecard after steps 0–8
+## Scorecard after steps 0–9
 
 | Gap | `main` | Now |
 |---|---|---|
@@ -48,12 +46,12 @@ End-to-end tests will be `examples/pass/*.py` and `examples/fail/*.py`, each fai
 | `Any` leaks | args needed a known number of dims | list variables; `Any = [*fresh]` is used soundly or rejected |
 | Unreadable diagnostics | "Could not type check" | parameter, signature, shape, and the specific expectation |
 | Function bodies | not checked | checked once for every caller (rigid variadics, `requires`/`ensures`) |
+| Python input | none | jaxtyping-annotated files, torch stubs, `file:line` diagnostics |
 
 Step 8 adds the body checker (`check_fundef`) and closes the smaller variadic gaps (unfolding, the
 empty-list axiom, 1s broadcasting against list variables).
 
-Not attempted: general list unification, control flow in bodies, dtypes, a frontend (jaxtyping strings + Python AST), and
-source-level names in messages. [09-future-work.md](09-future-work.md) lists all remaining work in order,
+Not attempted: general list unification, control flow in bodies, dtypes, and classes (`nn.Module`). [09-future-work.md](09-future-work.md) lists all remaining work in order,
 including the design for checking the bodies of variadic functions.
 
 Run everything with:
@@ -62,4 +60,6 @@ Run everything with:
 cd checker
 eval $(opam env --switch=. --set-switch)   # only if the opam shell hook isn't active
 dune test --force
+cd ../frontend
+python -m unittest discover -s tests -t .
 ```

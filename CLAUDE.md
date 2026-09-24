@@ -24,3 +24,19 @@ commands explicitly:
 ```sh
 opam exec --switch=. -- dune build
 ```
+
+## The Python frontend
+
+`frontend/` is the jaxtyping frontend (Python 3.9+, stdlib only; see
+`frontend/README.md`). It shells out to the checker CLI at
+`checker/_build/default/bin/shapecheck.exe`, so build the checker first. From
+`frontend/`:
+
+```sh
+python -m shapecheck ../examples/pass/*.py
+python -m unittest discover -s tests -t .
+uvx ruff format . && uvx ruff check .
+```
+
+`examples/pass/*.py` must check, and each `examples/fail/*.py` must fail with
+every `# expect-error:` substring in its output.

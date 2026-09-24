@@ -1,0 +1,17 @@
+[project]
+name = "shapecheck"
+version = "0.1.0"
+description = "Static shape checking for jaxtyping-annotated Python, backed by the OCaml checker"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+shapecheck = "shapecheck.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["stubs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

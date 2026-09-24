@@ -1,0 +1,3 @@
+(executable
+ (name shapecheck)
+ (libraries numpy_checking yojson))
