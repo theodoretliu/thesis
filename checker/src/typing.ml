@@ -87,17 +87,30 @@ let rec string_of_entry (e : entry) : string =
   | Prod a -> "prod(" ^ a ^ ")"
   | Rank a -> "rank(" ^ a ^ ")"
 
-let string_of_expr (e : Z3.Expr.expr) : string =
+(* a solver term as infix arithmetic, with determined parts as numbers and
+   dimensions by their labels *)
+let rec string_of_expr (e : Z3.Expr.expr) : string =
   match Z3utils.determined_int e with
   | Some i -> string_of_int i
   | None -> (
-      match
-        if Z3.Expr.is_const e then
-          Hashtbl.find_opt Z3utils.dim_labels (Z3.Expr.to_string e)
-        else None
-      with
-      | Some label -> label
-      | None -> Z3.Expr.to_string e)
+      let args = Z3.Expr.get_args e in
+      let operand a =
+        let s = string_of_expr a in
+        if Z3.Expr.get_num_args a = 0 || Z3utils.determined_int a <> None then s
+        else "(" ^ s ^ ")"
+      in
+      let infix op = String.concat (" " ^ op ^ " ") (List.map operand args) in
+      match Z3.FuncDecl.get_decl_kind (Z3.Expr.get_func_decl e) with
+      | _ when Z3.Expr.is_const e -> (
+          match Hashtbl.find_opt Z3utils.dim_labels (Z3.Expr.to_string e) with
+          | Some label -> label
+          | None -> Z3.Expr.to_string e)
+      | Z3enums.OP_ADD -> infix "+"
+      | Z3enums.OP_SUB -> infix "-"
+      | Z3enums.OP_MUL -> infix "*"
+      | Z3enums.OP_IDIV -> infix "//"
+      | Z3enums.OP_UMINUS -> "-" ^ operand (List.hd args)
+      | _ -> Z3.Expr.to_string e)
 
 let string_of_dim (v : string) : string =
   if Z3utils.is_list_var v then "*" ^ Z3utils.list_label v
@@ -973,10 +986,15 @@ let string_of_constr (c : constr) (mapping : mapping_type) : string =
   in
   side e1 ^ " " ^ op ^ " " ^ side e2
 
+(* how far the last check_sig got: the index of the parameter that failed, the
+   number of parameters if they all matched, or -1 for the wrong arity *)
+let sig_progress = ref 0
+
 let check_sig (sg : signature) (argtyps : arg list) : arg =
   check_signature sg;
-  if List.length sg.params <> List.length argtyps then
-    raise (TypeError "Incorrect number of arguments to function")
+  if List.length sg.params <> List.length argtyps then (
+    sig_progress := -1;
+    raise (TypeError "Incorrect number of arguments to function"))
   else
     let param_mapping =
       List.fold_left2
@@ -1006,12 +1024,15 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
     in
     match final_mapping with
     | None ->
+        sig_progress :=
+          Option.fold ~none:0 ~some:(fun f -> f.param_index) !best_failure;
         raise
           (TypeError
              (match !best_failure with
              | Some f -> "Could not type check: " ^ f.message ()
              | None -> "Could not type check"))
     | Some mapping ->
+        sig_progress := List.length sg.params;
         List.iter
           (fun c ->
             match constr_expr c mapping with
@@ -1040,33 +1061,54 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
 
         check_ret_type_with_mapping sg.ret mapping
 
-let check_app ((params, ret) : funtyp) (argtyps : arg list) : arg =
-  check_sig { params; ret; requires = []; exists = []; ensures = [] } argtyps
+let sig_of_funtyp ((params, ret) : funtyp) : signature =
+  { params; ret; requires = []; exists = []; ensures = [] }
+
+let check_app (f : funtyp) (argtyps : arg list) : arg =
+  check_sig (sig_of_funtyp f) argtyps
 
 (* the first overload whose signature accepts the arguments, like @overload *)
-let check_overloads (overloads : funtyp list) (argtyps : arg list) : arg =
+let check_overload_sigs (overloads : signature list) (argtyps : arg list) : arg
+    =
   let rec go = function
     | [] -> []
-    | f :: rest -> (
-        match check_app f argtyps with
+    | sg :: rest -> (
+        match check_sig sg argtyps with
         | res -> [ Ok res ]
-        | exception TypeError msg -> Error msg :: go rest)
+        | exception TypeError msg ->
+            (* before go rest, which overwrites it *)
+            let progress = !sig_progress in
+            Error (progress, msg) :: go rest)
   in
   let attempts = go overloads in
   match List.rev attempts with
   | Ok res :: _ -> res
   | _ ->
+      (* list the overloads that matched the most parameters *)
+      let errors =
+        List.filter_map (function Error e -> Some e | Ok _ -> None) attempts
+      in
+      let best = List.fold_left (fun m (p, _) -> max m p) min_int errors in
+      let hidden = List.length (List.filter (fun (p, _) -> p < best) errors) in
       raise
         (TypeError
            ("No overload matches the arguments:"
            ^ String.concat ""
                (List.mapi
-                  (fun i r ->
-                    match r with
-                    | Error msg ->
-                        Printf.sprintf "\n  overload %d: %s" (i + 1) msg
-                    | Ok _ -> "")
-                  attempts)))
+                  (fun i (p, msg) ->
+                    if p = best then
+                      Printf.sprintf "\n  overload %d: %s" (i + 1) msg
+                    else "")
+                  errors)
+           ^
+           if hidden = 0 then ""
+           else
+             Printf.sprintf
+               "\n  (%d other overload%s failed at an earlier parameter)" hidden
+               (if hidden = 1 then "" else "s")))
+
+let check_overloads (overloads : funtyp list) (argtyps : arg list) : arg =
+  check_overload_sigs (List.map sig_of_funtyp overloads) argtyps
 
 (* an array whose shape is entirely unknown, e.g. the result of an unannotated
    library call (Any): a single list variable *)
@@ -1076,16 +1118,22 @@ let unknown_shape () : arg = Dimensions [ Z3utils.fresh_list ~label:"?" () ]
 
 (* a straight-line function body. values are arrays and ints, so a body is a
    sequence of calls to functions whose signatures are known *)
-type term = Var of string | Lit of int | Call of string * term list
+type term =
+  | Var of string
+  | Lit of int
+  | Call of string * term list
+  | Shape of term list (* ints used as a shape, e.g. reshape(x, (n, d)) *)
+  | Scalar (* a float, which broadcasts like a 0-d array *)
 [@@deriving show]
 
 type stmt =
   | Let of string * term (* y = f(x) *)
   | LetAnnot of string * typ * term (* y: T = f(x), checking the value is a T *)
   | Return of term
+  | At of int * string * stmt (* a statement with its source line and text *)
 [@@deriving show]
 
-type callee = Sig of signature | Overloads of funtyp list
+type callee = Sig of signature | Overloads of signature list
 type fundef = { name : string; sg : signature; body : stmt list }
 
 let rec string_of_term = function
@@ -1093,12 +1141,40 @@ let rec string_of_term = function
   | Lit i -> string_of_int i
   | Call (f, args) ->
       f ^ "(" ^ String.concat ", " (List.map string_of_term args) ^ ")"
+  | Shape ts -> "(" ^ String.concat ", " (List.map string_of_term ts) ^ ")"
+  | Scalar -> "<float>"
 
-let string_of_stmt = function
+let rec string_of_stmt = function
   | Let (x, t) -> x ^ " = " ^ string_of_term t
   | LetAnnot (x, typ, t) ->
       x ^ ": " ^ string_of_typ typ ^ " = " ^ string_of_term t
   | Return t -> "return " ^ string_of_term t
+  | At (_, text, _) -> text
+
+(* a dimension equal to an int used as a shape entry *)
+let dim_of_int (v : arg) : string =
+  let nonneg e =
+    Z3utils.prove (Z3.Arithmetic.mk_ge Z3utils.ctx e (mk_int_numeral 0))
+  in
+  match v with
+  | LiteralInt i when i >= 0 -> Z3utils.add_to_solver (mk_int_numeral i)
+  | LiteralInt i ->
+      raise
+        (TypeError
+           ("shape entry " ^ string_of_int i
+          ^ " is negative (inferred sizes like -1 aren't supported)"))
+  | SymInt v when nonneg (Z3utils.mk_int v) ->
+      Z3utils.add_to_solver (Z3utils.mk_int v)
+  | SymInt v ->
+      raise
+        (TypeError
+           ("shape entry "
+           ^ string_of_expr (Z3utils.mk_int v)
+           ^ " may be negative"))
+  (* like zeros of an opaque int: some size, unknown *)
+  | Int -> Z3utils.fresh_dim ()
+  | Dimensions _ ->
+      raise (TypeError ("expected an int in a shape, got " ^ string_of_arg v))
 
 (* a fresh int equal to e; unlike a dimension it may be negative *)
 let define_int ?(label = "") (e : Z3.Expr.expr) : string =
@@ -1208,12 +1284,14 @@ let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
         | Some v -> v
         | None -> raise (TypeError ("unbound variable " ^ x)))
     | Lit i -> LiteralInt i
+    | Shape ts -> Dimensions (List.map (fun t -> dim_of_int (eval locals t)) ts)
+    | Scalar -> Dimensions []
     | Call (f, ts) -> (
         let args = List.map (eval locals) ts in
         try
           match List.assoc_opt f env with
           | Some (Sig sg) -> check_sig sg args
-          | Some (Overloads fs) -> check_overloads fs args
+          | Some (Overloads sgs) -> check_overload_sigs sgs args
           | None -> raise (TypeError "unknown function")
         with TypeError m -> raise (TypeError (f ^ ": " ^ m)))
   in
@@ -1225,11 +1303,19 @@ let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
     | Error err -> raise (TypeError (show_dim_error err))
   in
   (* kinds: the names annotations may use; mapping: their values *)
-  let rec walk locals kinds mapping = function
+  let rec walk ?at locals kinds mapping = function
     | [] -> in_fn "" (fun () -> raise (TypeError "missing return"))
+    | At (line, text, stmt) :: rest ->
+        walk ~at:(line, text) locals kinds mapping (stmt :: rest)
     | stmt :: rest -> (
-        let here f = in_fn (", `" ^ string_of_stmt stmt ^ "`") f in
+        let label =
+          match at with
+          | Some (line, text) -> Printf.sprintf ", line %d, `%s`" line text
+          | None -> ", `" ^ string_of_stmt stmt ^ "`"
+        in
+        let here f = in_fn label f in
         match stmt with
+        | At _ -> assert false (* unwrapped above *)
         | Return t ->
             if rest <> [] then
               here (fun () -> raise (TypeError "statements after return"));

@@ -1,10 +1,7 @@
 # Future work
 
-Open work on the shape checker after steps 0–7, most important first. The first four items are carried over
+Open work on the shape checker after steps 0–9, most important first. The first four items are carried over
 from the earlier notes. The rest came up while designing how to check the bodies of variadic functions.
-
-**Next goal (after step 8):** the [Frontend](#frontend): a lightweight Python parser for jaxtyping-annotated
-code that hands the checker IR off to the OCaml core as JSON.
 
 ## Checking functions that take variadics
 
@@ -58,7 +55,7 @@ Remora. None of the above covers this.
 
 ## Frontend
 
-**Direction (decided, not started):** the frontend reads Python files annotated with
+**Done in step 9** ([11-frontend.md](11-frontend.md)): the frontend reads Python files annotated with
 [jaxtyping](https://github.com/patrick-kidger/jaxtyping) shape strings. jaxtyping is the most widely used
 shape-annotation syntax. It isn't limited to JAX: it works with PyTorch, NumPy and TensorFlow arrays, and it
 replaced torchtyping. jaxtyping checks shapes at runtime. This checker would check the same annotations
@@ -81,7 +78,8 @@ How the shape string syntax maps onto `entry`:
 | `*batch` | named run of zero or more dims | `Spread` |
 | `...` | unnamed run of dims | a fresh `Spread` |
 | `_` | one dim that isn't checked | a fresh `Id` |
-| `#b` | `b`, or 1 (broadcastable) | roughly `Broadcast` (to be worked out) |
+| `*#b` | `b` again, broadcastable | `Broadcast` (a first occurrence binds `b`) |
+| `#b` | `b`, or 1 (broadcastable) | not supported yet |
 | `dim-1`, `2*dim` | arithmetic on dims bound earlier | `Add`/`Sub`/`Mul`/`Div`, restricted to `+ - * //`, names and ints (jaxtyping evaluates arbitrary Python) |
 | `Float[...]`, `Int[...]` | dtype | ignored until dtypes are modeled |
 
@@ -93,49 +91,36 @@ without them wherever possible:
   jaxtyping already binds it.
 - **`requires`** belongs in stubs, mainly `reshape`/`view` (`prod(A) = prod(B)`), divisibility
   (`d % heads == 0`), and bounded indices (`topk`, `narrow`). Prefer annotating more structure (`"*batch n d"`)
-  or fixing the stub (e.g. `matmul` overloads for a 1-D side) over adding one. In user code, a precondition
-  would come from an `assert` in the body, which is safe to assume after it runs. Whether callers must also
-  prove leading asserts is open.
+  or fixing the stub (e.g. `matmul` overloads for a 1-D side) over adding one. In stubs, `requires` and
+  `ensures` are written as `assert`s in the body. In user code, asserts are dropped for now (sound). Assuming
+  them after they run is the next step. Whether callers must also prove leading asserts is open.
 - **`ensures`** only matters for bounds on data-dependent sizes (`unique` → `m <= n`). Avoid it unless a
   real program needs one.
 - `conv2d`/pooling don't need `requires`: returned dims must already be provably `≥ 0`.
 
 Any user-facing syntax beyond `assert`, such as a decorator, is not settled.
 
-**Proposed architecture:**
+The architecture (Python frontend → JSON IR → OCaml CLI), operator desugaring, `.pyi` stubs, explicit
+errors for unsupported constructs, and the `examples/pass`/`examples/fail` harness are as proposed. See
+[11-frontend.md](11-frontend.md) and [frontend/README.md](../frontend/README.md).
 
-- **Split:** Python syntax is the surface. The OCaml `signature`/`fundef` values are the IR and the contract
-  between the two halves. The frontend only translates, and the checker never sees Python.
-- **Frontend in Python:** it uses the stdlib `ast` module, parses the shape strings itself, and emits the IR
-  as JSON. A small OCaml CLI reads the JSON (`yojson`) and calls `check_program`. The alternative, parsing
-  Python from OCaml (e.g. `pyre-ast`), would make one binary but ties the build to CPython versions.
-- **Operators:** they desugar to stub names (`x @ w` becomes `matmul`, `x + y` becomes `add`,
-  `x.sum(-1)` becomes `sum(x, -1)`).
-- **Library signatures:** `.pyi` stubs in the same syntax.
-- **Unsupported constructs:** the frontend rejects them with an explicit error (control flow, tuples,
-  mutation, `x.shape[i]` until the IR supports it).
+Remaining frontend work, most useful first:
 
-**Testing layout:**
-
-- **Frontend:** a Python file gives the expected IR (`--dump-ir`).
-- **Checker:** the IR gives the expected verdict (the existing OCaml tests).
-- **End-to-end:** `examples/pass/*.py` and `examples/fail/*.py`. Each fail file carries a
-  `# expect-error: <substring>` line, so it can't pass for the wrong reason, such as a parse error or a stub
-  typo.
-
-Work items, in order:
-
-1. A jaxtyping-string parser that emits `entry` lists and `signature` values.
-2. A walk over annotated Python functions that produces the body IR (`Let`, `LetAnnot`, `Return`). The
-   checker side exists (step 8). Control flow (`if`, loops) isn't in the IR yet.
-3. A stub file for the torch/numpy ops in use.
-4. The `examples/pass` / `examples/fail` harness.
+1. **Asserts as assumptions.** `assert n >= 0` or `assert x.shape[0] == n` should inform the rest of the
+   body. Today `torch.zeros(n)` for `n: int` is rejected.
+2. **`x.shape[i]` and `x.size(i)`**, as ints equal to a dim. `x.shape` as a tuple would need tuples in the IR.
+3. **Control flow.** `if` needs a join of shapes (or both branches checked against the declared type), and
+   loops need invariants.
+4. **Classes.** `nn.Module.forward`, with parameter shapes from annotations on `self` attributes.
+5. **Lists and tuples:** `torch.cat`, `torch.stack`, tuple returns.
+6. **Single broadcastable dims (`#b`)**, and an in-place `Broadcast` ("broadcasts *to* A") for `x += y`.
+7. **NumPy stubs**, and more of torch.
 
 ## Other
 
 - **Dtypes.** Not modeled at all.
-- **Source-level names in diagnostics.** Messages name parameters and signatures but not Python variables or
-  source locations.
+- **Source-level names in diagnostics.** Step 9 reports `file:line` and the statement's source. Callee
+  existentials still print as solver names.
 - **`Any` modes.** Step 7 rejects composing two unknown shapes (strict). A frontend could offer lenient mode.
 
 ## Prior work to compare against

@@ -11,6 +11,7 @@ depends: [
   "ocaml" {>= "5.5"}
   "z3" {>= "4.16"}
   "ppx_deriving" {>= "6.2"}
+  "yojson" {>= "3.0"}
   "ocamlformat" {with-dev-setup & = "0.29.0"}
   "odoc" {with-doc}
 ]

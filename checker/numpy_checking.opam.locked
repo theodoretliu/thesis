@@ -60,6 +60,7 @@ depends: [
   "uucp" {= "18.0.0" & with-dev-setup}
   "uuseg" {= "18.0.0" & with-dev-setup}
   "uutf" {= "1.0.4" & with-dev-setup}
+  "yojson" {= "3.0.0"}
   "z3" {= "4.16.0"}
   "zarith" {= "1.14"}
 ]

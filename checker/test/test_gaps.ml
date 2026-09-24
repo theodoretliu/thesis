@@ -679,6 +679,11 @@ let () =
     (fun () ->
       check_overloads sum_overloads
         [ Dimensions (lits [ 2; 3 ]); LiteralInt 5; LiteralInt 1 ])
+    [ "overload 1"; "1 other overload failed at an earlier parameter" ];
+  expect_error "overloads that got as far are all listed"
+    (fun () ->
+      check_overloads sum_overloads
+        [ Dimensions (lits [ 2; 3 ]); LiteralInt 5; Int ])
     [ "overload 1"; "overload 2" ];
   expect_error "undetermined axis names the index"
     (fun () ->

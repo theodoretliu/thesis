@@ -23,6 +23,8 @@
    (>= 4.16))
   (ppx_deriving
    (>= 6.2))
+  (yojson
+   (>= 3.0))
   (ocamlformat
    (and
     :with-dev-setup
