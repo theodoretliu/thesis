@@ -32,13 +32,24 @@ let assume_dim (name : string) =
   Z3.Solver.add solver
     [ Z3.Arithmetic.mk_ge ctx (mk_int name) (mk_int_numeral 0) ]
 
-let fresh_dim () =
+(* user-facing names of dimensions, e.g. d for a parameter's dim *)
+let dim_labels : (string, string) Hashtbl.t = Hashtbl.create 16
+
+let fresh_dim ?(label = "") () =
   let name = mk_string () in
   assume_dim name;
+  if label <> "" then Hashtbl.replace dim_labels name label;
   name
 
 let add_to_solver (e : Z3.Expr.expr) =
-  let new_var_name = fresh_dim () in
+  (* a copy of a labeled dimension keeps its label *)
+  let label =
+    if Z3.Expr.is_const e then
+      Option.value ~default:""
+        (Hashtbl.find_opt dim_labels (Z3.Expr.to_string e))
+    else ""
+  in
+  let new_var_name = fresh_dim ~label () in
   Z3.Solver.add solver [ Z3.Boolean.mk_eq ctx (mk_int new_var_name) e ];
   new_var_name
 
@@ -76,5 +87,71 @@ let fresh_list ?(label = "") () =
     [
       Z3.Arithmetic.mk_ge ctx (prod_of_list name) zero;
       Z3.Arithmetic.mk_ge ctx (rank_of_list name) zero;
+      (* the empty list's product is 1 *)
+      Z3.Boolean.mk_implies ctx
+        (Z3.Boolean.mk_eq ctx (rank_of_list name) zero)
+        (Z3.Boolean.mk_eq ctx (prod_of_list name) (mk_int_numeral 1));
     ];
   name
+
+module StringMap = Map.Make (String)
+
+(* unfoldings of list variables the solver proved nonempty: B = [*B', b] or
+   B = [b, *B']. each defines fresh variables from B, so recording one assumes
+   nothing about B. unfolded variables are replaced everywhere by [expand] *)
+let unfoldings : string list StringMap.t ref = ref StringMap.empty
+
+(* how many unfoldings produced a list variable; bounds the search *)
+let unfold_depth : (string, int) Hashtbl.t = Hashtbl.create 16
+let max_unfold_depth = 8
+
+let can_unfold (name : string) =
+  is_list_var name
+  && (not (StringMap.mem name !unfoldings))
+  && Option.value ~default:0 (Hashtbl.find_opt unfold_depth name)
+     < max_unfold_depth
+  && prove (Z3.Arithmetic.mk_ge ctx (rank_of_list name) (mk_int_numeral 1))
+
+let unfold ~(right : bool) (name : string) : unit =
+  let label = list_label name in
+  let rest = fresh_list ~label:(label ^ if right then "[:-1]" else "[1:]") () in
+  let dim = fresh_dim ~label:(label ^ if right then "[-1]" else "[0]") () in
+  Hashtbl.replace unfold_depth rest
+    (1 + Option.value ~default:0 (Hashtbl.find_opt unfold_depth name));
+  Z3.Solver.add solver
+    [
+      Z3.Boolean.mk_eq ctx (rank_of_list name)
+        (Z3.Arithmetic.mk_add ctx [ rank_of_list rest; mk_int_numeral 1 ]);
+      Z3.Boolean.mk_eq ctx (prod_of_list name)
+        (Z3.Arithmetic.mk_mul ctx [ prod_of_list rest; mk_int dim ]);
+    ];
+  unfoldings :=
+    StringMap.add name
+      (if right then [ rest; dim ] else [ dim; rest ])
+      !unfoldings
+
+(* rewrite unfolded list variables into their parts, and drop list variables
+   provably empty *)
+let rec expand (l : string list) : string list =
+  List.concat_map
+    (fun x ->
+      if not (is_list_var x) then [ x ]
+      else
+        match StringMap.find_opt x !unfoldings with
+        | Some parts -> expand parts
+        | None ->
+            if prove (Z3.Boolean.mk_eq ctx (rank_of_list x) (mk_int_numeral 0))
+            then []
+            else [ x ])
+    l
+
+(* run f with its own solver assertions and unfoldings, e.g. a function's
+   requires while checking its body *)
+let scoped (f : unit -> 'a) : 'a =
+  let saved = !unfoldings in
+  Z3.Solver.push solver;
+  Fun.protect
+    ~finally:(fun () ->
+      Z3.Solver.pop solver 1;
+      unfoldings := saved)
+    f
