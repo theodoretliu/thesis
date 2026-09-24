@@ -6,6 +6,23 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 - [00-evaluation.md](00-evaluation.md): evaluation of `main` and the recommendation to solidify first.
 - [09-future-work.md](09-future-work.md): remaining work, including checking variadic function bodies.
 
+## Next goal: a jaxtyping frontend that hands off to the OCaml core
+
+The checker core is done enough to use: it checks whole function bodies (step 8). What's missing is a way in
+from real Python. The next goal has two parts:
+
+1. **A lightweight Python frontend.** It reads ordinary jaxtyping-annotated files
+   (`Float[Tensor, "*batch d"]`) with the stdlib `ast` module and parses the shape strings. It translates the
+   supported subset (calls, operators, assignments, `return`, `assert`) and rejects anything else with a
+   clear error.
+2. **A handoff to the OCaml core.** The frontend emits the checker's IR (`signature`, `fundef`) as JSON. A
+   small OCaml CLI reads it and runs `check_program`, and errors come back to the user. The IR is the
+   contract: the frontend never type-checks, and the core never sees Python.
+
+End-to-end tests will be `examples/pass/*.py` and `examples/fail/*.py`, each fail file with an
+`# expect-error:` line. Details, the syntax mapping, and the guidance on refinements are in
+[09-future-work.md § Frontend](09-future-work.md#frontend).
+
 | Step | Gap | Status | Note |
 |---|---|---|---|
 | 0 | Solidify: bugs on `main` | done | [01-solidify.md](01-solidify.md) |

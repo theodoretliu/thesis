@@ -3,6 +3,9 @@
 Open work on the shape checker after steps 0–7, most important first. The first four items are carried over
 from the earlier notes. The rest came up while designing how to check the bodies of variadic functions.
 
+**Next goal (after step 8):** the [Frontend](#frontend): a lightweight Python parser for jaxtyping-annotated
+code that hands the checker IR off to the OCaml core as JSON.
+
 ## Checking functions that take variadics
 
 The target: inside `def f(x: [*B, d])`, check the body once, and have that result hold for every caller.
