@@ -1,8 +1,8 @@
 """Translating a Python module into a checker program.
 
 Every top-level function with an annotation is checked; classes are skipped
-with a note. A body must be straight-line code: assignments (plain or
-annotated), asserts (ignored), and a return. Calls resolve to user functions
+with a note. A body must be straight-line code: assignments (plain, annotated,
+or unpacking a tuple), asserts (ignored), and a return. Calls resolve to user functions
 (in any order, through their signatures) or stubs;
 operators desugar to the stub module `operator` (x @ w is operator.matmul),
 methods and properties to the stub classes (x.sum(-1) is
@@ -92,10 +92,12 @@ def last(node: ast.expr) -> str | None:
 OPERATORS = {
     ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "truediv",
     ast.FloorDiv: "floordiv", ast.MatMult: "matmul", ast.Pow: "pow",
+    ast.BitAnd: "and_", ast.BitOr: "or_", ast.BitXor: "xor",
 }  # fmt: skip
 OP_TEXT = {
     ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/", ast.FloorDiv: "//",
-    ast.MatMult: "@", ast.Pow: "**", ast.Mod: "%",
+    ast.MatMult: "@", ast.Pow: "**", ast.Mod: "%", ast.BitAnd: "&", ast.BitOr: "|",
+    ast.BitXor: "^",
 }  # fmt: skip
 COMPARISONS = {
     ast.Lt: "lt", ast.LtE: "le", ast.Gt: "gt", ast.GtE: "ge", ast.Eq: "eq",
@@ -104,7 +106,8 @@ COMPARISONS = {
 SYMBOLS = {
     "add": "+", "sub": "-", "mul": "*", "truediv": "/", "floordiv": "//",
     "matmul": "@", "pow": "**", "neg": "unary -", "lt": "<", "le": "<=",
-    "gt": ">", "ge": ">=", "eq": "==", "ne": "!=",
+    "gt": ">", "ge": ">=", "eq": "==", "ne": "!=", "and_": "&", "or_": "|",
+    "xor": "^", "invert": "~",
 }  # fmt: skip
 
 
@@ -215,10 +218,16 @@ class Translator:
 
     def stmt(self, s: ast.stmt) -> Json:
         if isinstance(s, ast.Assign):
-            if len(s.targets) != 1 or not isinstance(s.targets[0], ast.Name):
-                raise FrontendError("only assignments to a single name are supported", s)
+            target = s.targets[0] if len(s.targets) == 1 else None
+            if isinstance(target, ast.Tuple) and all(isinstance(x, ast.Name) for x in target.elts):
+                t = self.term(s.value)
+                return ir.Unpack([self.assign(x.id) for x in target.elts], t)
+            if not isinstance(target, ast.Name):
+                raise FrontendError(
+                    "only assignments to a name, or unpacking into names, are supported", s
+                )
             t = self.term(s.value)
-            return ir.Let(self.assign(s.targets[0].id), t)
+            return ir.Let(self.assign(target.id), t)
         if isinstance(s, ast.AnnAssign):
             if not isinstance(s.target, ast.Name) or s.value is None:
                 raise FrontendError("only annotated assignments `x: T = ...` are supported", s)
@@ -287,6 +296,8 @@ class Translator:
                 if isinstance(e.operand, ast.Constant) and isinstance(e.operand.value, float):
                     return ir.Scalar()
                 return self.operator("neg", [e.operand], e)
+            if isinstance(e.op, ast.Invert):
+                return self.operator("invert", [e.operand], e)
         if isinstance(e, ast.BinOp) and type(e.op) in OPERATORS:
             return self.operator(OPERATORS[type(e.op)], [e.left, e.right], e)
         if isinstance(e, ast.Compare) and len(e.ops) == 1 and type(e.ops[0]) in COMPARISONS:
@@ -296,7 +307,9 @@ class Translator:
         if isinstance(e, ast.Attribute):
             return self.attribute(e)
         if isinstance(e, ast.Tuple):
-            raise FrontendError("tuples are only supported as shapes, e.g. x.reshape((n, d))", e)
+            if any(isinstance(x, ast.Starred) for x in e.elts):
+                raise FrontendError("starred items in tuples aren't supported", e)
+            return ir.Tuple([self.term(x) for x in e.elts])
         if isinstance(e, ast.Subscript):
             if isinstance(e.value, ast.Attribute) and e.value.attr == "shape":
                 raise FrontendError("`x.shape[i]` isn't supported yet", e)

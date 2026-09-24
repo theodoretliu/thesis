@@ -10,7 +10,7 @@ import json
 from typing import Any, Union
 
 Json = Any
-Index = Union[str, int]  # a list index: an int parameter's name or a literal
+Idx = Union[str, int]  # a list index: an int parameter's name or a literal
 
 
 # ---- dimension entries ----
@@ -49,6 +49,10 @@ def Rank(a: str) -> Json:
     return ["Rank", a]
 
 
+def Index(a: str, i: Idx) -> Json:
+    return ["Index", a, i]
+
+
 # ---- types and constraints ----
 
 
@@ -66,6 +70,10 @@ def IntExpr(e: Json) -> Json:
 
 def Literal(i: int) -> Json:
     return ["Literal", i]
+
+
+def TupleType(typs: list[Json]) -> Json:
+    return ["Tuple", typs]
 
 
 def signature(
@@ -107,6 +115,10 @@ def Scalar() -> Json:
     return ["Scalar"]
 
 
+def Tuple(terms: list[Json]) -> Json:
+    return ["Tuple", terms]
+
+
 def Let(x: str, t: Json) -> Json:
     return ["Let", x, t]
 
@@ -117,6 +129,10 @@ def LetAnnot(x: str, typ: Json, t: Json) -> Json:
 
 def Return(t: Json) -> Json:
     return ["Return", t]
+
+
+def Unpack(names: list[str], t: Json) -> Json:
+    return ["Unpack", names, t]
 
 
 def At(line: int, text: str, stmt: Json) -> Json:

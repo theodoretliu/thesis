@@ -84,6 +84,28 @@ let expand_to =
    shape *)
 let zeros_n = sg ([ ("size", arr [ Spread "S" ]) ], arr [ Spread "S" ])
 
+let reshape =
+  sg
+    ~requires:[ Eq (Prod "A", Prod "B") ]
+    ( [ ("X", arr [ Spread "A" ]); ("shape", arr [ Spread "B" ]) ],
+      arr [ Spread "B" ] )
+
+(* x.size(i) *)
+let size =
+  sg
+    ( [ ("X", arr [ Spread "A" ]); ("i", TypeInt) ],
+      IntExpr (Index ("A", Left "i")) )
+
+(* ones(n: int) -> [n], which callers must pass n >= 0, as if inferred *)
+let ones =
+  sg ~requires:[ Le (Int 0, Id "n") ] ([ ("n", TypeInt) ], arr [ Id "n" ])
+
+(* pair(x: [n], y: [m]) -> ([n], [m]) *)
+let pair =
+  sg
+    ( [ ("X", arr [ Id "n" ]); ("Y", arr [ Id "m" ]) ],
+      TypeTuple [ arr [ Id "n" ]; arr [ Id "m" ] ] )
+
 (* conv-like: the kernel must fit; the int overload is tried second *)
 let fit =
   Overloads
@@ -108,6 +130,10 @@ let env =
     ("head", Sig head);
     ("expand_to", Sig expand_to);
     ("zeros_n", Sig zeros_n);
+    ("reshape", Sig reshape);
+    ("size", Sig size);
+    ("ones", Sig ones);
+    ("pair", Sig pair);
     ("fit", fit);
   ]
 
@@ -495,11 +521,16 @@ let () =
       rejects ~saying:[ "expected 2, got 3" ]
         (def "f" n_param (arr [ Int 2 ])
            [ Return (call "zeros_n" [ Shape [ var "n" ] ]) ]));
-  expect "-1 in a shape isn't inferred" (fun () ->
+  expect "-1 in a shape needs an equation to determine it" (fun () ->
       rejects
-        ~saying:[ "shape entry -1 is negative" ]
+        ~saying:[ "the size -1 can't be inferred here" ]
         (def "f" [] (arr [ Int 2 ])
            [ Return (call "zeros_n" [ Shape [ Lit (-1) ] ]) ]));
+  expect "other negative sizes are rejected" (fun () ->
+      rejects
+        ~saying:[ "shape entry -2 is negative" ]
+        (def "f" [] (arr [ Int 2 ])
+           [ Return (call "zeros_n" [ Shape [ Lit (-2) ] ]) ]));
   expect "an int parameter may be negative" (fun () ->
       rejects
         ~saying:[ "shape entry k may be negative" ]
@@ -543,3 +574,139 @@ let () =
            [ ("x", arr [ Int 5 ]); ("k", arr [ Int 6 ]) ]
            (arr [ Int 5 ])
            [ Return (call "fit" [ var "x"; var "k" ]) ]))
+
+(* ---- milestone 1 of the Transformer: see docs/13-free-functions.md ---- *)
+
+let inferred fd =
+  match infer_requires env fd with
+  | cs -> List.map show_constr cs
+  | exception (TypeError m | KindError m) -> [ "error: " ^ m ]
+
+let () =
+  expect "x.size(i) is the dim at i" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ Id "b"; Id "t" ]) ]
+           (IntExpr (Id "t"))
+           [ Return (call "size" [ var "x"; Lit (-1) ]) ]));
+  expect "x.size(i) out of range" (fun () ->
+      rejects
+        ~saying:[ "A[i] is undefined for [b, t]" ]
+        (def "f"
+           [ ("x", arr [ Id "b"; Id "t" ]) ]
+           (IntExpr (Id "t"))
+           [ Return (call "size" [ var "x"; Lit 2 ]) ]));
+  (* split heads: x.view(x.size(0), -1, 3, 4) *)
+  let heads ?requires () =
+    def ?requires "f"
+      [ ("x", arr [ Id "b"; Id "n"; Int 12 ]) ]
+      (arr [ Id "b"; Id "n"; Int 3; Int 4 ])
+      [
+        Return
+          (call "reshape"
+             [
+               var "x";
+               Shape [ call "size" [ var "x"; Lit 0 ]; Lit (-1); Lit 3; Lit 4 ];
+             ]);
+      ]
+  in
+  expect "-1 needs the other sizes to be nonzero" (fun () ->
+      rejects
+        ~saying:[ "the other sizes' product b * 3 * 4 may be 0" ]
+        (heads ()));
+  expect "-1 is the quotient, given the other sizes are nonzero" (fun () ->
+      checks (heads ~requires:[ Le (Int 1, Id "b") ] ()));
+  expect "which the body infers" (fun () ->
+      inferred (heads ())
+      = [ "(Typing.Le ((Typing.Int 1), (Typing.Id \"b\")))" ]);
+  expect "-1 must divide evenly" (fun () ->
+      rejects
+        ~saying:[ "b * t may not be divisible by 3" ]
+        (def "f"
+           [ ("x", arr [ Id "b"; Id "t" ]) ]
+           (arr [ Id "b"; Id "t" ])
+           [
+             Let ("y", call "reshape" [ var "x"; Shape [ Lit (-1); Lit 3 ] ]);
+             Return (var "x");
+           ]));
+  expect "only one -1" (fun () ->
+      rejects
+        ~saying:[ "only one size in a shape can be -1" ]
+        (def "f"
+           [ ("x", arr [ Id "b"; Id "t" ]) ]
+           (arr [ Id "b"; Id "t" ])
+           [ Return (call "reshape" [ var "x"; Shape [ Lit (-1); Lit (-1) ] ]) ]));
+  (* ints as sizes *)
+  let zeros_of ?requires () =
+    def ?requires "f"
+      [ ("n", TypeInt) ]
+      (arr [ Id "n" ])
+      [ Return (call "zeros_n" [ Shape [ var "n" ] ]) ]
+  in
+  expect "an int size may be negative" (fun () ->
+      rejects ~saying:[ "shape entry n may be negative" ] (zeros_of ()));
+  expect "so the body infers n >= 0" (fun () ->
+      inferred (zeros_of ())
+      = [ "(Typing.Le ((Typing.Int 0), (Typing.Id \"n\")))" ]);
+  expect "and checks given it" (fun () ->
+      checks (zeros_of ~requires:[ Le (Int 0, Id "n") ] ()));
+  expect "an inferred requires is inferred in turn" (fun () ->
+      inferred
+        (def "g"
+           [ ("k", TypeInt) ]
+           (arr [ Id "k" ])
+           [ Return (call "ones" [ var "k" ]) ])
+      = [ "(Typing.Le ((Typing.Int 0), (Typing.Id \"k\")))" ]);
+  expect "a relation isn't inferred" (fun () ->
+      match
+        infer_requires env
+          (def "f"
+             [ ("x", arr [ Id "n" ]); ("k", arr [ Id "m" ]) ]
+             (arr [ Id "n" ])
+             [ Return (call "fit" [ var "x"; var "k" ]) ])
+      with
+      | _ -> false
+      | exception TypeError m -> contains m "Precondition not provable");
+  expect "an int parameter may come after the shapes naming it" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ Id "n" ]); ("n", TypeInt) ]
+           (arr [ Id "n" ])
+           [ Return (var "x") ]));
+  (* tuples *)
+  expect "a tuple return" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ Id "a" ]); ("y", arr [ Id "b" ]) ]
+           (TypeTuple [ arr [ Id "a" ]; arr [ Id "b" ] ])
+           [ Return (Tup [ var "x"; var "y" ]) ]));
+  expect "a tuple's elements are checked" (fun () ->
+      rejects ~saying:[ "return value[0]" ]
+        (def "f"
+           [ ("x", arr [ Id "a" ]); ("y", arr [ Id "b" ]) ]
+           (TypeTuple [ arr [ Id "a" ]; arr [ Id "b" ] ])
+           [ Return (Tup [ var "y"; var "x" ]) ]));
+  expect "unpacking a call's tuple" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ Id "a" ]); ("y", arr [ Id "b" ]) ]
+           (arr [ Id "b" ])
+           [
+             Unpack ([ "p"; "q" ], call "pair" [ var "x"; var "y" ]);
+             Return (var "q");
+           ]));
+  expect "unpacking into the wrong number of names" (fun () ->
+      rejects ~saying:[ "into 3 names" ]
+        (def "f"
+           [ ("x", arr [ Id "a" ]); ("y", arr [ Id "b" ]) ]
+           (arr [ Id "b" ])
+           [
+             Unpack ([ "p"; "q"; "r" ], call "pair" [ var "x"; var "y" ]);
+             Return (var "q");
+           ]));
+  expect "tuple parameters are rejected" (fun () ->
+      match
+        check_signature (sg ([ ("t", TypeTuple [ TypeInt ]) ], TypeInt))
+      with
+      | () -> false
+      | exception KindError _ -> true)

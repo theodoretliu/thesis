@@ -62,13 +62,37 @@ class Signatures(unittest.TestCase):
     def test_parameter_names_apart_from_dims(self):
         f = only_function(
             """
-            def f(n: Float[Tensor, "n"], d: int) -> Float[Tensor, "d"]:
+            def f(n: Float[Tensor, "n"], d: Float[Tensor, "d"]) -> Float[Tensor, "d"]:
                 return n
             """
         )
         self.assertEqual([p[0] for p in f["sig"]["params"]], ["n'", "d'"])
-        self.assertEqual(f["sig"]["exists"], ["d"])
         self.assertEqual(f["body"][0][3], ["Return", ["Var", "n'"]])
+
+    def test_int_parameters_are_their_dims(self):
+        # a dim named after an int parameter is its value, not existential
+        f = only_function(
+            """
+            def f(x: Float[Tensor, "n"], n: int, d: int) -> Float[Tensor, "n d"]:
+                return x
+            """
+        )
+        self.assertEqual([p[0] for p in f["sig"]["params"]], ["x", "n", "d"])
+        self.assertEqual(f["sig"]["exists"], [])
+
+    def test_tuple_return_type(self):
+        f = only_function(
+            """
+            def f(x: Float[Tensor, "n"]) -> tuple[Float[Tensor, "n"], Float[Tensor, "m"]]:
+                return x, x
+            """
+        )
+        self.assertEqual(
+            f["sig"]["ret"],
+            ["Tuple", [["Array", [["Id", "n"]]], ["Array", [["Id", "m"]]]]],
+        )
+        self.assertEqual(f["sig"]["exists"], ["m"])
+        self.assertEqual(f["body"][0][3], ["Return", ["Tuple", [["Var", "x"], ["Var", "x"]]]])
 
     def test_forward_reference_and_unshaped_array(self):
         f = only_function(
@@ -87,6 +111,8 @@ class Signatures(unittest.TestCase):
             ("def f(x: str) -> int: return 0", "unsupported annotation `str`"),
             ("def f(x: int) -> Tensor: return 0", "needs a shape"),
             ('def f(x: Float[Tensor, "#n"]) -> int: return 0', "single broadcastable dim"),
+            ("def f(x: tuple[int, int]) -> int: return 0", "only supported as return types"),
+            ("def f(x: int) -> tuple[int, ...]: return 0", "only fixed-length tuples"),
         ]:
             with self.subTest(src):
                 _, errors = program(src)
@@ -115,6 +141,8 @@ class Signatures(unittest.TestCase):
         )
         self.assertEqual(sig["params"][2], ["shape", ["Array", [["Spread", "B"]]]])
         self.assertEqual(sig["ret"], ["IntExpr", ["Add", ["Rank", "A"], ["Id", "dim"]]])
+        [size] = stub_sig('def size(x: Shaped[Tensor, "*A"], dim: int) -> Dim["A[dim]"]: ...')
+        self.assertEqual(size["ret"], ["IntExpr", ["Index", "A", "dim"]])
 
     def test_stub_body_must_be_asserts(self):
         with self.assertRaisesRegex(FrontendError, "only contain asserts"):
@@ -248,9 +276,39 @@ class Bodies(unittest.TestCase):
                 return torch.reshape(x, (n,))
             """
         )
-        self.assertEqual(a[2][2], [["Shape", [["Var", "n'"], ["Lit", 2]]]])
-        self.assertEqual(b[2][2][1], ["Shape", [["Lit", 2], ["Var", "n'"]]])
-        self.assertEqual(c[1][2][1], ["Shape", [["Var", "n'"]]])
+        self.assertEqual(a[2][2], [["Shape", [["Var", "n"], ["Lit", 2]]]])
+        self.assertEqual(b[2][2][1], ["Shape", [["Lit", 2], ["Var", "n"]]])
+        self.assertEqual(c[1][2][1], ["Shape", [["Var", "n"]]])
+
+    def test_tuples_and_unpacking(self):
+        prog, errors = program(
+            """
+            def f(x: Float[Tensor, "n"]) -> Float[Tensor, "n"]:
+                p, q = g(x)
+                return q
+
+            def g(x: Float[Tensor, "n"]) -> tuple[Float[Tensor, "n"], Float[Tensor, "n"]]:
+                return x, x
+            """
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            prog["functions"][0]["body"][0][3],
+            ["Unpack", ["p", "q"], ["Call", "g", [["Var", "x"]]]],
+        )
+
+    def test_bitwise_operators(self):
+        [a] = body(
+            """
+            def f(x: Bool[Tensor, "n"], y: Bool[Tensor, "n"]) -> Bool[Tensor, "n"]:
+                return ~x & y | x ^ y
+            """
+        )
+        self.assertEqual(a[1][0], "Call")
+        self.assertEqual(a[1][1], "operator.or_")
+        and_ = a[1][2][0]
+        self.assertEqual(and_[1], "operator.and_")
+        self.assertEqual(and_[2][0][1], "operator.invert")
 
     def test_user_calls_bind_keywords(self):
         prog, errors = program(
@@ -273,11 +331,12 @@ class Bodies(unittest.TestCase):
             ("if x: pass", "`if` isn't supported yet"),
             ("for i in x: pass", "`for` isn't supported yet"),
             ("x += 1", "write `x = x \\+ 1`"),
-            ("a, b = x, x", "single name"),
+            ("a = b = x", "only assignments to a name"),
+            ("a, b.c = x, x", "only assignments to a name"),
             ("print(x)", "an expression statement isn't supported"),
             ("return", "must return a value"),
             ("return y", "`y` isn't a local variable"),
-            ("return (x, x)", "tuples are only supported as shapes"),
+            ("return (*x, x)", "starred items in tuples"),
             ("return x[0]", "indexing isn't supported"),
             ("return x.shape", "`x.shape` isn't supported"),
             ("return x.shape[0]", r"`x.shape\[i\]` isn't supported"),

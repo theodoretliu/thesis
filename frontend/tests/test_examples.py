@@ -42,6 +42,18 @@ class Examples(unittest.TestCase):
                 for e in expected:
                     self.assertIn(e.strip(), output)
 
+    def test_inferred_preconditions(self):
+        report = check_file(EXAMPLES / "pass" / "sizes.py", STUBS, self.checker)
+        self.assertEqual(
+            report.inferred,
+            {
+                "causal_mask": ["size >= 0"],
+                "split_heads": ["b >= 1"],
+                "token_loss": ["v >= 1"],
+            },
+        )
+        self.assertIn("causal_mask requires size >= 0 (inferred from its body)", report.notes[0])
+
 
 class CheckerCli(unittest.TestCase):
     def test_invalid_ir(self):

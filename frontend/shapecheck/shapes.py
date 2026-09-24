@@ -12,8 +12,8 @@ The mapping onto the checker's entries:
 
 Stubs may also use list functions that jaxtyping doesn't have, since library
 signatures need them: *drop(A,i), *keep(A,i), *permute(A,i,j),
-*setat(A,i,d), *insertat(A,i,d), *broadcast(A,B), and prod(A), rank(A)
-inside arithmetic.
+*setat(A,i,d), *insertat(A,i,d), *broadcast(A,B), and prod(A), rank(A),
+A[i] inside arithmetic.
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ def parse_token(tok: str, scope: Scope, binding: bool) -> Json:
 
 def arith(node: ast.expr, scope: Scope) -> Json:
     """An arithmetic dimension: + - * // over names and ints (and prod(A),
-    rank(A) in stubs)."""
+    rank(A), A[i] in stubs)."""
     ops = {ast.Add: "Add", ast.Sub: "Sub", ast.Mult: "Mul", ast.FloorDiv: "Div"}
     if isinstance(node, ast.BinOp) and type(node.op) in ops:
         return ir.binop(ops[type(node.op)], arith(node.left, scope), arith(node.right, scope))
@@ -162,6 +162,8 @@ def arith(node: ast.expr, scope: Scope) -> Json:
     ):
         make = ir.Prod if node.func.id == "prod" else ir.Rank
         return make(node.args[0].id)
+    if scope.stub and isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        return ir.Index(node.value.id, index(node.slice))
     raise ShapeError(f"unsupported dim expression `{ast.unparse(node)}`")
 
 
@@ -173,7 +175,7 @@ def is_int(node: ast.expr) -> bool:
     )
 
 
-def index(node: ast.expr) -> ir.Index:
+def index(node: ast.expr) -> ir.Idx:
     """A list index: an int parameter's name or a literal."""
     if isinstance(node, ast.Name):
         return node.id

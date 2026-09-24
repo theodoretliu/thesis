@@ -43,14 +43,16 @@ let rec entry (j : Yojson.Safe.t) : entry =
       InsertAt (string a, index i, entry d)
   | `List [ `String "Prod"; a ] -> Prod (string a)
   | `List [ `String "Rank"; a ] -> Rank (string a)
+  | `List [ `String "Index"; a; i ] -> Index (string a, index i)
   | j -> bad "a dimension entry" j
 
-let typ (j : Yojson.Safe.t) : typ =
+let rec typ (j : Yojson.Safe.t) : typ =
   match j with
   | `List [ `String "Array"; l ] -> Nparray (list entry l)
   | `List [ `String "Int" ] -> TypeInt
   | `List [ `String "IntExpr"; e ] -> IntExpr (entry e)
   | `List [ `String "Literal"; i ] -> TypeLiteralInt (int i)
+  | `List [ `String "Tuple"; l ] -> TypeTuple (list typ l)
   | j -> bad "a type" j
 
 let constr (j : Yojson.Safe.t) : constr =
@@ -81,6 +83,7 @@ let rec term (j : Yojson.Safe.t) : term =
   | `List [ `String "Call"; f; args ] -> Call (string f, list term args)
   | `List [ `String "Shape"; ts ] -> Shape (list term ts)
   | `List [ `String "Scalar" ] -> Scalar
+  | `List [ `String "Tuple"; ts ] -> Tup (list term ts)
   | j -> bad "a term" j
 
 let rec stmt (j : Yojson.Safe.t) : stmt =
@@ -88,6 +91,7 @@ let rec stmt (j : Yojson.Safe.t) : stmt =
   | `List [ `String "Let"; x; t ] -> Let (string x, term t)
   | `List [ `String "LetAnnot"; x; ty; t ] -> LetAnnot (string x, typ ty, term t)
   | `List [ `String "Return"; t ] -> Return (term t)
+  | `List [ `String "Unpack"; xs; t ] -> Unpack (list string xs, term t)
   | `List [ `String "At"; line; text; s ] -> At (int line, string text, stmt s)
   | j -> bad "a statement" j
 
