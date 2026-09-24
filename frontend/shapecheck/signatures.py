@@ -3,6 +3,8 @@
 User functions follow jaxtyping: shape names and Python parameter names are
 separate namespaces, a name that appears only in the return type is
 existential, and asserts in the body are ignored (dropping them is sound).
+The exception is an int parameter: a dim with its name is its value, so
+subsequent_mask(size: int) -> Bool[Tensor, "1 size size"] says what it means.
 
 Stubs follow the checker's own conventions: a shape may name an int
 parameter (sum's `dim`), Dim["..."] is an int equal to a dim expression,
@@ -114,6 +116,13 @@ def typ_of_ast(ann: ast.expr, scope: Scope, binding: bool, what: str) -> tuple[J
         raise FrontendError(f"unsupported annotation `{ast.unparse(ann)}` on {what}", ann)
 
     arg = ann.slice
+    if name in ("tuple", "Tuple"):
+        if binding:
+            raise FrontendError(f"tuples are only supported as return types, on {what}", ann)
+        elts = arg.elts if isinstance(arg, ast.Tuple) else [arg]
+        if any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in elts):
+            raise FrontendError(f"only fixed-length tuples are supported, on {what}", ann)
+        return ir.TupleType([typ_of_ast(e, scope, binding, what)[0] for e in elts]), False
     if name == "Literal":
         value = literal_int(arg)
         if value is None:
@@ -208,8 +217,11 @@ def build_signature(fn: ast.FunctionDef, stub: bool) -> tuple[Overload, Scope]:
     scope = Scope(stub)
     taken = set() if stub else names_in(shape_strings(fn))
 
-    def ir_name(name: str) -> str:
-        # user functions keep shape names and parameter names apart
+    def ir_name(name: str, typ: Json) -> str:
+        # user functions keep shape names and parameter names apart, except
+        # that a dim named after an int parameter is its value
+        if typ[0] in ("Int", "Literal"):
+            return name
         while name in taken:
             name += "'"
         return name
@@ -237,7 +249,7 @@ def build_signature(fn: ast.FunctionDef, stub: bool) -> tuple[Overload, Scope]:
             raise
         if kind == "varargs" and not shape:
             raise FrontendError("*args is only supported in stubs, as *shape: Shape[...]", arg)
-        name = ir_name(arg.arg)
+        name = ir_name(arg.arg, typ)
         if typ[0] in ("Int", "Literal", "IntExpr"):
             int_params.add(name)
         params.append(
@@ -253,19 +265,16 @@ def build_signature(fn: ast.FunctionDef, stub: bool) -> tuple[Overload, Scope]:
     scope.int_params = int_params
 
     ret, _ = typ_of(fn.returns, scope, False, "the return type")
-    if ret[0] == "Array":
-        # jaxtyping: a name only the return type mentions is existential
-        exists: list[str] = []
-        for e in ret[1]:
-            if (
-                e[0] == "Id"
-                and e[1] not in scope.dims
-                and e[1] not in int_params
-                and e[1] not in exists
-            ):
-                exists.append(e[1])
-    else:
-        exists = []
+    # jaxtyping: a name only the return type mentions is existential
+    exists: list[str] = []
+    for e in (e for a in arrays(ret) for e in a[1]):
+        if (
+            e[0] == "Id"
+            and e[1] not in scope.dims
+            and e[1] not in int_params
+            and e[1] not in exists
+        ):
+            exists.append(e[1])
 
     requires: list[Json] = []
     ensures: list[Json] = []
@@ -287,6 +296,15 @@ def build_signature(fn: ast.FunctionDef, stub: bool) -> tuple[Overload, Scope]:
 
     sig = ir.signature(ir_params, ret, requires, exists, ensures)
     return Overload(sig=sig, params=params), scope
+
+
+def arrays(typ: Json) -> Iterable[Json]:
+    """The array types in a type, including a tuple's elements."""
+    if typ[0] == "Array":
+        yield typ
+    elif typ[0] == "Tuple":
+        for t in typ[1]:
+            yield from arrays(t)
 
 
 def names_in(strings: Iterable[str]) -> set[str]:

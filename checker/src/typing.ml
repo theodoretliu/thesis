@@ -22,6 +22,8 @@ type entry =
     (* insert a dim, e.g. unsqueeze *)
   | Prod of string (* product of a bound spread's dims, e.g. flatten *)
   | Rank of string (* number of dims in a bound spread *)
+  | Index of string * (string, int) either
+    (* one dim of a bound spread, e.g. x.size(i) *)
 [@@deriving show]
 
 type typ =
@@ -29,6 +31,7 @@ type typ =
   | TypeInt
   | IntExpr of entry (* an int whose value is the given dimension expression *)
   | TypeLiteralInt of int (* python Literal[i]; bools are 0 and 1 *)
+  | TypeTuple of typ list (* only as a return type *)
 [@@deriving show]
 
 type funtyp = (string * typ) list * typ
@@ -54,6 +57,7 @@ type arg =
   | LiteralInt of int
   | Int (* an int with no known value or identity *)
   | SymInt of string (* an int whose value is the named z3 variable *)
+  | Tuple of arg list
 [@@deriving show]
 
 exception TypeError of string
@@ -86,6 +90,7 @@ let rec string_of_entry (e : entry) : string =
       "InsertAt(" ^ a ^ ", " ^ idx i ^ ", " ^ string_of_entry d ^ ")"
   | Prod a -> "prod(" ^ a ^ ")"
   | Rank a -> "rank(" ^ a ^ ")"
+  | Index (a, i) -> a ^ "[" ^ idx i ^ "]"
 
 (* a solver term as infix arithmetic, with determined parts as numbers and
    dimensions by their labels *)
@@ -124,18 +129,21 @@ let with_value (name : string) (e : Z3.Expr.expr) : string =
 let string_of_dims l =
   "[" ^ String.concat ", " (List.map string_of_dim (Z3utils.expand l)) ^ "]"
 
-let string_of_typ = function
+let rec string_of_typ = function
   | Nparray l ->
       "array[" ^ String.concat ", " (List.map string_of_entry l) ^ "]"
   | TypeInt -> "int"
   | TypeLiteralInt i -> "Literal[" ^ string_of_int i ^ "]"
   | IntExpr e -> "int{" ^ string_of_entry e ^ "}"
+  | TypeTuple ts ->
+      "tuple[" ^ String.concat ", " (List.map string_of_typ ts) ^ "]"
 
-let string_of_arg = function
+let rec string_of_arg = function
   | Dimensions l -> "array of shape " ^ string_of_dims l
   | LiteralInt i -> "Literal[" ^ string_of_int i ^ "]"
   | Int -> "int"
   | SymInt v -> "int " ^ string_of_dim v
+  | Tuple l -> "tuple (" ^ String.concat ", " (List.map string_of_arg l) ^ ")"
 
 module StringMap = Map.Make (struct
   type t = string
@@ -176,6 +184,15 @@ let rec check_arith_signature
       if not (StringSet.mem a _spread_vars) then
         raise
           (KindError (string_of_entry e ^ " needs an already-bound spread var"))
+  | Index (a, i) ->
+      if not (StringSet.mem a _spread_vars) then
+        raise
+          (KindError (string_of_entry e ^ " needs an already-bound spread var"));
+      begin match i with
+      | Left s when not (is_int_param s param_var_mapping) ->
+          raise (KindError ("Index to " ^ string_of_entry e ^ " is not an int"))
+      | _ -> ()
+      end
   | Add (e1, e2) | Sub (e1, e2) | Mul (e1, e2) | Div (e1, e2) ->
       check_arith_signature (vars, _spread_vars, param_var_mapping) e1;
       check_arith_signature (vars, _spread_vars, param_var_mapping) e2
@@ -208,7 +225,7 @@ let rec check_entry_signature
         else (StringSet.add x vars, spread_vars, param_var_mapping)
       else if StringSet.mem x vars then (vars, spread_vars, param_var_mapping)
       else raise (KindError "Attempt to intro new variable in bad context")
-  | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ ->
+  | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _ ->
       check_arith_signature orig e;
       orig
   | Spread x ->
@@ -261,6 +278,14 @@ let rec check_entry_signature
       then raise (KindError "Broadcasted needs already-bound spread vars")
       else orig
 
+(* int parameters come first, so a shape may name one declared after it *)
+let ints_first (params : (string * typ) list) : (string * typ) list =
+  let is_int (_, t) =
+    match t with TypeInt | TypeLiteralInt _ -> true | _ -> false
+  in
+  let ints, rest = List.partition is_int params in
+  ints @ rest
+
 let check_args_signature (funargtyps : (string * typ) list) :
     StringSet.t * StringSet.t * typ StringMap.t =
   let check_args_signature'
@@ -280,6 +305,7 @@ let check_args_signature (funargtyps : (string * typ) list) :
 
       match arg with
       | TypeInt | TypeLiteralInt _ -> (vars, spread_vars, new_param_var_mapping)
+      | TypeTuple _ -> raise (KindError "Tuple parameters aren't supported")
       | IntExpr e ->
           (* e may only mention what earlier parameters bound *)
           check_arith_signature (vars, spread_vars, param_var_mapping) e;
@@ -296,7 +322,7 @@ let check_args_signature (funargtyps : (string * typ) list) :
 
   List.fold_left check_args_signature'
     (StringSet.empty, StringSet.empty, StringMap.empty)
-    funargtyps
+    (ints_first funargtyps)
 
 let check_constr_signature ctx (c : constr) : unit =
   match c with
@@ -325,12 +351,17 @@ let check_signature (sg : signature) : unit =
   let ctx = (vars, spread_vars, param_vars) in
   List.iter (check_constr_signature ctx) sg.ensures;
 
-  match sg.ret with
-  | TypeInt | TypeLiteralInt _ -> ()
-  | IntExpr e -> check_arith_signature ctx e
-  | Nparray l ->
-      ignore
-        (List.fold_left (fun acc e -> check_entry_signature acc e false) ctx l)
+  let rec check_ret = function
+    | TypeInt | TypeLiteralInt _ -> ()
+    | IntExpr e -> check_arith_signature ctx e
+    | TypeTuple ts -> List.iter check_ret ts
+    | Nparray l ->
+        ignore
+          (List.fold_left
+             (fun acc e -> check_entry_signature acc e false)
+             ctx l)
+  in
+  check_ret sg.ret
 
 (* the value of an integer parameter's argument as a Z3 expression, if known *)
 let int_param_expr (x : string) (param_mapping : arg StringMap.t) :
@@ -340,13 +371,58 @@ let int_param_expr (x : string) (param_mapping : arg StringMap.t) :
   | Some (SymInt v) -> Some (Z3utils.mk_int v)
   | _ -> None
 
+let get_concrete_indices (indices : (string, int) either list)
+    (param_mapping : arg StringMap.t) : int list =
+  List.map
+    (fun index ->
+      match index with
+      | Left s ->
+          (* a symbolic int is fine as long as the constraints pin it down *)
+          begin match
+            Option.bind (int_param_expr s param_mapping) Z3utils.determined_int
+          with
+          | Some i -> i
+          | None ->
+              raise
+                (TypeError ("Index " ^ s ^ " must have a statically known value"))
+          end
+      | Right asdf -> asdf)
+    indices
+
+(* the position python index i refers to in items, provided no list variable
+   makes it ambiguous. for insertion, the list is one longer *)
+let resolve_index ?(insert = false) (items : string list) (i : int) : int option
+    =
+  let len = List.length items + if insert then 1 else 0 in
+  let p = Utils.normalize_index len i in
+  (* positions whose lengths the index depends on: before it for i >= 0,
+     from it to the end for i < 0 *)
+  let depends j = if i >= 0 then j < p || ((not insert) && j = p) else j >= p in
+  if p < 0 || p >= len then None
+  else if
+    List.exists Fun.id
+      (List.mapi (fun j x -> depends j && Z3utils.is_list_var x) items)
+  then None
+  else Some p
+
+let resolve_indices (items : string list) (indices : int list) : int list option
+    =
+  List.fold_right
+    (fun i acc ->
+      Option.bind acc (fun acc ->
+          Option.map (fun p -> p :: acc) (resolve_index items i)))
+    indices (Some [])
+
 type dim_error =
   | Unknown_param of string (* an integer parameter with no known value *)
   | Bad_divisor of entry (* a divisor not provably positive *)
+  | Bad_index of entry * string list (* A[i] out of range or ambiguous *)
 
 let show_dim_error = function
   | Unknown_param x -> "integer parameter " ^ x ^ " has no known value"
   | Bad_divisor e -> "divisor " ^ string_of_entry e ^ " may not be positive"
+  | Bad_index (e, dims) ->
+      string_of_entry e ^ " is undefined for " ^ string_of_dims dims
 
 (* translate an arithmetic dimension into a Z3 expression *)
 let rec expr_of_dim (s : entry)
@@ -390,6 +466,18 @@ let rec expr_of_dim (s : entry)
       | [] -> Ok (mk_int_numeral 1)
       | [ d ] -> Ok d
       | ds -> Ok (Z3.Arithmetic.mk_mul Z3utils.ctx ds))
+  | Index (a, i) -> (
+      let items = Z3utils.expand (StringMap.find a spread_mapping) in
+      match
+        Option.bind
+          (resolve_index items
+             (List.hd (get_concrete_indices [ i ] param_mapping)))
+          (fun p ->
+            let d = List.nth items p in
+            if Z3utils.is_list_var d then None else Some d)
+      with
+      | Some d -> Ok (Z3utils.mk_int d)
+      | None -> Error (Bad_index (s, items)))
   | Rank a ->
       let lists, dims =
         List.partition Z3utils.is_list_var
@@ -402,24 +490,6 @@ let rec expr_of_dim (s : entry)
              (mk_int_numeral (List.length dims)
              :: List.map Z3utils.rank_of_list lists))
   | _ -> raise (TypeError "Called with wrong argument")
-
-let get_concrete_indices (indices : (string, int) either list)
-    (param_mapping : arg StringMap.t) : int list =
-  List.map
-    (fun index ->
-      match index with
-      | Left s ->
-          (* a symbolic int is fine as long as the constraints pin it down *)
-          begin match
-            Option.bind (int_param_expr s param_mapping) Z3utils.determined_int
-          with
-          | Some i -> i
-          | None ->
-              raise
-                (TypeError ("Index " ^ s ^ " must have a statically known value"))
-          end
-      | Right asdf -> asdf)
-    indices
 
 let all_ones (l : string list) =
   List.for_all
@@ -475,30 +545,6 @@ let broadcast_pair (a : string list) (b : string list) : string list option =
           go ra' rb' (r :: acc)
   in
   go (List.rev a) (List.rev b) []
-
-(* the position python index i refers to in items, provided no list variable
-   makes it ambiguous. for insertion, the list is one longer *)
-let resolve_index ?(insert = false) (items : string list) (i : int) : int option
-    =
-  let len = List.length items + if insert then 1 else 0 in
-  let p = Utils.normalize_index len i in
-  (* positions whose lengths the index depends on: before it for i >= 0,
-     from it to the end for i < 0 *)
-  let depends j = if i >= 0 then j < p || ((not insert) && j = p) else j >= p in
-  if p < 0 || p >= len then None
-  else if
-    List.exists Fun.id
-      (List.mapi (fun j x -> depends j && Z3utils.is_list_var x) items)
-  then None
-  else Some p
-
-let resolve_indices (items : string list) (indices : int list) : int list option
-    =
-  List.fold_right
-    (fun i acc ->
-      Option.bind acc (fun acc ->
-          Option.map (fun p -> p :: acc) (resolve_index items i)))
-    indices (Some [])
 
 (* list-valued dimensions computed from already-bound spreads. None means
    the computation is undefined for these spreads *)
@@ -727,7 +773,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       restfunargstyps restargtyps
   in
   match s1 with
-  | (Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _)
+  | (Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _)
     when match s2 with h :: _ -> Z3utils.is_list_var h | [] -> false ->
       let h = List.hd s2 in
       let unknown () =
@@ -775,7 +821,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
               else expected_got (fun () -> with_value x exp) h
           end
       end
-  | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ ->
+  | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _ ->
       begin match s2 with
       | [] -> too_few ()
       | h :: t -> (
@@ -892,18 +938,187 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
 
       try_splits splits
 
-let check_ret_type_with_mapping (rettyp : typ)
+(* ---- inferred preconditions ---- *)
+
+(* while checking a body with inference on, it may assume sign facts about its
+   parameters when it can't prove a size is valid: an int parameter is >= 0 or
+   >= 1, and a dim is >= 1. each fact it assumes becomes a requires that
+   callers prove. torch raises when these facts fail, e.g. torch.ones(-1).
+   only size obligations use it: an int used as a shape entry or a returned
+   dim is >= 0, the other sizes of a -1 have a positive product, and a
+   callee's sign-fact requires hold. relations like conv2d's kernel fitting
+   the image must be proved *)
+type inference = {
+  candidates : (Z3.Expr.expr * constr) list; (* stronger facts first *)
+  mutable inferred : constr list; (* newest first *)
+}
+
+let inference : inference option ref = ref None
+
+(* prove e, or assume the fewest candidate facts that prove it *)
+let prove_or_infer (e : Z3.Expr.expr) : bool =
+  Z3utils.prove e
+  ||
+  match !inference with
+  | None -> false
+  | Some inf ->
+      let open_facts =
+        List.filter (fun (_, c) -> not (List.mem c inf.inferred)) inf.candidates
+      in
+      let suffice facts =
+        facts <> []
+        && Z3utils.prove
+             (Z3.Boolean.mk_implies Z3utils.ctx
+                (Z3.Boolean.mk_and Z3utils.ctx (List.map fst facts))
+                e)
+      in
+      suffice open_facts
+      &&
+      (* drop every fact the others suffice without, stronger ones first, so
+         n >= 0 is kept over n >= 1 *)
+      let needed =
+        List.fold_left
+          (fun needed f ->
+            let rest = List.filter (fun g -> g != f) needed in
+            if suffice rest then rest else needed)
+          open_facts open_facts
+      in
+      List.iter
+        (fun (fact, c) ->
+          Z3.Solver.add Z3utils.solver [ fact ];
+          inf.inferred <- c :: inf.inferred)
+        needed;
+      true
+
+let without_inference (f : unit -> 'a) : 'a =
+  let saved = !inference in
+  inference := None;
+  Fun.protect ~finally:(fun () -> inference := saved) f
+
+(* the dims standing for a -1 in a shape, e.g. x.reshape(-1, d), until a
+   requires equation of the callee determines them *)
+let pending_sizes : StringSet.t ref = ref StringSet.empty
+
+(* run f, undoing its assertions and bookkeeping if it fails. on success the
+   solver keeps f's scope, which the enclosing Z3utils.scoped pops *)
+let attempt (f : unit -> 'a) : 'a =
+  let unfoldings = !Z3utils.unfoldings and pending = !pending_sizes in
+  let inferred = Option.map (fun inf -> inf.inferred) !inference in
+  Z3.Solver.push Z3utils.solver;
+  try f ()
+  with e ->
+    Z3.Solver.pop Z3utils.solver 1;
+    Z3utils.unfoldings := unfoldings;
+    pending_sizes := pending;
+    (match (!inference, inferred) with
+    | Some inf, Some l -> inf.inferred <- l
+    | _ -> ());
+    raise e
+
+let rec mentions (x : string) (e : Z3.Expr.expr) : bool =
+  (Z3.Expr.get_num_args e = 0 && Z3.Expr.to_string e = x)
+  || List.exists (mentions x) (Z3.Expr.get_args e)
+
+let rec factors (e : Z3.Expr.expr) : Z3.Expr.expr list =
+  if Z3.Arithmetic.is_mul e then List.concat_map factors (Z3.Expr.get_args e)
+  else [ e ]
+
+let product (es : Z3.Expr.expr list) : Z3.Expr.expr =
+  match es with
+  | [] -> mk_int_numeral 1
+  | [ e ] -> e
+  | es -> Z3.Arithmetic.mk_mul Z3utils.ctx es
+
+(* total / rest by cancelling factors, e.g. b * n * 12 / (b * 3 * 4) = n:
+   each factor of rest provably equals one of total's, or the unmatched ones
+   are numbers dividing the product of total's numbers. nonlinear divisibility
+   is often too hard for the solver, and this is the common case *)
+let quotient (total : Z3.Expr.expr) (rest : Z3.Expr.expr) : Z3.Expr.expr option
+    =
+  let rec cancel ts unmatched = function
+    | [] -> (ts, unmatched)
+    | f :: fs -> (
+        match List.find_opt (Z3utils.prove_int_eq f) ts with
+        | Some g -> cancel (List.filter (fun t -> t != g) ts) unmatched fs
+        | None -> cancel ts (f :: unmatched) fs)
+  in
+  let ts, unmatched = cancel (factors total) [] (factors rest) in
+  let values es = List.map Z3utils.determined_int es in
+  match values unmatched with
+  | vs when List.for_all Option.is_some vs ->
+      let divisor = List.fold_left (fun a v -> a * Option.get v) 1 vs in
+      let numbers, others =
+        List.partition (fun t -> Z3utils.determined_int t <> None) ts
+      in
+      let n = List.fold_left (fun a v -> a * Option.get v) 1 (values numbers) in
+      if divisor <> 0 && n mod divisor = 0 then
+        let k = n / divisor in
+        Some (product (if k = 1 then others else mk_int_numeral k :: others))
+      else None
+  | _ -> None
+
+(* determine the pending size x from total = product, where product is x times
+   the other sizes: torch needs their product to be positive and to divide
+   the total *)
+let infer_size (x : string) (total : Z3.Expr.expr) (product : Z3.Expr.expr) :
+    unit =
+  let vx = Z3utils.mk_int x in
+  let rest =
+    Z3.Expr.simplify (Z3.Expr.substitute_one product vx (mk_int_numeral 1)) None
+  in
+  let times_rest = Z3.Arithmetic.mk_mul Z3utils.ctx [ vx; rest ] in
+  if Z3utils.prove (Z3.Boolean.mk_eq Z3utils.ctx product times_rest) then begin
+    if
+      not
+        (prove_or_infer
+           (Z3.Arithmetic.mk_gt Z3utils.ctx rest (mk_int_numeral 0)))
+    then
+      raise
+        (TypeError
+           ("can't infer the size -1: the other sizes' product "
+          ^ string_of_expr rest ^ " may be 0"));
+    let q = quotient total rest in
+    let definition =
+      match q with
+      | Some q -> Z3.Boolean.mk_eq Z3utils.ctx vx q
+      | None ->
+          if
+            not
+              (Z3utils.prove
+                 (Z3.Boolean.mk_eq Z3utils.ctx
+                    (Z3.Arithmetic.Integer.mk_mod Z3utils.ctx total rest)
+                    (mk_int_numeral 0)))
+          then
+            raise
+              (TypeError
+                 ("can't infer the size -1: " ^ string_of_expr total
+                ^ " may not be divisible by " ^ string_of_expr rest));
+          Z3.Boolean.mk_eq Z3utils.ctx times_rest total
+    in
+    Z3.Solver.add Z3utils.solver [ definition ];
+    Hashtbl.replace Z3utils.dim_labels x
+      (match q with
+      | Some q -> string_of_expr q
+      | None -> string_of_expr total ^ " // " ^ string_of_expr rest);
+    pending_sizes := StringSet.remove x !pending_sizes
+  end
+
+let rec check_ret_type_with_mapping (rettyp : typ)
     ((var_mapping, spread_mapping, param_mapping) as mapping : mapping_type) :
     arg =
   match rettyp with
   | TypeInt -> Int
   | TypeLiteralInt i -> LiteralInt i
+  | TypeTuple ts ->
+      Tuple (List.map (fun t -> check_ret_type_with_mapping t mapping) ts)
   | IntExpr e -> (
       match expr_of_dim e mapping with
       | Ok e ->
           let name = Z3utils.mk_string () in
           Z3.Solver.add Z3utils.solver
             [ Z3.Boolean.mk_eq Z3utils.ctx (Z3utils.mk_int name) e ];
+          (* labeled by its value, e.g. d for x.size(-1) *)
+          Hashtbl.replace Z3utils.dim_labels name (string_of_expr e);
           SymInt name
       | Error (Unknown_param _) -> Int
       | Error err -> raise (TypeError (show_dim_error err)))
@@ -913,14 +1128,15 @@ let check_ret_type_with_mapping (rettyp : typ)
         | [] -> []
         | h :: t ->
             begin match h with
-            | Id _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ ->
+            | Id _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _
+              ->
                 let bound_name =
                   match expr_of_dim h mapping with
                   | Ok e ->
                       (* returned dimensions must be natural numbers *)
                       if
                         not
-                          (Z3utils.prove
+                          (prove_or_infer
                              (Z3.Arithmetic.mk_ge Z3utils.ctx e
                                 (mk_int_numeral 0)))
                       then
@@ -981,6 +1197,9 @@ let string_of_constr (c : constr) (mapping : mapping_type) : string =
   let op, e1, e2 =
     match c with
     | Eq (a, b) -> ("=", a, b)
+    (* a lower bound reads as n >= 0 *)
+    | Le ((Int _ as a), b) -> (">=", b, a)
+    | Lt ((Int _ as a), b) -> (">", b, a)
     | Le (a, b) -> ("<=", a, b)
     | Lt (a, b) -> ("<", a, b)
   in
@@ -1033,10 +1252,49 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
              | None -> "Could not type check"))
     | Some mapping ->
         sig_progress := List.length sg.params;
+        (* a -1 in an argument's shape is determined by an equation the
+           callee requires, e.g. reshape's prod(A) = prod(B) *)
+        let pending =
+          List.concat_map
+            (function
+              | Dimensions l ->
+                  List.filter (fun d -> StringSet.mem d !pending_sizes) l
+              | _ -> [])
+            argtyps
+        in
+        if pending <> [] then begin
+          List.iter
+            (fun c ->
+              match c with
+              | Eq (e1, e2) -> (
+                  match (expr_of_dim e1 mapping, expr_of_dim e2 mapping) with
+                  | Ok l, Ok r ->
+                      List.iter
+                        (fun x ->
+                          if StringSet.mem x !pending_sizes then
+                            match (mentions x l, mentions x r) with
+                            | false, true -> infer_size x l r
+                            | true, false -> infer_size x r l
+                            | _ -> ())
+                        pending
+                  | _ -> ())
+              | _ -> ())
+            sg.requires;
+          if List.exists (fun x -> StringSet.mem x !pending_sizes) pending then
+            raise (TypeError "the size -1 can't be inferred here")
+        end;
+        (* a sign fact, like an inferred requires, may be inferred in turn;
+           a relation must be proved *)
+        let inferable = function
+          | Le (Int (0 | 1), Id _) | Lt (Int 0, Id _) -> true
+          | _ -> false
+        in
         List.iter
           (fun c ->
             match constr_expr c mapping with
-            | Ok e when Z3utils.prove e -> ()
+            | Ok e
+              when (if inferable c then prove_or_infer else Z3utils.prove) e ->
+                ()
             | Ok _ ->
                 raise
                   (TypeError
@@ -1073,15 +1331,22 @@ let check_overload_sigs (overloads : signature list) (argtyps : arg list) : arg
   let rec go = function
     | [] -> []
     | sg :: rest -> (
-        match check_sig sg argtyps with
+        match attempt (fun () -> check_sig sg argtyps) with
         | res -> [ Ok res ]
         | exception TypeError msg ->
             (* before go rest, which overwrites it *)
             let progress = !sig_progress in
             Error (progress, msg) :: go rest)
   in
-  let attempts = go overloads in
-  match List.rev attempts with
+  (* prefer an overload that needs no inferred preconditions *)
+  let attempts = without_inference (fun () -> go overloads) in
+  let inferred =
+    match List.rev attempts with
+    | Ok _ :: _ -> attempts
+    | _ when !inference <> None -> go overloads
+    | _ -> attempts
+  in
+  match List.rev inferred with
   | Ok res :: _ -> res
   | _ ->
       (* list the overloads that matched the most parameters *)
@@ -1124,12 +1389,14 @@ type term =
   | Call of string * term list
   | Shape of term list (* ints used as a shape, e.g. reshape(x, (n, d)) *)
   | Scalar (* a float, which broadcasts like a 0-d array *)
+  | Tup of term list (* a tuple, e.g. return a, b *)
 [@@deriving show]
 
 type stmt =
   | Let of string * term (* y = f(x) *)
   | LetAnnot of string * typ * term (* y: T = f(x), checking the value is a T *)
   | Return of term
+  | Unpack of string list * term (* a, b = f(x) *)
   | At of int * string * stmt (* a statement with its source line and text *)
 [@@deriving show]
 
@@ -1143,27 +1410,26 @@ let rec string_of_term = function
       f ^ "(" ^ String.concat ", " (List.map string_of_term args) ^ ")"
   | Shape ts -> "(" ^ String.concat ", " (List.map string_of_term ts) ^ ")"
   | Scalar -> "<float>"
+  | Tup ts -> "(" ^ String.concat ", " (List.map string_of_term ts) ^ ")"
 
 let rec string_of_stmt = function
   | Let (x, t) -> x ^ " = " ^ string_of_term t
   | LetAnnot (x, typ, t) ->
       x ^ ": " ^ string_of_typ typ ^ " = " ^ string_of_term t
   | Return t -> "return " ^ string_of_term t
+  | Unpack (xs, t) -> String.concat ", " xs ^ " = " ^ string_of_term t
   | At (_, text, _) -> text
 
 (* a dimension equal to an int used as a shape entry *)
 let dim_of_int (v : arg) : string =
-  let nonneg e =
-    Z3utils.prove (Z3.Arithmetic.mk_ge Z3utils.ctx e (mk_int_numeral 0))
+  let prove_or_infer_nonneg e =
+    prove_or_infer (Z3.Arithmetic.mk_ge Z3utils.ctx e (mk_int_numeral 0))
   in
   match v with
   | LiteralInt i when i >= 0 -> Z3utils.add_to_solver (mk_int_numeral i)
   | LiteralInt i ->
-      raise
-        (TypeError
-           ("shape entry " ^ string_of_int i
-          ^ " is negative (inferred sizes like -1 aren't supported)"))
-  | SymInt v when nonneg (Z3utils.mk_int v) ->
+      raise (TypeError ("shape entry " ^ string_of_int i ^ " is negative"))
+  | SymInt v when prove_or_infer_nonneg (Z3utils.mk_int v) ->
       Z3utils.add_to_solver (Z3utils.mk_int v)
   | SymInt v ->
       raise
@@ -1173,8 +1439,22 @@ let dim_of_int (v : arg) : string =
            ^ " may be negative"))
   (* like zeros of an opaque int: some size, unknown *)
   | Int -> Z3utils.fresh_dim ()
-  | Dimensions _ ->
+  | Dimensions _ | Tuple _ ->
       raise (TypeError ("expected an int in a shape, got " ^ string_of_arg v))
+
+(* the dims of ints used as a shape. one may be -1, which a callee's requires
+   determine (see check_sig) *)
+let dims_of_shape (vs : arg list) : string list =
+  if List.length (List.filter (( = ) (LiteralInt (-1))) vs) > 1 then
+    raise (TypeError "only one size in a shape can be -1");
+  List.map
+    (function
+      | LiteralInt -1 ->
+          let d = Z3utils.fresh_dim ~label:"-1" () in
+          pending_sizes := StringSet.add d !pending_sizes;
+          d
+      | v -> dim_of_int v)
+    vs
 
 (* a fresh int equal to e; unlike a dimension it may be negative *)
 let define_int ?(label = "") (e : Z3.Expr.expr) : string =
@@ -1206,7 +1486,8 @@ let rigid_entry
   | Broadcast a ->
       (* whatever broadcasts with a: nothing more is known about it *)
       ([ Z3utils.fresh_list ~label:(string_of_entry e) () ], mapping)
-  | Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ -> (
+  | Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _
+    -> (
       match expr_of_dim e mapping with
       | Ok v ->
           (* a caller's dimension equals v, so v is a natural number here *)
@@ -1247,12 +1528,29 @@ let rigid_param (mapping : mapping_type) ((name, typ) : string * typ) :
             ([], mapping) l
         in
         (Dimensions dims, mapping)
+    | TypeTuple _ -> raise (TypeError "tuple parameters aren't supported")
   in
   (arg, (var_mapping, spread_mapping, StringMap.add name arg param_mapping))
 
 (* match a value against a type whose names are bound by mapping; unbound
    names get bound, as for a signature's exists *)
-let match_typ (what : string) (typ : typ) (value : arg) (mapping : mapping_type)
+let rec match_typ (what : string) (typ : typ) (value : arg)
+    (mapping : mapping_type) : mapping_type =
+  match (typ, value) with
+  | TypeTuple ts, Tuple vs when List.length ts = List.length vs ->
+      snd
+        (List.fold_left2
+           (fun (i, mapping) t v ->
+             (i + 1, match_typ (Printf.sprintf "%s[%d]" what i) t v mapping))
+           (0, mapping) ts vs)
+  | TypeTuple ts, _ ->
+      raise
+        (TypeError
+           (Printf.sprintf "%s is %s, expected a tuple of %d" what
+              (string_of_arg value) (List.length ts)))
+  | _ -> match_one what typ value mapping
+
+and match_one (what : string) (typ : typ) (value : arg) (mapping : mapping_type)
     : mapping_type =
   best_failure := None;
   current_params := [| (what, typ, value) |];
@@ -1268,8 +1566,10 @@ let match_typ (what : string) (typ : typ) (value : arg) (mapping : mapping_type)
 (* check a function's body once, for every caller: the parameters' dimension
    and spread variables are rigid, so a body that checks is correct for every
    shape a caller could pass. callers are checked against the signature only.
-   env holds the functions the body may call *)
-let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
+   env holds the functions the body may call. with infer, the body may assume
+   sign facts about the parameters, and the result is the requires they add *)
+let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
+    constr list =
   let in_fn what f =
     try f () with
     | TypeError m -> raise (TypeError ("in " ^ fd.name ^ what ^ ": " ^ m))
@@ -1284,8 +1584,9 @@ let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
         | Some v -> v
         | None -> raise (TypeError ("unbound variable " ^ x)))
     | Lit i -> LiteralInt i
-    | Shape ts -> Dimensions (List.map (fun t -> dim_of_int (eval locals t)) ts)
+    | Shape ts -> Dimensions (dims_of_shape (List.map (eval locals) ts))
     | Scalar -> Dimensions []
+    | Tup ts -> Tuple (List.map (eval locals) ts)
     | Call (f, ts) -> (
         let args = List.map (eval locals) ts in
         try
@@ -1335,6 +1636,21 @@ let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
         | Let (x, t) ->
             let v = here (fun () -> eval locals t) in
             walk (StringMap.add x v locals) kinds mapping rest
+        | Unpack (xs, t) ->
+            let vs =
+              here (fun () ->
+                  match eval locals t with
+                  | Tuple vs when List.length vs = List.length xs -> vs
+                  | v ->
+                      raise
+                        (TypeError
+                           (Printf.sprintf "can't unpack %s into %d names"
+                              (string_of_arg v) (List.length xs))))
+            in
+            let locals =
+              List.fold_left2 (fun l x v -> StringMap.add x v l) locals xs vs
+            in
+            walk locals kinds mapping rest
         | LetAnnot (x, typ, t) ->
             let kinds =
               here (fun () ->
@@ -1346,7 +1662,9 @@ let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
                   | IntExpr e ->
                       check_arith_signature kinds e;
                       kinds
-                  | TypeInt | TypeLiteralInt _ -> kinds)
+                  | TypeInt | TypeLiteralInt _ -> kinds
+                  | TypeTuple _ ->
+                      raise (TypeError "tuple annotations aren't supported"))
             in
             let v = here (fun () -> eval locals t) in
             let mapping =
@@ -1362,7 +1680,7 @@ let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
                 let arg, mapping = rigid_param mapping p in
                 (args @ [ (fst p, arg) ], mapping))
               ([], (StringMap.empty, StringMap.empty, StringMap.empty))
-              fd.sg.params)
+              (ints_first fd.sg.params))
       in
       in_fn "" (fun () ->
           List.iter
@@ -1370,10 +1688,43 @@ let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
             fd.sg.requires;
           if Z3.Solver.check Z3utils.solver [] = Z3.Solver.UNSATISFIABLE then
             raise (TypeError "the requires clauses are contradictory"));
-      walk
-        (StringMap.of_seq (List.to_seq args))
-        (check_args_signature fd.sg.params)
-        mapping fd.body)
+      let var_mapping, _, _ = mapping in
+      let at_least k e = Z3.Arithmetic.mk_ge Z3utils.ctx e (mk_int_numeral k) in
+      let int_params =
+        List.filter_map
+          (function
+            | name, SymInt v
+              when List.assoc_opt name fd.sg.params = Some TypeInt ->
+                Some (name, Z3utils.mk_int v)
+            | _ -> None)
+          args
+      in
+      let facts k named =
+        List.map (fun (x, e) -> (at_least k e, Le (Int k, Id x))) named
+      in
+      let candidates =
+        facts 1 (StringMap.bindings var_mapping)
+        @ facts 1 int_params @ facts 0 int_params
+      in
+      let inf = { candidates; inferred = [] } in
+      if infer then inference := Some inf;
+      Fun.protect
+        ~finally:(fun () ->
+          inference := None;
+          pending_sizes := StringSet.empty)
+        (fun () ->
+          walk
+            (StringMap.of_seq (List.to_seq args))
+            (check_args_signature fd.sg.params)
+            mapping fd.body);
+      List.rev inf.inferred)
+
+let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
+  ignore (check_body ~infer:false env fd)
+
+(* the preconditions fd's body needs, beyond its requires *)
+let infer_requires (env : (string * callee) list) (fd : fundef) : constr list =
+  check_body ~infer:true env fd
 
 (* check functions in order; each may call the ones before it *)
 let check_program (env : (string * callee) list) (fds : fundef list) : unit =

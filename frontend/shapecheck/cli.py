@@ -28,6 +28,7 @@ class Report:
     notes: list[str]
     checked: int  # functions whose bodies went to the checker
     passed: list[str]  # functions whose bodies checked without errors
+    inferred: dict[str, list[str]]  # preconditions the checker added, e.g. n >= 0
 
 
 def checker_path(explicit: str | None = None) -> Path:
@@ -67,6 +68,12 @@ def check_file(path: Path, stubs: Stubs, checker: Path) -> Report:
             errors.append((int(m.group(2)), f"in {m.group(1)}, {m.group(3)}"))
         else:
             errors.append((lines.get(r["name"], 1), r["error"]))
+    inferred = {r["name"]: r["inferred"] for r in results if r.get("inferred")}
+    notes = [(n.line, n.message) for n in t.notes] + [
+        (lines.get(name, 1), f"{name} requires {', '.join(cs)} (inferred from its body)")
+        for name, cs in inferred.items()
+    ]
+    notes.sort(key=lambda n: n[0])
     checked = sum(f["body"] is not None for f in program["functions"])
     failed = {r["name"] for r in results if r["error"] is not None}
     passed = [
@@ -76,9 +83,10 @@ def check_file(path: Path, stubs: Stubs, checker: Path) -> Report:
     errors.sort(key=lambda e: e[0])
     return Report(
         errors=[f"{path}:{line}: {msg}" for line, msg in errors],
-        notes=[f"{path}:{n.line}: note: {n.message}" for n in t.notes],
+        notes=[f"{path}:{line}: note: {msg}" for line, msg in notes],
         checked=checked,
         passed=passed,
+        inferred=inferred,
     )
 
 

@@ -109,12 +109,13 @@ same work around one target, the Transformer, and adds what it needs (modules, i
 `transpose(i, j)`):
 
 1. **Asserts as assumptions.** `assert n >= 0` or `assert x.shape[0] == n` should inform the rest of the
-   body. Today `torch.zeros(n)` for `n: int` is rejected.
-2. **`x.shape[i]` and `x.size(i)`**, as ints equal to a dim. `x.shape` as a tuple would need tuples in the IR.
+   body. (`torch.zeros(n)` for `n: int` now infers `requires n >= 0`; see
+   [13-free-functions.md](13-free-functions.md).)
+2. **`x.shape[i]`**, as an int equal to a dim, like `x.size(i)` (done in 13-free-functions.md).
 3. **Control flow.** `if` needs a join of shapes (or both branches checked against the declared type), and
    loops need invariants.
 4. **Classes.** `nn.Module.forward`, with parameter shapes from annotations on `self` attributes.
-5. **Lists and tuples:** `torch.cat`, `torch.stack`, tuple returns.
+5. **Lists:** `torch.cat`, `torch.stack`. (Tuple returns and unpacking are done.)
 6. **Single broadcastable dims (`#b`)**, and an in-place `Broadcast` ("broadcasts *to* A") for `x += y`.
 7. **NumPy stubs**, and more of torch.
 

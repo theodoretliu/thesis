@@ -20,7 +20,9 @@ uvx --python 3.12 --with torch --with numpy --with jaxtyping --with beartype \
 - `test_progress` is a ratchet over `PASSING`. It fails if a function stops checking, or if one starts
   checking and isn't recorded.
 
-Today none check: the 9 classes are skipped, and each of the 4 free functions fails at its first gap.
+**Progress:** 3 of 24. Milestone 1 is done ([13-free-functions.md](13-free-functions.md)):
+`subsequent_mask`, `make_masks` and `loss` check. `attention` still fails on its `Optional` mask (G4), and
+the 9 classes are skipped.
 
 ## What's missing
 
@@ -58,7 +60,11 @@ Z3 already proves the nonlinear facts the model needs: `h * (d_model // h) = d_m
 |---|---|
 | G15 | `x.size(i)` (a `Dim`), `math.sqrt`/`math.log`, `torch.triu`, `masked_fill` (after G11), `&`, `torch.arange(start, end, step)`, `sin`/`cos`, `F.cross_entropy`, and classes for `nn.Linear`, `nn.Dropout`, `nn.LayerNorm`, `nn.Embedding`, `nn.ModuleList`. |
 
-## Decisions to make first
+## Decisions
+
+All four were decided as recommended (2026-09-24). Milestone 1 implemented 1 and 3. Checking `loss` extended
+3: torch can't infer a `-1` when the other sizes multiply to 0, so the checker also infers `d >= 1` for dims
+([13-free-functions.md](13-free-functions.md#inferred-preconditions)).
 
 1. **Int parameters in shapes (G3).** Recommendation: a dim named after an int parameter or constructor
    int is that int's value, as in stubs. Other names keep jaxtyping's meaning. At run time jaxtyping just
@@ -76,7 +82,7 @@ Callers only use signatures, so a method can check before the methods it calls d
 
 | Milestone | Gaps | Targets it unlocks |
 |---|---|---|
-| 1. Free functions | G3, G6, G8, G13, and G15's functional stubs | `subsequent_mask`, `make_masks`, `loss` |
+| 1. Free functions (done) | G3, G6, G8, G13, and G15's functional stubs | `subsequent_mask`, `make_masks`, `loss` |
 | 2. Modules | G1, G2, and G15's `nn` classes | `PositionwiseFeedForward`, `Embeddings`, `EncoderLayer.__init__`, `DecoderLayer.__init__`, `Transformer.encode`/`decode`/`forward` |
 | 3. Attention | G4, G7, G11, G12, G14 | `attention`, `MultiHeadedAttention`, and `EncoderLayer.forward`/`DecoderLayer.forward`, whose calls need its `Optional` and `#q` signature |
 | 4. Stacks and encodings | G5, G9, G10 | `Encoder`, `Decoder`, `PositionalEncoding`, `Transformer.__init__` |

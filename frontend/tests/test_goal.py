@@ -16,7 +16,7 @@ from shapecheck.translate import annotated, load_stubs
 GOAL = Path(__file__).resolve().parents[2] / "examples" / "goal" / "transformer.py"
 
 # the functions and methods that check today; add to it as gaps close
-PASSING: set[str] = set()
+PASSING = {"subsequent_mask", "make_masks", "loss"}
 
 
 def targets() -> list[str]:

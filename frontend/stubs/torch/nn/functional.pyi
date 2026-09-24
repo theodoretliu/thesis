@@ -40,6 +40,25 @@ def conv2d(
 ) -> Shaped[Tensor, "n o (h+2*padding-kh)//stride+1 (w+2*padding-kw)//stride+1"]:
     assert kh <= h + 2 * padding and kw <= w + 2 * padding
 
+# class indices as targets, reduced to a scalar. keyword-only, so an unstubbed
+# positional argument like weight is rejected
+@overload
+def cross_entropy(
+    input: Shaped[Tensor, "c"],
+    target: Shaped[Tensor, ""],
+    *,
+    ignore_index: int = -100,
+    label_smoothing: float = 0.0,
+) -> Shaped[Tensor, ""]: ...
+@overload
+def cross_entropy(
+    input: Shaped[Tensor, "n c *D"],
+    target: Shaped[Tensor, "n *D"],
+    *,
+    ignore_index: int = -100,
+    label_smoothing: float = 0.0,
+) -> Shaped[Tensor, ""]: ...
+
 # stride defaults to the kernel size
 def max_pool2d(input: Shaped[Tensor, "*B h w"], kernel_size: int) -> Shaped[Tensor, "*B h//kernel_size w//kernel_size"]: ...
 def avg_pool2d(input: Shaped[Tensor, "*B h w"], kernel_size: int) -> Shaped[Tensor, "*B h//kernel_size w//kernel_size"]: ...

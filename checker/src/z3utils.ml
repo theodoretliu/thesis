@@ -1,5 +1,15 @@
 let ctx = Z3.mk_context []
-let solver = Z3.Solver.mk_simple_solver ctx
+
+(* a query that times out is unknown, so it's not proved: slow nonlinear
+   goals fail instead of hanging *)
+let timeout_ms = 2000
+
+let solver =
+  let s = Z3.Solver.mk_simple_solver ctx in
+  let p = Z3.Params.mk_params ctx in
+  Z3.Params.add_int p (Z3.Symbol.mk_string ctx "timeout") timeout_ms;
+  Z3.Solver.set_parameters s p;
+  s
 
 let mk_string =
   let i = ref 0 in
@@ -146,12 +156,12 @@ let rec expand (l : string list) : string list =
     l
 
 (* run f with its own solver assertions and unfoldings, e.g. a function's
-   requires while checking its body *)
+   requires while checking its body. f may leave scopes of its own pushed *)
 let scoped (f : unit -> 'a) : 'a =
-  let saved = !unfoldings in
+  let saved = !unfoldings and level = Z3.Solver.get_num_scopes solver in
   Z3.Solver.push solver;
   Fun.protect
     ~finally:(fun () ->
-      Z3.Solver.pop solver 1;
+      Z3.Solver.pop solver (Z3.Solver.get_num_scopes solver - level);
       unfoldings := saved)
     f

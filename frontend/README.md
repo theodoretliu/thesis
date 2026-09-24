@@ -57,6 +57,7 @@ and the return type need annotations:
 | `Literal[3]`, `Literal[True]` | that int (bools are 0 and 1) |
 | `float` | a 0-d array: a float broadcasts like one |
 | `Tensor`, `np.ndarray` with no shape | a parameter of any shape (not allowed as a return type) |
+| `tuple[A, B]` (return types only) | a tuple of those types |
 
 Shape strings follow jaxtyping:
 
@@ -70,20 +71,36 @@ Shape strings follow jaxtyping:
 | `dim-1`, `2*dim`, `(n+1)//2` | arithmetic with `+ - * //` on names and ints |
 
 A name that only the return type mentions is existential. Shape names and Python parameter names are
-separate, as in jaxtyping. A parameter whose name clashes with a dim is renamed in the IR (`n` becomes
-`n'`).
+separate, as in jaxtyping, except for ints: a dim named after an int parameter is its value, so
+`def causal_mask(size: int) -> Bool[Tensor, "size size"]` returns a `[t, t]` mask for `causal_mask(t)`.
+Any other parameter whose name clashes with a dim is renamed in the IR (`n` becomes `n'`).
+
+**Inferred preconditions.** torch raises on sizes like `torch.ones(-1)`, so rather than reject a body that
+can't prove a size is valid, the checker infers what callers must pass. The candidates are an int
+parameter being `>= 0` or `>= 1`, and a dim being `>= 1`. Callers then have to prove these, or infer
+them in turn:
+
+```
+sizes.py:7: note: causal_mask requires size >= 0 (inferred from its body)
+```
+
+Only size obligations are inferred: an int used as a size, a returned dim, the other sizes of a `-1`
+(torch can't infer `-1` if they multiply to 0), and a callee's inferred requires. Relations, like a
+kernel fitting the image, must be proved. See [docs/13-free-functions.md](../docs/13-free-functions.md).
 
 Bodies must be straight-line code:
 
 - `y = expr` and `y: Float[Tensor, "..."] = expr`. The annotation is checked, and it can bind new names.
-- `return expr`.
+- `a, b = expr`, unpacking a tuple.
+- `return expr`, including `return a, b`.
 - `assert` and `pass` are skipped. Dropping a runtime check is sound.
-- Expressions: local variables, int/bool/float literals, calls, `+ - * / // ** @`, unary `-`,
-  comparisons, methods (`x.sum(-1)`), properties (`x.mT`), and tuples of ints as shapes
-  (`x.reshape((n, d))`).
+- Expressions: local variables, int/bool/float literals, calls, `+ - * / // ** @ & | ^`, unary `-` and
+  `~`, comparisons, methods (`x.sum(-1)`, `x.size(-1)`), properties (`x.mT`), tuples, and tuples of ints
+  as shapes (`x.reshape((n, d))`). One entry of a shape may be `-1` where the stub determines it, as in
+  `x.reshape(-1, d)`.
 
 Anything else gets an explicit error, and the rest of the file is still checked. That covers control flow,
-augmented assignment (`x += y`), indexing and `x.shape`, other tuples, lambdas, and module-level values.
+augmented assignment (`x += y`), indexing and `x.shape`, lambdas, and module-level values.
 
 Calls resolve through the file's imports (`import torch.nn.functional as F`, `from torch import
 relu`) to user functions, in any order and including recursion, or to stubs. Methods and properties
@@ -102,11 +119,14 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
 - A shape may name an int parameter: `def sum(self: Shaped[Tensor, "*A"], dim: int) -> Shaped[Tensor,
   "*drop(A,dim)"]`.
 - List functions: `*drop(A,i)`, `*keep(A,i)`, `*permute(A,i,j)`, `*setat(A,i,d)`, `*insertat(A,i,d)`,
-  `*broadcast(A,B)`. Inside arithmetic, `prod(A)` and `rank(A)`.
+  `*broadcast(A,B)`. Inside arithmetic, `prod(A)`, `rank(A)`, and `A[i]` (one dim, e.g.
+  `-> Dim["A[dim]"]` for `x.size(dim)`).
 - `Dim["expr"]` is an int equal to a dim expression, e.g. `-> Dim["rank(A)"]` for `x.dim()`.
 - `Shape["*S"]` is a tuple of ints used as a shape. As `*size: Shape["*S"]` it collects int arguments, so
-  `torch.zeros(n, d)` and `torch.zeros((n, d))` both work. A negative or possibly negative entry is an
-  error, so `-1` isn't inferred.
+  `torch.zeros(n, d)` and `torch.zeros((n, d))` both work. One entry may be `-1` if an equation the stub
+  asserts determines it, like reshape's `assert prod(A) == prod(B)`: the other sizes must have a positive
+  product that divides the total. Any other negative entry is an error, and a possibly negative one
+  needs an inferred precondition.
 - Asserts in the body are preconditions (`assert prod(A) == prod(B)`), or postconditions if they mention
   an existential (`assert m <= n` for `unique`).
 
@@ -121,17 +141,20 @@ constructor's name. `checker/bin/ir_json.ml` decodes it.
 ```
 entry  ["Id", n] ["Int", i] ["Add"|"Sub"|"Mul"|"Div", e, e] ["Spread", A] ["Broadcast", A]
        ["Broadcasted", [A, ...]] ["Drop"|"Keep"|"Permute", A, [idx]] ["SetAt", A, [idx], e]
-       ["InsertAt", A, idx, e] ["Prod", A] ["Rank", A]          idx is a name or an int
-typ    ["Array", [entry]] ["Int"] ["IntExpr", entry] ["Literal", i]
+       ["InsertAt", A, idx, e] ["Prod", A] ["Rank", A] ["Index", A, idx]
+                                                                 idx is a name or an int
+typ    ["Array", [entry]] ["Int"] ["IntExpr", entry] ["Literal", i] ["Tuple", [typ]]
 constr ["Eq"|"Le"|"Lt", entry, entry]
 sig    {"params": [[name, typ]], "ret": typ, "requires": [constr], "exists": [name], "ensures": [constr]}
-term   ["Var", x] ["Lit", i] ["Call", f, [term]] ["Shape", [term]] ["Scalar"]
-stmt   ["Let", x, term] ["LetAnnot", x, typ, term] ["Return", term] ["At", line, text, stmt]
+term   ["Var", x] ["Lit", i] ["Call", f, [term]] ["Shape", [term]] ["Scalar"] ["Tuple", [term]]
+stmt   ["Let", x, term] ["LetAnnot", x, typ, term] ["Unpack", [x], term] ["Return", term]
+       ["At", line, text, stmt]
 
 program {"env": [{"name": f, "overloads": [sig]}],
          "functions": [{"name": f, "sig": sig, "body": [stmt] | null}]}
 ```
 
 A function whose body couldn't be translated has `"body": null`, so callers still use its signature. The
-checker prints `{"results": [{"name": f, "error": null | message}]}` and exits 0 if everything checks, 1 if
-something doesn't, and 2 for invalid IR.
+checker prints `{"results": [{"name": f, "error": null | message, "inferred": ["n >= 0", ...]}]}` and
+exits 0 if everything checks, 1 if something doesn't, and 2 for invalid IR. `inferred` lists the
+preconditions added to `f`'s signature.
