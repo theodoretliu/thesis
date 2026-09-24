@@ -43,4 +43,6 @@ accepted. This is the "refuse to compose `Any`" behavior. A frontend can offer i
 - No list *equations*. The checker won't learn `B = [*B', m]` from a successful match, so `[*B, d]` never
   satisfies a signature that needs an explicit dim inside `B`, such as batched matmul's `m`. Solving that
   needs list unification (associative, with Presburger length constraints), which is a bigger design step.
-- A list var broadcasting against dims of 1 is rejected even though `1`s always broadcast.
+  Step 8 handles the batched matmul case under `requires rank(B) ≥ 1` by unfolding `B`
+  ([10-function-bodies.md](10-function-bodies.md)).
+- A list var broadcasting against dims of 1 is rejected even though `1`s always broadcast. (Fixed in step 8.)

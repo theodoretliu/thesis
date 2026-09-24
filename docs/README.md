@@ -16,8 +16,9 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 | 5 | `Prod`/`Rank` (reshape, flatten), refinements, existentials | done | [06-refinements.md](06-refinements.md) |
 | 6 | Readable diagnostics | done | [07-diagnostics.md](07-diagnostics.md) |
 | 7 | Symbolic variadic arguments (function bodies, `Any`) | done | [08-symbolic-variadics.md](08-symbolic-variadics.md) |
+| 8 | Checking whole function bodies, rank-guided unfolding | done | [10-function-bodies.md](10-function-bodies.md) |
 
-## Scorecard after steps 0–7
+## Scorecard after steps 0–8
 
 | Gap | `main` | Now |
 |---|---|---|
@@ -29,8 +30,12 @@ adds tests to `checker/test/test_gaps.ml` and has a progress note here.
 | Axis/flag args | literal axes | determined symbolic axes, `Literal` flags, overloads, `keepdim` |
 | `Any` leaks | args needed a known number of dims | list variables; `Any = [*fresh]` is used soundly or rejected |
 | Unreadable diagnostics | "Could not type check" | parameter, signature, shape, and the specific expectation |
+| Function bodies | not checked | checked once for every caller (rigid variadics, `requires`/`ensures`) |
 
-Not attempted: the body checker, list unification, dtypes, a frontend (jaxtyping strings + Python AST), and
+Step 8 adds the body checker (`check_fundef`) and closes the smaller variadic gaps (unfolding, the
+empty-list axiom, 1s broadcasting against list variables).
+
+Not attempted: general list unification, control flow in bodies, dtypes, a frontend (jaxtyping strings + Python AST), and
 source-level names in messages. [09-future-work.md](09-future-work.md) lists all remaining work in order,
 including the design for checking the bodies of variadic functions.
 

@@ -90,13 +90,26 @@ let rec string_of_entry (e : entry) : string =
 let string_of_expr (e : Z3.Expr.expr) : string =
   match Z3utils.determined_int e with
   | Some i -> string_of_int i
-  | None -> Z3.Expr.to_string e
+  | None -> (
+      match
+        if Z3.Expr.is_const e then
+          Hashtbl.find_opt Z3utils.dim_labels (Z3.Expr.to_string e)
+        else None
+      with
+      | Some label -> label
+      | None -> Z3.Expr.to_string e)
 
 let string_of_dim (v : string) : string =
   if Z3utils.is_list_var v then "*" ^ Z3utils.list_label v
   else string_of_expr (Z3utils.mk_int v)
 
-let string_of_dims l = "[" ^ String.concat ", " (List.map string_of_dim l) ^ "]"
+(* "name = value", or just the name when the value is only its label *)
+let with_value (name : string) (e : Z3.Expr.expr) : string =
+  let v = string_of_expr e in
+  if v = name then name else name ^ " = " ^ v
+
+let string_of_dims l =
+  "[" ^ String.concat ", " (List.map string_of_dim (Z3utils.expand l)) ^ "]"
 
 let string_of_typ = function
   | Nparray l ->
@@ -358,13 +371,16 @@ let rec expr_of_dim (s : entry)
         if Z3utils.is_list_var x then Z3utils.prod_of_list x
         else Z3utils.mk_int x
       in
-      match List.map factor (StringMap.find a spread_mapping) with
+      match
+        List.map factor (Z3utils.expand (StringMap.find a spread_mapping))
+      with
       | [] -> Ok (mk_int_numeral 1)
       | [ d ] -> Ok d
       | ds -> Ok (Z3.Arithmetic.mk_mul Z3utils.ctx ds))
   | Rank a ->
       let lists, dims =
-        List.partition Z3utils.is_list_var (StringMap.find a spread_mapping)
+        List.partition Z3utils.is_list_var
+          (Z3utils.expand (StringMap.find a spread_mapping))
       in
       if lists = [] then Ok (mk_int_numeral (List.length dims))
       else
@@ -392,17 +408,41 @@ let get_concrete_indices (indices : (string, int) either list)
       | Right asdf -> asdf)
     indices
 
+let all_ones (l : string list) =
+  List.for_all
+    (fun x ->
+      (not (Z3utils.is_list_var x))
+      && Z3utils.prove_int_eq (Z3utils.mk_int x) (mk_int_numeral 1))
+    l
+
+(* the number of dims in l, as a solver term *)
+let length_expr (l : string list) : Z3.Expr.expr =
+  let lists, dims = List.partition Z3utils.is_list_var l in
+  Z3.Arithmetic.mk_add Z3utils.ctx
+    (mk_int_numeral (List.length dims) :: List.map Z3utils.rank_of_list lists)
+
 (* right-aligned numpy broadcasting of two dimension lists. each aligned pair
    must provably be equal or have a 1; the result is ite(x = 1, y, x) *)
 let broadcast_pair (a : string list) (b : string list) : string list option =
   let one = mk_int_numeral 1 in
   let rec go ra rb acc =
+    (* the rest of long broadcasts against 1s and is unchanged, if long
+       provably has at least as many dims *)
+    let absorbs long ones =
+      all_ones ones
+      && Z3utils.prove
+           (Z3.Arithmetic.mk_ge Z3utils.ctx (length_expr long)
+              (mk_int_numeral (List.length ones)))
+    in
     match (ra, rb) with
     | [], rest | rest, [] -> Some (List.rev_append rest acc)
-    (* a list variable only broadcasts with itself: anything else would
-       depend on its unknown length *)
+    (* otherwise a list variable only broadcasts with itself: anything else
+       would depend on its unknown length *)
     | x :: ra', y :: rb' when Z3utils.is_list_var x || Z3utils.is_list_var y ->
-        if x = y then go ra' rb' (x :: acc) else None
+        if x = y then go ra' rb' (x :: acc)
+        else if absorbs ra rb then Some (List.rev_append ra acc)
+        else if absorbs rb ra then Some (List.rev_append rb acc)
+        else None
     | x :: ra', y :: rb' ->
         let ex, ey = (Z3utils.mk_int x, Z3utils.mk_int y) in
         let eq = Z3.Boolean.mk_eq Z3utils.ctx in
@@ -452,7 +492,7 @@ let resolve_indices (items : string list) (indices : int list) : int list option
 let derived_dims (e : entry)
     ((_, spread_mapping, param_mapping) as mapping : mapping_type) :
     string list option =
-  let spread v = StringMap.find v spread_mapping in
+  let spread v = Z3utils.expand (StringMap.find v spread_mapping) in
   (* a new dimension variable for an arithmetic entry, if provably natural *)
   let new_dim d =
     match expr_of_dim d mapping with
@@ -498,6 +538,7 @@ let derived_dims (e : entry)
 (* if s2 starts with dimensions provably equal to l, return the rest *)
 let strip_equal_prefix (l : string list) (s2 : string list) : string list option
     =
+  let l = Z3utils.expand l and s2 = Z3utils.expand s2 in
   if List.length l > List.length s2 then None
   else
     let front, back = Utils.take_n s2 (List.length l) in
@@ -517,7 +558,9 @@ let strip_equal_prefix (l : string list) (s2 : string list) : string list option
 type failure = { param_index : int; message : unit -> string }
 
 let best_failure : failure option ref = ref None
-let current_params : ((string * typ) * arg) array ref = ref [||]
+
+(* what is being matched, e.g. "parameter X", with its type and argument *)
+let current_params : (string * typ * arg) array ref = ref [||]
 
 let fail (restfunargstyps : (string * typ) list) (message : unit -> string) :
     'a option =
@@ -525,15 +568,15 @@ let fail (restfunargstyps : (string * typ) list) (message : unit -> string) :
   (match !best_failure with
   | Some best when best.param_index >= index -> ()
   | _ ->
-      let (name, typ), arg = !current_params.(index) in
+      let what, typ, arg = !current_params.(index) in
       best_failure :=
         Some
           {
             param_index = index;
             message =
               (fun () ->
-                "parameter " ^ name ^ " (" ^ string_of_typ typ ^ ", given "
-                ^ string_of_arg arg ^ "): " ^ message ());
+                what ^ " (" ^ string_of_typ typ ^ ", given " ^ string_of_arg arg
+                ^ "): " ^ message ());
           });
   None
 
@@ -564,6 +607,17 @@ let explain_spreads (e : entry) ((_, spread_mapping, _) : mapping_type) : string
          | Some l -> string_of_dims l
          | None -> "?")
        names)
+
+(* unfold a list variable for the rest of the match, undoing it if that fails *)
+let with_unfolding ~(right : bool) (x : string) (k : unit -> 'a option) :
+    'a option =
+  let saved = !Z3utils.unfoldings in
+  Z3utils.unfold ~right x;
+  match k () with
+  | Some r -> Some r
+  | None ->
+      Z3utils.unfoldings := saved;
+      None
 
 let rec check_app' (funargtyps : (string * typ) list) (argtyps : arg list)
     (mappings : mapping_type) : mapping_type option =
@@ -606,24 +660,39 @@ and check_and_update_mapping (curr_typ : typ) (l2 : arg)
           check_app' restfunargstyps restargtyps mapping
       | Ok expected ->
           fail restfunargstyps (fun () ->
-              "expected an int equal to " ^ string_of_entry e ^ " = "
-              ^ string_of_expr expected ^ ", got " ^ string_of_expr value)
+              "expected an int equal to "
+              ^ with_value (string_of_entry e) expected
+              ^ ", got " ^ string_of_expr value)
       | Error err -> fail restfunargstyps (fun () -> show_dim_error err)
       end
   (* the type is nparray and list of dimensions was provided *)
   | Nparray l1, Dimensions l2 ->
-      begin match (l1, l2) with
-      | [], [] -> check_app' restfunargstyps restargtyps mapping
-      | [], extra ->
-          fail restfunargstyps (fun () ->
-              Printf.sprintf
-                "%d more dimension(s) than the signature allows: %s"
-                (List.length extra) (string_of_dims extra))
-      (* even with no dimensions left, h may be a spread that captures [] *)
-      | h :: t, args ->
-          check_and_update_individual_mapping h args mapping restfunargstyps
-            restargtyps t
-      end
+      let attempt l2 =
+        match (l1, l2) with
+        | [], [] -> check_app' restfunargstyps restargtyps mapping
+        | [], extra ->
+            fail restfunargstyps (fun () ->
+                Printf.sprintf
+                  "%d more dimension(s) than the signature allows: %s"
+                  (List.length extra) (string_of_dims extra))
+        (* even with no dimensions left, h may be a spread that captures [] *)
+        | h :: t, args ->
+            check_and_update_individual_mapping h args mapping restfunargstyps
+              restargtyps t
+      in
+      (* if nothing matches, a list variable provably nonempty may be split
+         into [*B', b] to expose its last dim, e.g. for batched matmul *)
+      let rec with_unfoldings l2 =
+        let l2 = Z3utils.expand l2 in
+        match attempt l2 with
+        | Some m -> Some m
+        | None ->
+            List.find_map
+              (fun x ->
+                with_unfolding ~right:true x (fun () -> with_unfoldings l2))
+              (List.filter Z3utils.can_unfold l2)
+      in
+      with_unfoldings l2
   (* no other pairing is well-typed *)
   | _, _ -> mismatch ()
 
@@ -647,10 +716,22 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
   match s1 with
   | (Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _)
     when match s2 with h :: _ -> Z3utils.is_list_var h | [] -> false ->
-      fail_here (fun () ->
-          "can't match " ^ string_of_entry s1 ^ " against "
-          ^ string_of_dim (List.hd s2)
-          ^ ", which has an unknown number of dimensions")
+      let h = List.hd s2 in
+      let unknown () =
+        fail_here (fun () ->
+            "can't match " ^ string_of_entry s1 ^ " against " ^ string_of_dim h
+            ^ ", which has an unknown number of dimensions")
+      in
+      (* a provably nonempty list variable can give up its first dim *)
+      if Z3utils.can_unfold h then
+        match
+          with_unfolding ~right:false h (fun () ->
+              check_and_update_individual_mapping s1 (Z3utils.expand s2) mapping
+                restfunargstyps restargtyps restentries)
+        with
+        | Some m -> Some m
+        | None -> unknown ()
+      else unknown ()
   | Id x
     when (not (StringMap.mem x var_mapping)) && StringMap.mem x param_mapping ->
       (* x names an integer parameter: the dimension must equal its value *)
@@ -658,8 +739,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       | [], _ -> too_few ()
       | h :: t, Some v when Z3utils.prove_int_eq v (Z3utils.mk_int h) ->
           continue_with t mapping
-      | h :: _, Some v ->
-          expected_got (fun () -> x ^ " = " ^ string_of_expr v) h
+      | h :: _, Some v -> expected_got (fun () -> with_value x v) h
       | h :: _, None ->
           expected_got (fun () -> x ^ " (an int of unknown value)") h
       end
@@ -679,7 +759,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
               (* if we mapped variable already, then try to prove it's equal to what's already stored *)
               if Z3utils.prove_int_eq exp (Z3utils.mk_int h) then
                 continue_with t mapping
-              else expected_got (fun () -> x ^ " = " ^ string_of_expr exp) h
+              else expected_got (fun () -> with_value x exp) h
           end
       end
   | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ ->
@@ -691,9 +771,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
           | Ok expr_e when Z3utils.prove_int_eq expr_e (Z3utils.mk_int h) ->
               continue_with t mapping
           | Ok expr_e ->
-              expected_got
-                (fun () -> string_of_entry s1 ^ " = " ^ string_of_expr expr_e)
-                h
+              expected_got (fun () -> with_value (string_of_entry s1) expr_e) h
           | Error err -> fail_here (fun () -> show_dim_error err))
       end
   | Spread v ->
@@ -764,7 +842,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
             else expected_got (fun () -> string_of_int i) h
       end
   | Broadcast s ->
-      let arr = StringMap.find s spread_mapping in
+      let arr = Z3utils.expand (StringMap.find s spread_mapping) in
       let rev_arr = List.rev arr in
 
       let splits = Utils.all_splits s2 in
@@ -774,7 +852,8 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
         | [], _ | _, [] -> true
         | h1 :: t1, h2 :: t2
           when Z3utils.is_list_var h1 || Z3utils.is_list_var h2 ->
-            h1 = h2 && prove_broadcast t1 t2
+            (* 1s broadcast with whatever a list variable turns out to be *)
+            (h1 = h2 && prove_broadcast t1 t2) || all_ones l1 || all_ones l2
         | h1 :: t1, h2 :: t2 ->
             (prove_int_eq (mk_int h1) (mk_int h2)
             || prove_int_eq (mk_int h1) (mk_int_numeral 1)
@@ -834,8 +913,9 @@ let check_ret_type_with_mapping (rettyp : typ)
                       then
                         raise
                           (TypeError
-                             ("Returned dimension " ^ string_of_entry h ^ " = "
-                            ^ string_of_expr e ^ " may be negative"));
+                             ("Returned dimension "
+                             ^ with_value (string_of_entry h) e
+                             ^ " may be negative"));
                       Z3utils.add_to_solver e
                   (* an integer parameter of unknown value yields a fresh,
                      unconstrained dimension *)
@@ -844,7 +924,7 @@ let check_ret_type_with_mapping (rettyp : typ)
                 in
                 bound_name :: check_ret_type_with_mapping' t
             | Spread v ->
-                let args = StringMap.find v spread_mapping in
+                let args = Z3utils.expand (StringMap.find v spread_mapping) in
                 args @ check_ret_type_with_mapping' t
             | Drop _ | Keep _ | Broadcasted _ | Permute _ | SetAt _ | InsertAt _
               ->
@@ -881,11 +961,9 @@ let constr_expr (c : constr) (mapping : mapping_type) :
 
 let string_of_constr (c : constr) (mapping : mapping_type) : string =
   let side e =
-    string_of_entry e
-    ^
     match expr_of_dim e mapping with
-    | Ok v -> " = " ^ string_of_expr v
-    | Error _ -> ""
+    | Ok v -> with_value (string_of_entry e) v
+    | Error _ -> string_of_entry e
   in
   let op, e1, e2 =
     match c with
@@ -917,7 +995,11 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
       argtyps;
 
     best_failure := None;
-    current_params := Array.of_list (List.combine sg.params argtyps);
+    current_params :=
+      Array.of_list
+        (List.map2
+           (fun (name, typ) arg -> ("parameter " ^ name, typ, arg))
+           sg.params argtyps);
     let final_mapping =
       check_app' sg.params argtyps
         (StringMap.empty, StringMap.empty, param_mapping)
@@ -989,3 +1071,229 @@ let check_overloads (overloads : funtyp list) (argtyps : arg list) : arg =
 (* an array whose shape is entirely unknown, e.g. the result of an unannotated
    library call (Any): a single list variable *)
 let unknown_shape () : arg = Dimensions [ Z3utils.fresh_list ~label:"?" () ]
+
+(* ---- function bodies ---- *)
+
+(* a straight-line function body. values are arrays and ints, so a body is a
+   sequence of calls to functions whose signatures are known *)
+type term = Var of string | Lit of int | Call of string * term list
+[@@deriving show]
+
+type stmt =
+  | Let of string * term (* y = f(x) *)
+  | LetAnnot of string * typ * term (* y: T = f(x), checking the value is a T *)
+  | Return of term
+[@@deriving show]
+
+type callee = Sig of signature | Overloads of funtyp list
+type fundef = { name : string; sg : signature; body : stmt list }
+
+let rec string_of_term = function
+  | Var x -> x
+  | Lit i -> string_of_int i
+  | Call (f, args) ->
+      f ^ "(" ^ String.concat ", " (List.map string_of_term args) ^ ")"
+
+let string_of_stmt = function
+  | Let (x, t) -> x ^ " = " ^ string_of_term t
+  | LetAnnot (x, typ, t) ->
+      x ^ ": " ^ string_of_typ typ ^ " = " ^ string_of_term t
+  | Return t -> "return " ^ string_of_term t
+
+(* a fresh int equal to e; unlike a dimension it may be negative *)
+let define_int ?(label = "") (e : Z3.Expr.expr) : string =
+  let name = Z3utils.mk_string () in
+  Z3.Solver.add Z3utils.solver
+    [ Z3.Boolean.mk_eq Z3utils.ctx (Z3utils.mk_int name) e ];
+  if label <> "" then Hashtbl.replace Z3utils.dim_labels name label;
+  name
+
+(* the dims an entry of a parameter's shape stands for inside the function's
+   body. its dimension and spread variables become rigid: unknowns that stand
+   for whatever a caller passes, and that only ever equal themselves *)
+let rigid_entry
+    ((var_mapping, spread_mapping, param_mapping) as mapping : mapping_type)
+    (e : entry) : string list * mapping_type =
+  match e with
+  | Id x
+    when (not (StringMap.mem x var_mapping))
+         && not (StringMap.mem x param_mapping) ->
+      let d = Z3utils.fresh_dim ~label:x () in
+      ( [ d ],
+        ( StringMap.add x (Z3utils.mk_int d) var_mapping,
+          spread_mapping,
+          param_mapping ) )
+  | Spread a when not (StringMap.mem a spread_mapping) ->
+      let l = Z3utils.fresh_list ~label:a () in
+      ([ l ], (var_mapping, StringMap.add a [ l ] spread_mapping, param_mapping))
+  | Spread a -> (Z3utils.expand (StringMap.find a spread_mapping), mapping)
+  | Broadcast a ->
+      (* whatever broadcasts with a: nothing more is known about it *)
+      ([ Z3utils.fresh_list ~label:(string_of_entry e) () ], mapping)
+  | Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ -> (
+      match expr_of_dim e mapping with
+      | Ok v ->
+          (* a caller's dimension equals v, so v is a natural number here *)
+          let d = Z3utils.add_to_solver v in
+          Hashtbl.replace Z3utils.dim_labels d (string_of_entry e);
+          ([ d ], mapping)
+      | Error err -> raise (TypeError (show_dim_error err)))
+  | Drop _ | Keep _ | Broadcasted _ | Permute _ | SetAt _ | InsertAt _ -> (
+      match derived_dims e mapping with
+      | Some l -> (l, mapping)
+      | None ->
+          raise
+            (TypeError
+               ("Cannot compute " ^ string_of_entry e ^ " for "
+              ^ explain_spreads e mapping)))
+
+(* a parameter's value inside the body; later parameters and the return type
+   may refer to its name *)
+let rigid_param (mapping : mapping_type) ((name, typ) : string * typ) :
+    arg * mapping_type =
+  let arg, (var_mapping, spread_mapping, param_mapping) =
+    match typ with
+    | TypeInt ->
+        let v = Z3utils.mk_string () in
+        Hashtbl.replace Z3utils.dim_labels v name;
+        (SymInt v, mapping)
+    | TypeLiteralInt i -> (LiteralInt i, mapping)
+    | IntExpr e -> (
+        match expr_of_dim e mapping with
+        | Ok v -> (SymInt (define_int ~label:name v), mapping)
+        | Error err -> raise (TypeError (show_dim_error err)))
+    | Nparray l ->
+        let dims, mapping =
+          List.fold_left
+            (fun (dims, mapping) e ->
+              let d, mapping = rigid_entry mapping e in
+              (dims @ d, mapping))
+            ([], mapping) l
+        in
+        (Dimensions dims, mapping)
+  in
+  (arg, (var_mapping, spread_mapping, StringMap.add name arg param_mapping))
+
+(* match a value against a type whose names are bound by mapping; unbound
+   names get bound, as for a signature's exists *)
+let match_typ (what : string) (typ : typ) (value : arg) (mapping : mapping_type)
+    : mapping_type =
+  best_failure := None;
+  current_params := [| (what, typ, value) |];
+  match check_and_update_mapping typ value mapping [] [] with
+  | Some mapping -> mapping
+  | None ->
+      raise
+        (TypeError
+           (match !best_failure with
+           | Some f -> f.message ()
+           | None -> what ^ " is not a " ^ string_of_typ typ))
+
+(* check a function's body once, for every caller: the parameters' dimension
+   and spread variables are rigid, so a body that checks is correct for every
+   shape a caller could pass. callers are checked against the signature only.
+   env holds the functions the body may call *)
+let check_fundef (env : (string * callee) list) (fd : fundef) : unit =
+  let in_fn what f =
+    try f () with
+    | TypeError m -> raise (TypeError ("in " ^ fd.name ^ what ^ ": " ^ m))
+    | KindError m -> raise (KindError ("in " ^ fd.name ^ what ^ ": " ^ m))
+  in
+  in_fn "" (fun () -> check_signature fd.sg);
+  (* the body may call the function itself *)
+  let env = (fd.name, Sig fd.sg) :: env in
+  let rec eval locals = function
+    | Var x -> (
+        match StringMap.find_opt x locals with
+        | Some v -> v
+        | None -> raise (TypeError ("unbound variable " ^ x)))
+    | Lit i -> LiteralInt i
+    | Call (f, ts) -> (
+        let args = List.map (eval locals) ts in
+        try
+          match List.assoc_opt f env with
+          | Some (Sig sg) -> check_sig sg args
+          | Some (Overloads fs) -> check_overloads fs args
+          | None -> raise (TypeError "unknown function")
+        with TypeError m -> raise (TypeError (f ^ ": " ^ m)))
+  in
+  let constr_value mapping c =
+    match constr_expr c mapping with
+    | Ok e -> e
+    | Error (Unknown_param x) when List.mem x fd.sg.exists ->
+        raise (TypeError ("the return value doesn't determine " ^ x))
+    | Error err -> raise (TypeError (show_dim_error err))
+  in
+  (* kinds: the names annotations may use; mapping: their values *)
+  let rec walk locals kinds mapping = function
+    | [] -> in_fn "" (fun () -> raise (TypeError "missing return"))
+    | stmt :: rest -> (
+        let here f = in_fn (", `" ^ string_of_stmt stmt ^ "`") f in
+        match stmt with
+        | Return t ->
+            if rest <> [] then
+              here (fun () -> raise (TypeError "statements after return"));
+            let mapping =
+              here (fun () ->
+                  match_typ "return value" fd.sg.ret (eval locals t) mapping)
+            in
+            List.iter
+              (fun c ->
+                here (fun () ->
+                    if not (Z3utils.prove (constr_value mapping c)) then
+                      raise
+                        (TypeError
+                           ("Postcondition not provable: "
+                          ^ string_of_constr c mapping))))
+              fd.sg.ensures
+        | Let (x, t) ->
+            let v = here (fun () -> eval locals t) in
+            walk (StringMap.add x v locals) kinds mapping rest
+        | LetAnnot (x, typ, t) ->
+            let kinds =
+              here (fun () ->
+                  match typ with
+                  | Nparray l ->
+                      List.fold_left
+                        (fun acc e -> check_entry_signature acc e true)
+                        kinds l
+                  | IntExpr e ->
+                      check_arith_signature kinds e;
+                      kinds
+                  | TypeInt | TypeLiteralInt _ -> kinds)
+            in
+            let v = here (fun () -> eval locals t) in
+            let mapping =
+              here (fun () -> match_typ ("annotation of " ^ x) typ v mapping)
+            in
+            walk (StringMap.add x v locals) kinds mapping rest)
+  in
+  Z3utils.scoped (fun () ->
+      let args, mapping =
+        in_fn "" (fun () ->
+            List.fold_left
+              (fun (args, mapping) p ->
+                let arg, mapping = rigid_param mapping p in
+                (args @ [ (fst p, arg) ], mapping))
+              ([], (StringMap.empty, StringMap.empty, StringMap.empty))
+              fd.sg.params)
+      in
+      in_fn "" (fun () ->
+          List.iter
+            (fun c -> Z3.Solver.add Z3utils.solver [ constr_value mapping c ])
+            fd.sg.requires;
+          if Z3.Solver.check Z3utils.solver [] = Z3.Solver.UNSATISFIABLE then
+            raise (TypeError "the requires clauses are contradictory"));
+      walk
+        (StringMap.of_seq (List.to_seq args))
+        (check_args_signature fd.sg.params)
+        mapping fd.body)
+
+(* check functions in order; each may call the ones before it *)
+let check_program (env : (string * callee) list) (fds : fundef list) : unit =
+  ignore
+    (List.fold_left
+       (fun env fd ->
+         check_fundef env fd;
+         (fd.name, Sig fd.sg) :: env)
+       env fds)
