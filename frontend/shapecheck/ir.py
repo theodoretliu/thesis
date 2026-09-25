@@ -76,6 +76,11 @@ def TupleType(typs: list[Json]) -> Json:
     return ["Tuple", typs]
 
 
+def NoneType() -> Json:
+    """None, the empty tuple: what __init__ returns."""
+    return ["Tuple", []]
+
+
 def signature(
     params: list[Json],
     ret: Json,

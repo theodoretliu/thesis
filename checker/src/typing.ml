@@ -43,13 +43,18 @@ type constr = Eq of entry * entry | Le of entry * entry | Lt of entry * entry
 (* a function type with refinements:
    - requires: must be provable from the arguments (preconditions)
    - exists: fresh dimensions the result may use (data-dependent shapes)
-   - ensures: assumed about the exists dims afterwards (postconditions) *)
+   - ensures: assumed about the exists dims afterwards (postconditions)
+   - invariant: holds for the int arguments whenever the function can be
+     called, so the body and its callers both assume it. a method's int
+     parameters are its instance's constructor ints, and its invariant is
+     the constructor's requires: every instance was built satisfying them *)
 type signature = {
   params : (string * typ) list;
   ret : typ;
   requires : constr list;
   exists : string list;
   ensures : constr list;
+  invariant : constr list;
 }
 
 type arg =
@@ -135,6 +140,7 @@ let rec string_of_typ = function
   | TypeInt -> "int"
   | TypeLiteralInt i -> "Literal[" ^ string_of_int i ^ "]"
   | IntExpr e -> "int{" ^ string_of_entry e ^ "}"
+  | TypeTuple [] -> "None"
   | TypeTuple ts ->
       "tuple[" ^ String.concat ", " (List.map string_of_typ ts) ^ "]"
 
@@ -143,6 +149,7 @@ let rec string_of_arg = function
   | LiteralInt i -> "Literal[" ^ string_of_int i ^ "]"
   | Int -> "int"
   | SymInt v -> "int " ^ string_of_dim v
+  | Tuple [] -> "None"
   | Tuple l -> "tuple (" ^ String.concat ", " (List.map string_of_arg l) ^ ")"
 
 module StringMap = Map.Make (struct
@@ -335,6 +342,7 @@ let check_signature (sg : signature) : unit =
     check_args_signature sg.params
   in
   List.iter (check_constr_signature ctx) sg.requires;
+  List.iter (check_constr_signature ctx) sg.invariant;
 
   (* exists dims behave like dimension variables bound by the parameters *)
   let vars =
@@ -839,6 +847,29 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       | None ->
           (* haven't mapped this spread variable yet *)
           let split_rem = Utils.all_splits s2 in
+          (* when single dims follow and the argument has no list variables,
+             only one split can match, so try it first: a mismatch is then
+             reported where it is, not after giving the spread no dims *)
+          let single = function
+            | Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _
+            | Index _ ->
+                true
+            | _ -> false
+          in
+          let split_rem =
+            if
+              List.for_all single restentries
+              && not (List.exists Z3utils.is_list_var s2)
+            then
+              let n = List.length s2 - List.length restentries in
+              let fits, others =
+                List.partition
+                  (fun (front, _) -> List.length front = n)
+                  split_rem
+              in
+              fits @ others
+            else split_rem
+          in
 
           let rec try_splits (splits : (string list * string list) list) =
             begin match splits with
@@ -1205,6 +1236,17 @@ let string_of_constr (c : constr) (mapping : mapping_type) : string =
   in
   side e1 ^ " " ^ op ^ " " ^ side e2
 
+(* assume a signature's invariant about its int arguments. a fact the solver
+   can't state here, like a quotient whose divisor isn't known to be positive,
+   is dropped, which only assumes less *)
+let assume_invariant (sg : signature) (mapping : mapping_type) : unit =
+  List.iter
+    (fun c ->
+      match constr_expr c mapping with
+      | Ok e -> Z3.Solver.add Z3utils.solver [ e ]
+      | Error _ -> ())
+    sg.invariant
+
 (* how far the last check_sig got: the index of the parameter that failed, the
    number of parameters if they all matched, or -1 for the wrong arity *)
 let sig_progress = ref 0
@@ -1252,6 +1294,8 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
              | None -> "Could not type check"))
     | Some mapping ->
         sig_progress := List.length sg.params;
+        (* the arguments come from an instance, which satisfies it *)
+        assume_invariant sg mapping;
         (* a -1 in an argument's shape is determined by an equation the
            callee requires, e.g. reshape's prod(A) = prod(B) *)
         let pending =
@@ -1320,7 +1364,7 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
         check_ret_type_with_mapping sg.ret mapping
 
 let sig_of_funtyp ((params, ret) : funtyp) : signature =
-  { params; ret; requires = []; exists = []; ensures = [] }
+  { params; ret; requires = []; exists = []; ensures = []; invariant = [] }
 
 let check_app (f : funtyp) (argtyps : arg list) : arg =
   check_sig (sig_of_funtyp f) argtyps
@@ -1683,6 +1727,7 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
               (ints_first fd.sg.params))
       in
       in_fn "" (fun () ->
+          assume_invariant fd.sg mapping;
           List.iter
             (fun c -> Z3.Solver.add Z3utils.solver [ constr_value mapping c ])
             fd.sg.requires;

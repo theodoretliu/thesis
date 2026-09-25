@@ -37,8 +37,9 @@ failing spec.
 | 7 | Symbolic variadic arguments (function bodies, `Any`) | done | [08-symbolic-variadics.md](08-symbolic-variadics.md) |
 | 8 | Checking whole function bodies, rank-guided unfolding | done | [10-function-bodies.md](10-function-bodies.md) |
 | 9 | A jaxtyping frontend (Python → JSON IR → OCaml CLI) | done | [11-frontend.md](11-frontend.md) |
-| goal | Check the Transformer ("Attention Is All You Need") | 3 of 24 | [12-transformer-goal.md](12-transformer-goal.md) |
+| goal | Check the Transformer ("Attention Is All You Need") | 13 of 24 | [12-transformer-goal.md](12-transformer-goal.md) |
 | goal 1 | Free functions: int params as dims, inferred preconditions, `-1`, tuples, `x.size(i)` | done | [13-free-functions.md](13-free-functions.md) |
+| goal 2 | Modules: methods take their instance's constructor ints, class invariants | done | [14-modules.md](14-modules.md) |
 
 ## Scorecard after steps 0–9
 
@@ -58,7 +59,8 @@ failing spec.
 Step 8 adds the body checker (`check_fundef`) and closes the smaller variadic gaps (unfolding, the
 empty-list axiom, 1s broadcasting against list variables).
 
-Not attempted: general list unification, control flow in bodies, dtypes, and classes (`nn.Module`). [09-future-work.md](09-future-work.md) lists all remaining work in order,
+Not attempted: general list unification, control flow in bodies, and dtypes. Classes (`nn.Module`) came
+with the Transformer goal ([14-modules.md](14-modules.md)). [09-future-work.md](09-future-work.md) lists all remaining work in order,
 including the design for checking the bodies of variadic functions.
 
 Run everything with:

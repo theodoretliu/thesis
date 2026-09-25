@@ -19,6 +19,11 @@ let field name = function
       | None -> raise (Bad_ir ("missing field " ^ name)))
   | j -> bad "an object" j
 
+(* a field that may be left out *)
+let optional name default f = function
+  | `Assoc kvs as j when List.mem_assoc name kvs -> f (field name j)
+  | _ -> default
+
 let index : Yojson.Safe.t -> (string, int) either = function
   | `String s -> Left s
   | `Int i -> Right i
@@ -74,7 +79,23 @@ let signature (j : Yojson.Safe.t) : signature =
     requires = list constr (field "requires" j);
     exists = list string (field "exists" j);
     ensures = list constr (field "ensures" j);
+    invariant = optional "invariant" [] (list constr) j;
   }
+
+(* a group of int parameters that are an instance's constructor ints: init
+   names the constructor, and ints pairs its parameters with the signature's.
+   the constructor's requires become the signature's invariant *)
+type instance = { init : string; ints : (string * string) list }
+
+let instance (j : Yojson.Safe.t) : instance =
+  let pair = function
+    | `List [ a; b ] -> (string a, string b)
+    | j -> bad "a pair [constructor parameter, parameter]" j
+  in
+  { init = string (field "init" j); ints = list pair (field "ints" j) }
+
+let instances (j : Yojson.Safe.t) : instance list =
+  optional "instances" [] (list instance) j
 
 let rec term (j : Yojson.Safe.t) : term =
   match j with
@@ -95,23 +116,32 @@ let rec stmt (j : Yojson.Safe.t) : stmt =
   | `List [ `String "At"; line; text; s ] -> At (int line, string text, stmt s)
   | j -> bad "a statement" j
 
-(* a library function: one signature, or several tried in order *)
-let callee (j : Yojson.Safe.t) : string * callee =
+(* a library function: one signature, or several tried in order. its
+   overloads are methods of one class, or none, so they share instances *)
+type lib = { name : string; callee : callee; lib_instances : instance list }
+
+let callee (j : Yojson.Safe.t) : lib =
   let name = string (field "name" j) in
-  match list signature (field "overloads" j) with
-  | [ sg ] -> (name, Sig sg)
-  | sgs -> (name, Overloads sgs)
+  let overloads = match field "overloads" j with `List l -> l | j -> [ j ] in
+  let lib_instances =
+    match overloads with sg :: _ -> instances sg | [] -> []
+  in
+  match List.map signature overloads with
+  | [ sg ] -> { name; callee = Sig sg; lib_instances }
+  | sgs -> { name; callee = Overloads sgs; lib_instances }
 
 (* a function to check; without a body only its signature is used *)
-type item = { fd : fundef; checked : bool }
+type item = { fd : fundef; checked : bool; instances : instance list }
 
 let item (j : Yojson.Safe.t) : item =
   let name = string (field "name" j) and sg = signature (field "sig" j) in
+  let instances = instances (field "sig" j) in
   match field "body" j with
-  | `Null -> { fd = { name; sg; body = [] }; checked = false }
-  | body -> { fd = { name; sg; body = list stmt body }; checked = true }
+  | `Null -> { fd = { name; sg; body = [] }; checked = false; instances }
+  | body ->
+      { fd = { name; sg; body = list stmt body }; checked = true; instances }
 
-type program = { env : (string * callee) list; items : item list }
+type program = { env : lib list; items : item list }
 
 let program (j : Yojson.Safe.t) : program =
   { env = list callee (field "env" j); items = list item (field "functions" j) }

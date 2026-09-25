@@ -58,7 +58,7 @@ def check_file(path: Path, stubs: Stubs, checker: Path) -> Report:
     errors = [
         (e.line, f"in {e.function}: {e.message}" if e.function else e.message) for e in t.errors
     ]
-    lines = {f.node.name: f.node.lineno for f in t.functions.values()}
+    lines = {name: f.node.lineno for name, f in t.functions.items()}
     results = run_checker(program, checker) if program["functions"] else []
     for r in results:
         if r["error"] is None:

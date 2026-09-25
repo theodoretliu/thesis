@@ -380,5 +380,272 @@ class Bodies(unittest.TestCase):
         )
 
 
+MODULE = """
+import torch
+import torch.nn as nn
+from jaxtyping import Float, Int
+from torch import Tensor
+
+
+class Block(nn.Module):
+    def __init__(self, d_model: int, h: int, dropout: float = 0.1, max_len: int = 64):
+        super().__init__()
+        self.d_k = d_model // h
+        self.w = nn.Linear(d_model, 4 * d_model, bias=False)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x: Float[Tensor, "b n d_model"]) -> Float[Tensor, "b n d_model"]:
+        return self.norm(x)
+
+    def widen(self, x: Float[Tensor, "b d_model"]) -> Float[Tensor, "b 4*d_model"]:
+        return self.w(self.dropout(x))
+
+    def heads(self, x: Float[Tensor, "b d_model"]) -> Float[Tensor, "b d_model"]:
+        k = self.d_k
+        return self(x)
+
+
+class Outer(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.block = Block(2 * d, 4)
+
+    def forward(self, x: Float[Tensor, "b 2*d"]) -> Float[Tensor, "b 8*d"]:
+        return self.block.widen(x)
+"""
+
+
+def functions(src):
+    prog, errors = program(src)
+    return {f["name"]: f for f in prog["functions"]}, errors
+
+
+def returned(f):
+    """The term a one-statement body returns."""
+    return [s[3] for s in f["body"] if s[0] == "At"][-1][1]
+
+
+class Modules(unittest.TestCase):
+    def test_method_signature(self):
+        fs, errors = functions(MODULE)
+        self.assertEqual(errors, [])
+        sig = fs["Block.forward"]["sig"]
+        # the instance dims come first; self isn't a parameter
+        self.assertEqual(
+            sig["params"],
+            [
+                ["d_model", ["Int"]],
+                ["h", ["Int"]],
+                ["max_len", ["Int"]],
+                ["x", ["Array", [["Id", "b"], ["Id", "n"], ["Id", "d_model"]]]],
+            ],
+        )
+        self.assertEqual(sig["exists"], [])  # d_model is the instance's
+        self.assertEqual(
+            sig["instances"],
+            [
+                {
+                    "init": "Block.__init__",
+                    "ints": [["d_model", "d_model"], ["h", "h"], ["max_len", "max_len"]],
+                }
+            ],
+        )
+
+    def test_init(self):
+        fs, _ = functions(MODULE)
+        init = fs["Block.__init__"]
+        self.assertEqual(init["sig"]["ret"], ["Tuple", []])
+        self.assertNotIn("instances", init["sig"])
+        stmts = [s[3] if s[0] == "At" else s for s in init["body"]]
+        # super().__init__() is skipped, and falling off the end returns None
+        self.assertEqual(stmts[0][:2], ["Let", "self.d_k"])
+        self.assertEqual(
+            stmts[1],
+            [
+                "Let",
+                "self.w",
+                [
+                    "Call",
+                    "torch.nn.Linear.__init__",
+                    [
+                        ["Var", "d_model"],
+                        ["Call", "operator.mul", [["Lit", 4], ["Var", "d_model"]]],
+                        ["Lit", 0],
+                    ],
+                ],
+            ],
+        )
+        self.assertEqual(stmts[-1], ["Return", ["Tuple", []]])
+
+    def test_attribute_calls(self):
+        fs, _ = functions(MODULE)
+        # self.norm = nn.LayerNorm(d_model), so self.norm(x) is its forward
+        self.assertEqual(
+            returned(fs["Block.forward"]),
+            ["Call", "torch.nn.LayerNorm.forward", [["Var", "d_model"], ["Var", "x"]]],
+        )
+        widen = returned(fs["Block.widen"])
+        self.assertEqual(widen[1], "torch.nn.Linear.forward")
+        self.assertEqual(widen[2][0], ["Var", "d_model"])
+        self.assertEqual(widen[2][2][1], "torch.nn.Dropout.forward")
+
+    def test_self_calls(self):
+        fs, _ = functions(MODULE)
+        ints = [["Var", "d_model"], ["Var", "h"], ["Var", "max_len"]]
+        self.assertEqual(
+            returned(fs["Block.heads"]), ["Call", "Block.forward", ints + [["Var", "x"]]]
+        )
+
+    def test_int_attributes(self):
+        fs, _ = functions(MODULE)
+        [let, _] = [s[3] for s in fs["Block.heads"]["body"]]
+        # self.d_k is d_model // h again, from the method's instance dims
+        self.assertEqual(let[2][1], "operator.floordiv")
+        self.assertEqual(let[2][2], [["Var", "d_model"], ["Var", "h"]])
+
+    def test_nested_modules(self):
+        fs, _ = functions(MODULE)
+        # self.block = Block(2 * d, 4): its dims are terms over Outer's d
+        call = returned(fs["Outer.forward"])
+        self.assertEqual(call[1], "Block.widen")
+        two_d, four, max_len, x = call[2]
+        self.assertEqual(two_d[2], [["Lit", 2], ["Var", "d"]])
+        self.assertEqual((four, max_len, x), (["Lit", 4], ["Lit", 64], ["Var", "x"]))
+
+    def test_stub_invariant_in_env(self):
+        prog, _ = program(MODULE)
+        env = {e["name"]: e["overloads"] for e in prog["env"]}
+        [lin] = env["torch.nn.Linear.forward"]
+        self.assertEqual(lin["instances"][0]["init"], "torch.nn.Linear.__init__")
+        # forward's callers assume the constructor's requires
+        [init] = env["torch.nn.Linear.__init__"]
+        self.assertEqual(init["requires"][0], ["Le", ["Int", 0], ["Id", "in_features"]])
+
+    def test_locals_named_like_instance_dims(self):
+        fs, errors = functions(
+            MODULE
+            + """
+class C(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.w = nn.Linear(d, d)
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b d"]:
+        d = x
+        return self.w(d)
+"""
+        )
+        self.assertEqual(errors, [])
+        let, ret = [s[3] for s in fs["C.forward"]["body"]]
+        self.assertEqual(let, ["Let", "d'", ["Var", "x"]])
+        self.assertEqual(ret[1][2], [["Var", "d"], ["Var", "d"], ["Var", "d'"]])
+
+    def test_errors(self):
+        for body, msg in [
+            ("self.v = x\n        return x", "attributes can only be assigned in `__init__`"),
+            ("return self.nope(x)", "`C` has no method `nope`"),
+            ("return self.missing", "no attribute `missing` assigned in __init__"),
+            ("return self", "`self` can only be used for its attributes and methods"),
+            ("return torch.relu(self.w)", "`self.w` is a module; only calls to it are supported"),
+            ("return self.forward", "`self.forward` is a method; call it"),
+            ("return self.twice(x)", "`self.twice` must be assigned once"),
+            ("return self.local(x)", "`e` isn't an int parameter of `__init__`"),
+            ("return self.k(x)", "`self.k` isn't a module"),
+            ("m = nn.Linear(d, d)\n        return x", "a module can only be created in `__init__`"),
+        ]:
+            with self.subTest(body):
+                _, errors = program(
+                    f"""
+import torch
+import torch.nn as nn
+
+class C(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.w = nn.Linear(d, d)
+        self.k = d + 1
+        self.twice = nn.Linear(d, d)
+        self.twice = nn.Linear(d, d)
+        e = 2 * d
+        self.local = nn.Linear(d, e)
+
+    def forward(self, x: Float[Tensor, "n d"]) -> Float[Tensor, "n d"]:
+        {body}
+"""
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+    def test_init_errors(self):
+        for body, msg in [
+            ("d = 2 * d", "can't reassign `d`: it's one of the instance's dims"),
+            ("self.w.weight = None", "assigning to an attribute of a module"),
+            ("self.a = self.b\n        self.b = self.a", "`self.b` is defined in terms of itself"),
+        ]:
+            with self.subTest(body):
+                _, errors = program(
+                    f"""
+import torch.nn as nn
+
+class C(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.w = nn.Linear(d, d)
+        {body}
+"""
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+    def test_signature_errors(self):
+        _, errors = program(
+            """
+import torch.nn as nn
+
+class C(nn.Module):
+    def __init__(self, n: int):
+        super().__init__()
+
+    def forward(self, x: Float[Tensor, "n"], n: int) -> Float[Tensor, "n"]:
+        return x
+
+    @staticmethod
+    def helper(x: Float[Tensor, "n"]) -> Float[Tensor, "n"]:
+        return x
+"""
+        )
+        self.assertRegex(errors[0], "decorated methods aren't supported")
+        self.assertRegex(errors[1], "parameter n has the name of one of the instance's dims")
+
+    def test_other_classes_are_skipped(self):
+        prog, t = translate("class C:\n    def f(self, x: int) -> int:\n        return x\n", STUBS)
+        self.assertEqual(prog["functions"], [])
+        self.assertIn("only classes that subclass nn.Module are checked", t.notes[0].message)
+
+    def test_stub_module_classes(self):
+        stubs = Stubs()
+        load_stub_module(
+            stubs,
+            "nn",
+            ast.parse(
+                textwrap.dedent(
+                    """
+                    class Linear(Module):
+                        def __init__(self, i: int, o: int, bias: bool = True) -> None:
+                            assert i >= 0
+                        def forward(self, x: Float[Tensor, "*B i"]) -> Float[Tensor, "*B o"]: ...
+                    """
+                )
+            ),
+        )
+        self.assertEqual(stubs.classes["nn.Linear"].ints, ["i", "o"])  # not the bool
+        [fwd] = stubs.functions["nn.Linear.forward"].overloads
+        self.assertEqual([p[0] for p in fwd.sig["params"]], ["i", "o", "x"])
+        self.assertEqual([p.name for p in fwd.params], ["x"])  # what callers pass
+        [init] = stubs.functions["nn.Linear.__init__"].overloads
+        self.assertEqual(init.sig["requires"], [["Le", ["Int", 0], ["Id", "i"]]])
+        self.assertEqual(init.sig["ret"], ["Tuple", []])
+        self.assertNotIn("forward", stubs.methods)  # only called on instances
+
+
 if __name__ == "__main__":
     unittest.main()
