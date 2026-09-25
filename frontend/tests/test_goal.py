@@ -17,16 +17,20 @@ GOAL = Path(__file__).resolve().parents[2] / "examples" / "goal" / "transformer.
 
 # the functions and methods that check today; add to it as gaps close
 PASSING = {
+    "attention",
     "subsequent_mask",
     "make_masks",
     "loss",
     "MultiHeadedAttention.__init__",
+    "MultiHeadedAttention.forward",
     "PositionwiseFeedForward.__init__",
     "PositionwiseFeedForward.forward",
     "Embeddings.__init__",
     "Embeddings.forward",
     "EncoderLayer.__init__",
+    "EncoderLayer.forward",
     "DecoderLayer.__init__",
+    "DecoderLayer.forward",
     "Transformer.encode",
     "Transformer.decode",
     "Transformer.forward",

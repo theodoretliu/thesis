@@ -129,6 +129,42 @@ let lin =
 
 let lin_bare = sg (lin_params, lin_ret)
 
+(* masked_fill(x: [*A], mask: [*#A]) -> [*A]: the mask broadcasts to x *)
+let masked_fill =
+  sg
+    ( [ ("X", arr [ Spread "A" ]); ("M", arr [ Broadcast "A" ]) ],
+      arr [ Spread "A" ] )
+
+(* scores(q: [*B, n, d], k: [*B, m, d], mask: [*#B, #n, m]) -> [*B, n, m],
+   with attention's mask *)
+let scores =
+  sg
+    ( [
+        ("Q", arr [ Spread "B"; Id "n"; Id "d" ]);
+        ("K", arr [ Spread "B"; Id "m"; Id "d" ]);
+        ("M", arr [ Broadcast "B"; BroadcastDim "n"; Id "m" ]);
+      ],
+      arr [ Spread "B"; Id "n"; Id "m" ] )
+
+(* transpose(x: [*A], i: int, j: int) -> [*swap(A, i, j)] *)
+let transpose =
+  sg
+    ( [ ("X", arr [ Spread "A" ]); ("i", TypeInt); ("j", TypeInt) ],
+      arr [ Swap ("A", Left "i", Left "j") ] )
+
+(* ints: a * b and a // b *)
+let mul_int =
+  sg ([ ("a", TypeInt); ("b", TypeInt) ], IntExpr (Mul (Id "a", Id "b")))
+
+let div_int =
+  sg ([ ("a", TypeInt); ("b", TypeInt) ], IntExpr (Div (Id "a", Id "b")))
+
+(* a constructor whose __init__ asserts n % h == 0 *)
+let divides =
+  sg
+    ~ensures:[ Eq (Mul (Id "h", Div (Id "n", Id "h")), Id "n") ]
+    ([ ("n", TypeInt); ("h", TypeInt) ], TypeTuple [])
+
 let env =
   [
     ("linear", Sig linear);
@@ -150,6 +186,12 @@ let env =
     ("ones", Sig ones);
     ("pair", Sig pair);
     ("fit", fit);
+    ("masked_fill", Sig masked_fill);
+    ("scores", Sig scores);
+    ("transpose", Sig transpose);
+    ("mul", Sig mul_int);
+    ("div", Sig div_int);
+    ("divides", Sig divides);
   ]
 
 let call f args = Call (f, args)
@@ -464,9 +506,20 @@ let () =
            "f" params
            (arr [ Spread "B"; Id "d" ])
            body));
-  expect "[1, 1] broadcasts to any [*B]" (fun () ->
-      checks
+  (* jaxtyping's *#A: broadcasting to A, not just with it, so no more dims *)
+  expect "[1, 1] doesn't broadcast to a [*B] that may have fewer dims"
+    (fun () ->
+      rejects
+        ~saying:[ "[1, 1] doesn't broadcast to *A = [*B]" ]
         (def "f"
+           [ ("x", arr [ Spread "B" ]); ("o", arr [ Int 1; Int 1 ]) ]
+           (arr [ Spread "B" ])
+           [ Return (call "expand_to" [ var "x"; var "o" ]) ]));
+  expect "[1, 1] broadcasts to a [*B] with at least 2 dims" (fun () ->
+      checks
+        (def
+           ~requires:[ Le (Int 2, Rank "B") ]
+           "f"
            [ ("x", arr [ Spread "B" ]); ("o", arr [ Int 1; Int 1 ]) ]
            (arr [ Spread "B" ])
            [ Return (call "expand_to" [ var "x"; var "o" ]) ]));
@@ -773,3 +826,255 @@ let () =
       with
       | () -> false
       | exception KindError _ -> true)
+
+(* ---- milestone 3 of the Transformer: see docs/15-attention.md ---- *)
+
+let sorted_inferred fd = List.sort compare (inferred fd)
+let at_least k x = Le (Int k, Id x)
+
+(* broadcasting: *#A broadcasts to A, #n is n or 1 *)
+let () =
+  let qk =
+    [
+      ("q", arr [ Id "b"; Id "n"; Id "d" ]);
+      ("k", arr [ Id "b"; Id "m"; Id "d" ]);
+    ]
+  in
+  let masked mask =
+    def "f"
+      (qk @ [ ("mask", arr mask) ])
+      (arr [ Id "b"; Id "n"; Id "m" ])
+      [ Return (call "scores" [ var "q"; var "k"; var "mask" ]) ]
+  in
+  expect "#n accepts n" (fun () -> checks (masked [ Id "b"; Id "n"; Id "m" ]));
+  expect "#n accepts 1" (fun () -> checks (masked [ Id "b"; Int 1; Id "m" ]));
+  expect "#n rejects another size" (fun () ->
+      rejects
+        ~saying:[ "expected n or 1, got 2" ]
+        (masked [ Id "b"; Int 2; Id "m" ]));
+  expect "*#B accepts fewer dims" (fun () -> checks (masked [ Int 1; Id "m" ]));
+  expect "*#B accepts 1s for its dims" (fun () ->
+      checks (masked [ Int 1; Int 1; Id "m" ]));
+  expect "*#B rejects more dims than B" (fun () ->
+      rejects
+        ~saying:[ "doesn't broadcast to *B" ]
+        (masked [ Int 1; Id "b"; Id "n"; Id "m" ]));
+  expect "*#B rejects a dim that's neither B's nor 1" (fun () ->
+      rejects
+        ~saying:[ "doesn't broadcast to *B" ]
+        (masked [ Int 2; Id "n"; Id "m" ]));
+  (* in a body, *#B and #n are rigid: whatever broadcasts to B, and n or 1 *)
+  let attention_params =
+    [
+      ("q", arr [ Spread "B"; Id "n"; Id "d" ]);
+      ("k", arr [ Spread "B"; Id "m"; Id "d" ]);
+      ("mask", arr [ Broadcast "B"; BroadcastDim "n"; Id "m" ]);
+    ]
+  in
+  expect "a body's *#B #n mask can be passed on" (fun () ->
+      checks
+        (def "f" attention_params
+           (arr [ Spread "B"; Id "n"; Id "m" ])
+           [ Return (call "scores" [ var "q"; var "k"; var "mask" ]) ]));
+  expect "a body's *#B #n m mask broadcasts to [*B, n, m]" (fun () ->
+      checks
+        (def "f"
+           (attention_params @ [ ("s", arr [ Spread "B"; Id "n"; Id "m" ]) ])
+           (arr [ Spread "B"; Id "n"; Id "m" ])
+           [ Return (call "masked_fill" [ var "s"; var "mask" ]) ]));
+  expect "and to [*C, *B, n, m]" (fun () ->
+      checks
+        (def "f"
+           (attention_params
+           @ [ ("s", arr [ Spread "C"; Spread "B"; Id "n"; Id "m" ]) ])
+           (arr [ Spread "C"; Spread "B"; Id "n"; Id "m" ])
+           [ Return (call "masked_fill" [ var "s"; var "mask" ]) ]));
+  expect "but not to another spread" (fun () ->
+      rejects
+        ~saying:[ "doesn't broadcast to *A" ]
+        (def "f"
+           (attention_params @ [ ("s", arr [ Spread "C"; Id "n"; Id "m" ]) ])
+           (arr [ Spread "C"; Id "n"; Id "m" ])
+           [ Return (call "masked_fill" [ var "s"; var "mask" ]) ]));
+  expect "#n isn't n" (fun () ->
+      rejects ~saying:[ "got [*#B, #n, m]" ]
+        (def "f" attention_params
+           (arr [ Spread "B"; Id "n"; Id "m" ])
+           [ Return (var "mask") ]));
+  expect "#n binds an unbound n" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ BroadcastDim "n" ]); ("y", arr [ Id "n" ]) ]
+           (arr [ Id "n" ])
+           [ Return (var "y") ]));
+  expect "#n can't be in a return type" (fun () ->
+      match
+        check_signature
+          (sg ([ ("x", arr [ Id "n" ]) ], arr [ BroadcastDim "n" ]))
+      with
+      | () -> false
+      | exception KindError _ -> true)
+
+(* transpose(i, j) for any literal axes *)
+let () =
+  let swapped params i j ret =
+    def "f" params (arr ret)
+      [ Return (call "transpose" [ var "x"; Lit i; Lit j ]) ]
+  in
+  expect "swap(A, 1, 2)" (fun () ->
+      checks
+        (swapped
+           [ ("x", arr [ Id "a"; Id "b"; Id "c"; Id "d" ]) ]
+           1 2
+           [ Id "a"; Id "c"; Id "b"; Id "d" ]));
+  expect "swap(A, -2, -1) past a spread" (fun () ->
+      checks
+        (swapped
+           [ ("x", arr [ Spread "L"; Id "a"; Id "b" ]) ]
+           (-2) (-1)
+           [ Spread "L"; Id "b"; Id "a" ]));
+  expect "swap(A, 0, -1) around a spread" (fun () ->
+      checks
+        (swapped
+           [ ("x", arr [ Id "a"; Spread "L"; Id "b" ]) ]
+           0 (-1)
+           [ Id "b"; Spread "L"; Id "a" ]));
+  expect "swap(A, 0, 1) after a spread is ambiguous" (fun () ->
+      rejects
+        ~saying:[ "Cannot compute Swap(A, i, j) for A = [*L, a, b]" ]
+        (swapped
+           [ ("x", arr [ Spread "L"; Id "a"; Id "b" ]) ]
+           0 1
+           [ Spread "L"; Id "b"; Id "a" ]))
+
+(* asserts: the rest of the body assumes them *)
+let () =
+  (* def f(n: int, h: int, x: [b, n]) -> [b, h, n // h]:
+       assert n % h == 0
+       return x.reshape(x.size(0), h, n // h) *)
+  let split ?requires asserted =
+    def ?requires "f"
+      [ ("n", TypeInt); ("h", TypeInt); ("x", arr [ Id "b"; Id "n" ]) ]
+      (arr [ Id "b"; Id "h"; Div (Id "n", Id "h") ])
+      ((if asserted then
+          [ Assume (Eq (Mul (Id "h", Div (Id "n", Id "h")), Id "n")) ]
+        else [])
+      @ [
+          Let ("k", call "div" [ var "n"; var "h" ]);
+          Return
+            (call "reshape"
+               [
+                 var "x";
+                 Shape [ call "size" [ var "x"; Lit 0 ]; var "h"; var "k" ];
+               ]);
+        ])
+  in
+  let given = [ at_least 1 "h"; at_least 0 "n" ] in
+  expect "an assert is assumed" (fun () -> checks (split ~requires:given true));
+  expect "without it, the sizes may not match" (fun () ->
+      rejects
+        ~saying:[ "Precondition not provable" ]
+        (split ~requires:given false));
+  (* n >= 0 isn't needed: n is also a dim, of x *)
+  expect "an assert's divisor is inferred positive" (fun () ->
+      inferred (split true) = [ show_constr (at_least 1 "h") ]);
+  expect "an assert about a tensor is dropped" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ Id "n" ]) ]
+           (arr [ Id "n" ])
+           [ Assume (Le (Id "x", Int 3)); Return (var "x") ]));
+  expect "and infers nothing, even for its divisor" (fun () ->
+      inferred
+        (def "f"
+           [ ("k", TypeInt); ("x", arr [ Id "n" ]) ]
+           (arr [ Id "n" ])
+           [ Assume (Eq (Div (Id "k", Id "k"), Id "x")); Return (var "x") ])
+      = []);
+  (* def fold(x: [b, n], k: int) -> [b, k, n // k]:
+       assert x.size(1) % k == 0
+       return x.reshape(x.size(0), k, -1) *)
+  let fold asserted =
+    def
+      ~requires:[ at_least 1 "k"; at_least 1 "b" ]
+      "fold"
+      [ ("k", TypeInt); ("x", arr [ Id "b"; Id "n" ]) ]
+      (arr [ Id "b"; Id "k"; Div (Id "n", Id "k") ])
+      ([ Let ("size", call "size" [ var "x"; Lit 1 ]) ]
+      @ (if asserted then
+           [ Assume (Eq (Mul (Id "k", Div (Id "size", Id "k")), Id "size")) ]
+         else [])
+      @ [
+          Return
+            (call "reshape"
+               [
+                 var "x";
+                 Shape [ call "size" [ var "x"; Lit 0 ]; var "k"; Lit (-1) ];
+               ]);
+        ])
+  in
+  expect "-1 when an assert says k divides a factor" (fun () ->
+      checks (fold true));
+  expect "without it, -1 may not divide evenly" (fun () ->
+      rejects ~saying:[ "b * n may not be divisible by b * k" ] (fold false));
+  expect "a callee's ensures with a divisor it can't state is dropped"
+    (fun () ->
+      checks
+        (def "f"
+           [ ("n", TypeInt); ("h", TypeInt) ]
+           (TypeTuple [])
+           [ Return (call "divides" [ var "n"; var "h" ]) ]))
+
+(* multi-head attention's split and merge: -1 is the quotient when the other
+   sizes multiply to some of the total's, h * (d // h) = d *)
+let () =
+  let invariant =
+    [
+      at_least 1 "h";
+      at_least 0 "d";
+      Eq (Mul (Id "h", Div (Id "d", Id "h")), Id "d");
+    ]
+  in
+  let dk = Div (Id "d", Id "h") in
+  let heads ?requires () =
+    def ?requires ~invariant "heads"
+      [ ("h", TypeInt); ("d", TypeInt); ("x", arr [ Id "b"; Id "n"; Id "d" ]) ]
+      (arr [ Id "b"; Id "h"; Id "n"; dk ])
+      [
+        Let ("k", call "div" [ var "d"; var "h" ]);
+        Let
+          ( "y",
+            call "reshape"
+              [
+                var "x";
+                Shape
+                  [ call "size" [ var "x"; Lit 0 ]; Lit (-1); var "h"; var "k" ];
+              ] );
+        Return (call "transpose" [ var "y"; Lit 1; Lit 2 ]);
+      ]
+  in
+  let nonempty = [ at_least 1 "b"; at_least 1 "d" ] in
+  expect "split heads with -1" (fun () -> checks (heads ~requires:nonempty ()));
+  expect "which needs b >= 1 and d >= 1" (fun () ->
+      sorted_inferred (heads ())
+      = List.sort compare (List.map show_constr nonempty));
+  expect "merge heads with -1, where an array's shape uses the invariant"
+    (fun () ->
+      checks
+        (def ~requires:nonempty ~invariant "merge"
+           [
+             ("h", TypeInt);
+             ("d", TypeInt);
+             ("x", arr [ Id "b"; Id "h"; Id "n"; dk ]);
+           ]
+           (arr [ Id "b"; Id "n"; Id "d" ])
+           [
+             Let ("y", call "transpose" [ var "x"; Lit 1; Lit 2 ]);
+             Let ("hk", call "mul" [ var "h"; call "div" [ var "d"; var "h" ] ]);
+             Return
+               (call "reshape"
+                  [
+                    var "y";
+                    Shape [ call "size" [ var "y"; Lit 0 ]; Lit (-1); var "hk" ];
+                  ]);
+           ]))

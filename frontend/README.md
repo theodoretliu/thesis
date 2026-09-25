@@ -60,6 +60,8 @@ annotations, except `self` and `__init__`'s return type:
 | `Tensor`, `np.ndarray` with no shape | a parameter of any shape (not allowed as a return type) |
 | `tuple[A, B]` (return types only) | a tuple of those types |
 | `None` (return types only) | the empty tuple |
+| `Optional[T]`, `T \| None` (parameters only) | `None` or a `T`: checked once for each (see [Optional](#optional-parameters)) |
+| `nn.Dropout`, a user's `nn.Module` subclass | an instance of that module (see [Modules](#modules)) |
 
 Shape strings follow jaxtyping:
 
@@ -69,7 +71,8 @@ Shape strings follow jaxtyping:
 | `*batch` | a named run of dims |
 | `...`, `*_` | an unnamed run of dims (not in a return type) |
 | `_`, `_foo` | a dim that isn't checked |
-| `*#batch` | a run of dims that broadcasts with `batch`. The first occurrence binds `batch` exactly |
+| `*#batch` | a run of dims that broadcasts to `batch`: no more dims, each 1 or `batch`'s. The first occurrence binds `batch` exactly |
+| `#n` | `n` or 1 (parameters only). Like `n`, it binds `n` where it first appears |
 | `dim-1`, `2*dim`, `(n+1)//2` | arithmetic with `+ - * //` on names and ints |
 
 A name that only the return type mentions is existential. Shape names and Python parameter names are
@@ -95,14 +98,47 @@ Bodies must be straight-line code:
 - `y = expr` and `y: Float[Tensor, "..."] = expr`. The annotation is checked, and it can bind new names.
 - `a, b = expr`, unpacking a tuple.
 - `return expr`, including `return a, b`.
-- `assert` and `pass` are skipped. Dropping a runtime check is sound.
+- `if` on whether variables are `None` (`if mask is not None:`), which is known statically. See
+  [Optional parameters](#optional-parameters).
+- `assert`: the rest of the body assumes it. Comparisons of ints with `+ - * //` are stated, and so is
+  `a % b == 0`, as `b * (a // b) == a`. A call in one, like `x.size(1)`, is evaluated first. Anything else
+  in an assert is dropped, which is sound. A divisor may be inferred positive, like a size.
+- `pass` is skipped.
 - Expressions: local variables, int/bool/float literals, calls, `+ - * / // ** @ & | ^`, unary `-` and
   `~`, comparisons, methods (`x.sum(-1)`, `x.size(-1)`), properties (`x.mT`), tuples, and tuples of ints
   as shapes (`x.reshape((n, d))`). One entry of a shape may be `-1` where the stub determines it, as in
   `x.reshape(-1, d)`.
 
-Anything else gets an explicit error, and the rest of the file is still checked. That covers control flow,
-augmented assignment (`x += y`), indexing and `x.shape`, lambdas, and module-level values.
+Anything else gets an explicit error, and the rest of the file is still checked. That covers other control
+flow, augmented assignment (`x += y`), indexing and `x.shape`, lambdas, and module-level values.
+
+## Optional parameters
+
+An `Optional[T]` parameter (or `Union[T, None]`, `T | None`) is `None` or a `T` at each call, and the
+frontend always knows which: `None` is the literal, a default of `None`, or a local that's `None`. So a
+function is checked once for each choice of which `Optional` parameters are `None`, and each `if x is not
+None:` is decided in each case:
+
+```python
+def masked_softmax(
+    scores: Float[Tensor, "*b q k"], mask: Optional[Bool[Tensor, "*#b #q k"]] = None
+) -> Float[Tensor, "*b q k"]:
+    if mask is not None:
+        scores = scores.masked_fill(~mask, -1e9)
+    return scores.softmax(dim=-1)
+```
+
+This is two checker functions, `masked_softmax` and `masked_softmax[mask=None]`. A `None` parameter isn't
+in its case's signature, and a call goes to the case its arguments select. A function passes if every case
+does, and errors name the case:
+
+```
+optional_none.py:12: in masked[mask=None]: `mask` is None here
+```
+
+Tests may combine `is None` and `is not None` with `not`, `and` and `or`, and `x if y is None else z` is
+decided the same way. A function may have at most 4 `Optional` parameters (16 cases). They aren't
+supported on `__init__` or in stubs. See [docs/15-attention.md](../docs/15-attention.md).
 
 ## Modules
 
@@ -133,12 +169,15 @@ dims first, and `self.w_1(x)` becomes `torch.nn.Linear.forward(d_model, d_ff, x)
 - An attribute must be assigned once, at the top level of `__init__`. It can't be assigned anywhere
   else, and `__init__` can't reassign an int parameter.
 - `__init__` returns `None`, and `super().__init__()` is skipped.
-- A method may assume its class invariant: the requires of `__init__`, including those inferred for it.
-  Every instance was built satisfying them. So may a call: `nn.Linear`'s constructor requires
-  `out_features >= 0`, so `self.head(x)` returns a valid size without the method requiring it.
+- A method may assume its class invariant: the requires of `__init__`, including those inferred for it,
+  and its asserts about its int parameters (`assert d_model % h == 0`). Every instance was built
+  satisfying them. So may a call: `nn.Linear`'s constructor requires `out_features >= 0`, so
+  `self.head(x)` returns a valid size without the method requiring it.
+- A parameter annotated with a module class (`dropout: nn.Dropout`) takes an instance, like `self.dropout`,
+  and is passed as its instance dims. It may be `Optional`.
 
-Modules can't be passed around yet: not as arguments, return values, or locals. Only direct subclasses
-of `nn.Module` are checked. See [docs/14-modules.md](../docs/14-modules.md).
+Modules can't be returned or stored in locals yet, and an annotation can't name a module parameter's
+dims. Only direct subclasses of `nn.Module` are checked. See [docs/14-modules.md](../docs/14-modules.md).
 
 ## Calls
 
@@ -158,8 +197,8 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
 
 - A shape may name an int parameter: `def sum(self: Shaped[Tensor, "*A"], dim: int) -> Shaped[Tensor,
   "*drop(A,dim)"]`.
-- List functions: `*drop(A,i)`, `*keep(A,i)`, `*permute(A,i,j)`, `*setat(A,i,d)`, `*insertat(A,i,d)`,
-  `*broadcast(A,B)`. Inside arithmetic, `prod(A)`, `rank(A)`, and `A[i]` (one dim, e.g.
+- List functions: `*drop(A,i)`, `*keep(A,i)`, `*permute(A,i,j)`, `*swap(A,i,j)`, `*setat(A,i,d)`,
+  `*insertat(A,i,d)`, `*broadcast(A,B)`. Inside arithmetic, `prod(A)`, `rank(A)`, and `A[i]` (one dim, e.g.
   `-> Dim["A[dim]"]` for `x.size(dim)`).
 - `Dim["expr"]` is an int equal to a dim expression, e.g. `-> Dim["rank(A)"]` for `x.dim()`.
 - `Shape["*S"]` is a tuple of ints used as a shape. As `*size: Shape["*S"]` it collects int arguments, so
@@ -194,8 +233,9 @@ constructor's name. `checker/bin/ir_json.ml` decodes it.
 
 ```
 entry  ["Id", n] ["Int", i] ["Add"|"Sub"|"Mul"|"Div", e, e] ["Spread", A] ["Broadcast", A]
-       ["Broadcasted", [A, ...]] ["Drop"|"Keep"|"Permute", A, [idx]] ["SetAt", A, [idx], e]
-       ["InsertAt", A, idx, e] ["Prod", A] ["Rank", A] ["Index", A, idx]
+       ["BroadcastDim", n] ["Broadcasted", [A, ...]] ["Drop"|"Keep"|"Permute", A, [idx]]
+       ["Swap", A, idx, idx] ["SetAt", A, [idx], e] ["InsertAt", A, idx, e] ["Prod", A] ["Rank", A]
+       ["Index", A, idx]
                                                                  idx is a name or an int
 typ    ["Array", [entry]] ["Int"] ["IntExpr", entry] ["Literal", i] ["Tuple", [typ]]
 constr ["Eq"|"Le"|"Lt", entry, entry]
@@ -203,7 +243,7 @@ sig    {"params": [[name, typ]], "ret": typ, "requires": [constr], "exists": [na
         "invariant": [constr], "instances": [{"init": f, "ints": [[init_param, param]]}]}
 term   ["Var", x] ["Lit", i] ["Call", f, [term]] ["Shape", [term]] ["Scalar"] ["Tuple", [term]]
 stmt   ["Let", x, term] ["LetAnnot", x, typ, term] ["Unpack", [x], term] ["Return", term]
-       ["At", line, text, stmt]
+       ["Assume", constr] ["At", line, text, stmt]
 
 program {"env": [{"name": f, "overloads": [sig]}],
          "functions": [{"name": f, "sig": sig, "body": [stmt] | null}]}
@@ -211,8 +251,12 @@ program {"env": [{"name": f, "overloads": [sig]}],
 
 `None` is `["Tuple", []]`. A signature's `invariant` and `instances` are optional. An invariant is
 assumed by the body and by callers. Each instance says that some of the parameters are an instance's dims:
-the CLI adds the constructor `init`'s requires, renamed to those parameters, to the invariant. A method
-has one instance, for `self`.
+the CLI adds the constructor `init`'s requires and ensures, renamed to those parameters, to the invariant.
+A method has one instance, for `self`, and each module parameter adds one. `Assume` is an assert: the
+rest of the body assumes the constraint, whose names are the body's int locals.
+
+A function with `Optional` parameters is one checker function per case, named like
+`attention[mask=None]`.
 
 A function whose body couldn't be translated has `"body": null`, so callers still use its signature. The
 checker prints `{"results": [{"name": f, "error": null | message, "inferred": ["n >= 0", ...]}]}` and

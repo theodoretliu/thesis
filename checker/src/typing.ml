@@ -13,9 +13,13 @@ type entry =
   | Keep of string * (string, int) either list
   | Int of int
   | Broadcast of string
+    (* jaxtyping's *#A: a run of dims that broadcasts to the bound spread A *)
+  | BroadcastDim of string (* jaxtyping's #q: one dim equal to q or 1 *)
   | Broadcasted of string list
     (* the broadcast of already-bound spreads, e.g. the result of x + y *)
   | Permute of string * (string, int) either list (* result[i] = A[p[i]] *)
+  | Swap of string * (string, int) either * (string, int) either
+    (* exchange two dims, e.g. transpose(1, 2) *)
   | SetAt of string * (string, int) either list * entry
     (* replace dims at indices, e.g. keepdim=True *)
   | InsertAt of string * (string, int) either * entry
@@ -47,7 +51,8 @@ type constr = Eq of entry * entry | Le of entry * entry | Lt of entry * entry
    - invariant: holds for the int arguments whenever the function can be
      called, so the body and its callers both assume it. a method's int
      parameters are its instance's constructor ints, and its invariant is
-     the constructor's requires: every instance was built satisfying them *)
+     the constructor's requires and ensures: every instance was built
+     satisfying them *)
 type signature = {
   params : (string * typ) list;
   ret : typ;
@@ -86,9 +91,11 @@ let rec string_of_entry (e : entry) : string =
   | Spread a -> "*" ^ a
   | Drop (a, l) -> "Drop(" ^ a ^ ", [" ^ idxs l ^ "])"
   | Keep (a, l) -> "Keep(" ^ a ^ ", [" ^ idxs l ^ "])"
-  | Broadcast a -> "Broadcast(" ^ a ^ ")"
+  | Broadcast a -> "*#" ^ a
+  | BroadcastDim x -> "#" ^ x
   | Broadcasted l -> "Broadcasted(" ^ String.concat ", " l ^ ")"
   | Permute (a, l) -> "Permute(" ^ a ^ ", [" ^ idxs l ^ "])"
+  | Swap (a, i, j) -> "Swap(" ^ a ^ ", " ^ idx i ^ ", " ^ idx j ^ ")"
   | SetAt (a, l, d) ->
       "SetAt(" ^ a ^ ", [" ^ idxs l ^ "], " ^ string_of_entry d ^ ")"
   | InsertAt (a, i, d) ->
@@ -204,9 +211,12 @@ let rec check_arith_signature
       check_arith_signature (vars, _spread_vars, param_var_mapping) e1;
       check_arith_signature (vars, _spread_vars, param_var_mapping) e2
   | Spread _ | Drop _ | Keep _ | Broadcast _ | Broadcasted _ | Permute _
-  | SetAt _ | InsertAt _ ->
+  | Swap _ | SetAt _ | InsertAt _ ->
       raise
         (KindError ("List dimension inside arithmetic: " ^ string_of_entry e))
+  | BroadcastDim _ ->
+      raise
+        (KindError ("Broadcastable dim inside arithmetic: " ^ string_of_entry e))
 
 (* given a set of already declared variables and spread variables, this
 function checks that the entry type is well-kinded. particularly, it ensures
@@ -245,12 +255,22 @@ let rec check_entry_signature
       else if StringSet.mem x spread_vars then
         (vars, spread_vars, param_var_mapping)
       else raise (KindError "Attempt to intro new variable in bad context")
-  | Drop _ | Keep _ | Permute _ | SetAt _ | InsertAt _ ->
+  | BroadcastDim x ->
+      (* like a dim, it binds x where it first appears. only a parameter's
+         shape may say that a dim broadcasts *)
+      if not can_intro then
+        raise
+          (KindError
+             ("A broadcastable dim " ^ string_of_entry e
+            ^ " can only be in a parameter's shape"))
+      else check_entry_signature orig (Id x) true
+  | Drop _ | Keep _ | Permute _ | Swap _ | SetAt _ | InsertAt _ ->
       (* list functions of a bound spread, indexed by literals or int params *)
       let arr, indices, inserted =
         match e with
         | Drop (arr, indices) | Keep (arr, indices) | Permute (arr, indices) ->
             (arr, indices, None)
+        | Swap (arr, i, j) -> (arr, [ i; j ], None)
         | SetAt (arr, indices, d) -> (arr, indices, Some d)
         | InsertAt (arr, index, d) -> (arr, [ index ], Some d)
         | _ -> failwith "impossible"
@@ -285,12 +305,12 @@ let rec check_entry_signature
       then raise (KindError "Broadcasted needs already-bound spread vars")
       else orig
 
+let is_int_typed ((_, t) : string * typ) : bool =
+  match t with TypeInt | TypeLiteralInt _ -> true | _ -> false
+
 (* int parameters come first, so a shape may name one declared after it *)
 let ints_first (params : (string * typ) list) : (string * typ) list =
-  let is_int (_, t) =
-    match t with TypeInt | TypeLiteralInt _ -> true | _ -> false
-  in
-  let ints, rest = List.partition is_int params in
+  let ints, rest = List.partition is_int_typed params in
   ints @ rest
 
 let check_args_signature (funargtyps : (string * typ) list) :
@@ -432,11 +452,16 @@ let show_dim_error = function
   | Bad_index (e, dims) ->
       string_of_entry e ^ " is undefined for " ^ string_of_dims dims
 
-(* translate an arithmetic dimension into a Z3 expression *)
-let rec expr_of_dim (s : entry)
+let prove_positive (e : Z3.Expr.expr) : bool =
+  Z3utils.prove (Z3.Arithmetic.mk_gt Z3utils.ctx e (mk_int_numeral 0))
+
+(* translate an arithmetic dimension into a Z3 expression. positive decides
+   whether a divisor is positive (an assert may infer it) *)
+let rec expr_of_dim ?(positive = prove_positive) (s : entry)
     ((var_mapping, spread_mapping, param_mapping) as mapping : mapping_type) :
     (Z3.Expr.expr, dim_error) result =
   let ( let* ) = Result.bind in
+  let expr_of_dim = expr_of_dim ~positive in
   let binop mk e1 e2 =
     let* l = expr_of_dim e1 mapping in
     let* r = expr_of_dim e2 mapping in
@@ -460,8 +485,7 @@ let rec expr_of_dim (s : entry)
       let* l = expr_of_dim s1 mapping in
       let* r = expr_of_dim s2 mapping in
       (* z3 integer division is floor division for positive divisors *)
-      if Z3utils.prove (Z3.Arithmetic.mk_gt Z3utils.ctx r (mk_int_numeral 0))
-      then Ok (Z3.Arithmetic.mk_div Z3utils.ctx l r)
+      if positive r then Ok (Z3.Arithmetic.mk_div Z3utils.ctx l r)
       else Error (Bad_divisor s2)
   | Prod a -> (
       let factor x =
@@ -554,6 +578,50 @@ let broadcast_pair (a : string list) (b : string list) : string list option =
   in
   go (List.rev a) (List.rev b) []
 
+(* jaxtyping's *#A: l broadcasts to target if, right-aligned, it has no more
+   dims and each is 1 or equal to target's. a list variable must be target's
+   own, or a body's *#B for a B that ends target *)
+let broadcasts_to (l : string list) (target : string list) : bool =
+  let one = mk_int_numeral 1 in
+  let same x y =
+    if Z3utils.is_list_var x || Z3utils.is_list_var y then x = y
+    else Z3utils.prove_int_eq (Z3utils.mk_int x) (Z3utils.mk_int y)
+  in
+  let ends_with t rest =
+    let t = Z3utils.expand t in
+    let n = List.length rest - List.length t in
+    n >= 0 && List.for_all2 same t (snd (Utils.take_n rest n))
+  in
+  let rec go rl rt =
+    match (rl, rt) with
+    | [], _ -> true
+    (* 1s broadcast to at least as many dims, whatever they are *)
+    | _
+      when all_ones rl
+           && Z3utils.prove
+                (Z3.Arithmetic.mk_ge Z3utils.ctx (length_expr rt)
+                   (mk_int_numeral (List.length rl))) ->
+        true
+    | x :: rl', y :: rt' when x = y -> go rl' rt'
+    | [ x ], _ when Z3utils.is_list_var x -> (
+        match Hashtbl.find_opt Z3utils.broadcast_targets x with
+        | Some t -> ends_with t (List.rev rt)
+        | None -> false)
+    | x :: _, _ when Z3utils.is_list_var x -> false
+    | _, y :: _ when Z3utils.is_list_var y -> false
+    | x :: rl', y :: rt' ->
+        let ex = Z3utils.mk_int x in
+        Z3utils.prove
+          (Z3.Boolean.mk_or Z3utils.ctx
+             [
+               Z3.Boolean.mk_eq Z3utils.ctx ex (Z3utils.mk_int y);
+               Z3.Boolean.mk_eq Z3utils.ctx ex one;
+             ])
+        && go rl' rt'
+    | _ :: _, [] -> false
+  in
+  go (List.rev (Z3utils.expand l)) (List.rev (Z3utils.expand target))
+
 (* list-valued dimensions computed from already-bound spreads. None means
    the computation is undefined for these spreads *)
 let derived_dims (e : entry)
@@ -589,6 +657,9 @@ let derived_dims (e : entry)
   | Permute (v, indices) ->
       if List.exists Z3utils.is_list_var (spread v) then None
       else at v indices Utils.permute
+  (* each index must resolve to a dim, but list variables may sit between or
+     around them: [a, *L, b] swapped at 0 and -1 is [b, *L, a] *)
+  | Swap (v, i, j) -> at v [ i; j ] Utils.swap
   | SetAt (v, indices, d) ->
       Option.bind (new_dim d) (fun d ->
           at v indices (fun items ps -> Utils.set_at items ps d))
@@ -655,6 +726,7 @@ let explain_spreads (e : entry) ((_, spread_mapping, _) : mapping_type) : string
     | Drop (a, _)
     | Keep (a, _)
     | Permute (a, _)
+    | Swap (a, _, _)
     | SetAt (a, _, _)
     | InsertAt (a, _, _)
     | Spread a
@@ -780,8 +852,33 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
     check_and_update_mapping (Nparray restentries) (Dimensions t) mapping
       restfunargstyps restargtyps
   in
+  (* the ways a run of dims can take a prefix of s2. when nothing follows, or
+     single dims follow and the argument has no list variables, only one split
+     can match, so try it first: a mismatch is then reported where it is, not
+     after giving the run no dims *)
+  let splits_fitting_first () =
+    let splits = Utils.all_splits s2 in
+    let single = function
+      | Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _
+      | BroadcastDim _ ->
+          true
+      | _ -> false
+    in
+    if
+      restentries = []
+      || List.for_all single restentries
+         && not (List.exists Z3utils.is_list_var s2)
+    then
+      let n = List.length s2 - List.length restentries in
+      let fits, others =
+        List.partition (fun (front, _) -> List.length front = n) splits
+      in
+      fits @ others
+    else splits
+  in
   match s1 with
-  | (Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _)
+  | Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _
+  | BroadcastDim _
     when match s2 with h :: _ -> Z3utils.is_list_var h | [] -> false ->
       let h = List.hd s2 in
       let unknown () =
@@ -810,6 +907,36 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       | h :: _, None ->
           expected_got (fun () -> x ^ " (an int of unknown value)") h
       end
+  | BroadcastDim x -> (
+      (* the dim is x or 1. an unbound x is bound to it, which is one of the
+         values x may take *)
+      match s2 with
+      | [] -> too_few ()
+      | h :: t -> (
+          let bound =
+            match StringMap.find_opt x var_mapping with
+            | Some e -> Some (Ok e)
+            | None when StringMap.mem x param_mapping ->
+                Some
+                  (Option.to_result ~none:() (int_param_expr x param_mapping))
+            | None -> None
+          in
+          let eh = Z3utils.mk_int h in
+          match bound with
+          | None ->
+              continue_with t
+                (StringMap.add x eh var_mapping, spread_mapping, param_mapping)
+          | Some (Ok v)
+            when Z3utils.prove
+                   (Z3.Boolean.mk_or Z3utils.ctx
+                      [
+                        Z3.Boolean.mk_eq Z3utils.ctx eh v;
+                        Z3.Boolean.mk_eq Z3utils.ctx eh (mk_int_numeral 1);
+                      ]) ->
+              continue_with t mapping
+          | Some (Ok v) -> expected_got (fun () -> with_value x v ^ " or 1") h
+          | Some (Error ()) ->
+              expected_got (fun () -> x ^ " (an int of unknown value) or 1") h))
   | Id x ->
       begin match s2 with
       | [] -> too_few ()
@@ -846,30 +973,7 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
       begin match StringMap.find_opt v spread_mapping with
       | None ->
           (* haven't mapped this spread variable yet *)
-          let split_rem = Utils.all_splits s2 in
-          (* when single dims follow and the argument has no list variables,
-             only one split can match, so try it first: a mismatch is then
-             reported where it is, not after giving the spread no dims *)
-          let single = function
-            | Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _
-            | Index _ ->
-                true
-            | _ -> false
-          in
-          let split_rem =
-            if
-              List.for_all single restentries
-              && not (List.exists Z3utils.is_list_var s2)
-            then
-              let n = List.length s2 - List.length restentries in
-              let fits, others =
-                List.partition
-                  (fun (front, _) -> List.length front = n)
-                  split_rem
-              in
-              fits @ others
-            else split_rem
-          in
+          let split_rem = splits_fitting_first () in
 
           let rec try_splits (splits : (string list * string list) list) =
             begin match splits with
@@ -904,7 +1008,8 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
                   ^ string_of_dims s2)
           end
       end
-  | Drop _ | Keep _ | Broadcasted _ | Permute _ | SetAt _ | InsertAt _ ->
+  | Drop _ | Keep _ | Broadcasted _ | Permute _ | Swap _ | SetAt _ | InsertAt _
+    ->
       begin match derived_dims s1 mapping with
       | None ->
           fail_here (fun () ->
@@ -932,42 +1037,27 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
             else expected_got (fun () -> string_of_int i) h
       end
   | Broadcast s ->
+      (* as in jaxtyping, the dims must broadcast to *s: fewer dims are fine,
+         more are not *)
       let arr = Z3utils.expand (StringMap.find s spread_mapping) in
-      let rev_arr = List.rev arr in
-
-      let splits = Utils.all_splits s2 in
-
-      let rec prove_broadcast l1 l2 =
-        match (l1, l2) with
-        | [], _ | _, [] -> true
-        | h1 :: t1, h2 :: t2
-          when Z3utils.is_list_var h1 || Z3utils.is_list_var h2 ->
-            (* 1s broadcast with whatever a list variable turns out to be *)
-            (h1 = h2 && prove_broadcast t1 t2) || all_ones l1 || all_ones l2
-        | h1 :: t1, h2 :: t2 ->
-            (prove_int_eq (mk_int h1) (mk_int h2)
-            || prove_int_eq (mk_int h1) (mk_int_numeral 1)
-            || prove_int_eq (mk_int h2) (mk_int_numeral 1))
-            && prove_broadcast t1 t2
-      in
-
       let rec try_splits l =
         match l with
-        | [] ->
-            fail_here (fun () ->
-                "no prefix of " ^ string_of_dims s2 ^ " broadcasts with *" ^ s
-                ^ " = " ^ string_of_dims arr)
+        | [] -> None
         | (front, back) :: t ->
-            let rev = List.rev front in
-            if prove_broadcast rev rev_arr then
+            if broadcasts_to front arr then
               begin match continue_with back mapping with
               | None -> try_splits t
               | Some x -> Some x
               end
-            else try_splits t
+            else begin
+              ignore
+                (fail_here (fun () ->
+                     string_of_dims front ^ " doesn't broadcast to *" ^ s
+                     ^ " = " ^ string_of_dims arr));
+              try_splits t
+            end
       in
-
-      try_splits splits
+      try_splits (splits_fitting_first ())
 
 (* ---- inferred preconditions ---- *)
 
@@ -1060,10 +1150,15 @@ let product (es : Z3.Expr.expr list) : Z3.Expr.expr =
   | [ e ] -> e
   | es -> Z3.Arithmetic.mk_mul Z3utils.ctx es
 
-(* total / rest by cancelling factors, e.g. b * n * 12 / (b * 3 * 4) = n:
-   each factor of rest provably equals one of total's, or the unmatched ones
-   are numbers dividing the product of total's numbers. nonlinear divisibility
-   is often too hard for the solver, and this is the common case *)
+(* total / rest by cancelling factors, e.g. b * n * 12 / (b * 3 * 4) = n.
+   nonlinear divisibility is often too hard for the solver, and these are the
+   common cases. first each factor of rest that provably equals one of
+   total's cancels it. then what's left of rest, unmatched, must be:
+   - numbers dividing the product of total's numbers
+   - or factors that multiply to some of total's, e.g. h * d_k = d_model for
+     view(b, -1, h, d_k) of [b, n, d_model]
+   - or each a number, or a positive divisor of one of total's factors t,
+     which becomes t // u: k of n after assert n % k == 0 *)
 let quotient (total : Z3.Expr.expr) (rest : Z3.Expr.expr) : Z3.Expr.expr option
     =
   let rec cancel ts unmatched = function
@@ -1075,18 +1170,69 @@ let quotient (total : Z3.Expr.expr) (rest : Z3.Expr.expr) : Z3.Expr.expr option
   in
   let ts, unmatched = cancel (factors total) [] (factors rest) in
   let values es = List.map Z3utils.determined_int es in
-  match values unmatched with
-  | vs when List.for_all Option.is_some vs ->
-      let divisor = List.fold_left (fun a v -> a * Option.get v) 1 vs in
-      let numbers, others =
-        List.partition (fun t -> Z3utils.determined_int t <> None) ts
-      in
-      let n = List.fold_left (fun a v -> a * Option.get v) 1 (values numbers) in
-      if divisor <> 0 && n mod divisor = 0 then
-        let k = n / divisor in
-        Some (product (if k = 1 then others else mk_int_numeral k :: others))
-      else None
-  | _ -> None
+  let numeric ts unmatched =
+    match values unmatched with
+    | vs when List.for_all Option.is_some vs ->
+        let divisor = List.fold_left (fun a v -> a * Option.get v) 1 vs in
+        let numbers, others =
+          List.partition (fun t -> Z3utils.determined_int t <> None) ts
+        in
+        let n =
+          List.fold_left (fun a v -> a * Option.get v) 1 (values numbers)
+        in
+        if divisor <> 0 && n mod divisor = 0 then
+          let k = n / divisor in
+          Some (product (if k = 1 then others else mk_int_numeral k :: others))
+        else None
+    | _ -> None
+  in
+  let grouped ts unmatched =
+    let target = product unmatched in
+    let rec subsets k l =
+      if k = 0 then [ ([], l) ]
+      else
+        match l with
+        | [] -> []
+        | x :: l ->
+            List.map (fun (s, c) -> (x :: s, c)) (subsets (k - 1) l)
+            @ List.map (fun (s, c) -> (s, x :: c)) (subsets k l)
+    in
+    (* the fewest factors first *)
+    if List.length ts > 8 then None
+    else
+      List.find_map
+        (fun k ->
+          List.find_map
+            (fun (s, others) ->
+              if Z3utils.prove_int_eq (product s) target then
+                Some (product others)
+              else None)
+            (subsets k ts))
+        (List.init (List.length ts) (fun i -> i + 1))
+  in
+  let divided ts unmatched =
+    let divides u t =
+      prove_positive u
+      && Z3utils.prove_int_eq
+           (Z3.Arithmetic.mk_mul Z3utils.ctx
+              [ u; Z3.Arithmetic.mk_div Z3utils.ctx t u ])
+           t
+    in
+    let step acc u =
+      Option.bind acc (fun (ts, numbers) ->
+          if Z3utils.determined_int u <> None then Some (ts, u :: numbers)
+          else
+            match List.find_opt (divides u) ts with
+            | Some t ->
+                let t' = Z3.Arithmetic.mk_div Z3utils.ctx t u in
+                Some (List.map (fun x -> if x == t then t' else x) ts, numbers)
+            | None -> None)
+    in
+    Option.bind
+      (List.fold_left step (Some (ts, [])) unmatched)
+      (fun (ts, numbers) -> numeric ts numbers)
+  in
+  List.find_map (fun f -> f ts unmatched) [ numeric; grouped; divided ]
 
 (* determine the pending size x from total = product, where product is x times
    the other sizes: torch needs their product to be positive and to divide
@@ -1186,8 +1332,8 @@ let rec check_ret_type_with_mapping (rettyp : typ)
             | Spread v ->
                 let args = Z3utils.expand (StringMap.find v spread_mapping) in
                 args @ check_ret_type_with_mapping' t
-            | Drop _ | Keep _ | Broadcasted _ | Permute _ | SetAt _ | InsertAt _
-              ->
+            | Drop _ | Keep _ | Broadcasted _ | Permute _ | Swap _ | SetAt _
+            | InsertAt _ ->
                 begin match derived_dims h mapping with
                 | None ->
                     raise
@@ -1200,18 +1346,19 @@ let rec check_ret_type_with_mapping (rettyp : typ)
                 let gend_var = mk_int_var i in
 
                 gend_var :: check_ret_type_with_mapping' t
-            | Broadcast _ -> raise (TypeError "Broadcast in return type")
+            | Broadcast _ | BroadcastDim _ ->
+                raise (TypeError "Broadcast in return type")
             end
       in
 
       Dimensions (check_ret_type_with_mapping' l)
 
-let constr_expr (c : constr) (mapping : mapping_type) :
+let constr_expr ?positive (c : constr) (mapping : mapping_type) :
     (Z3.Expr.expr, dim_error) result =
   let ( let* ) = Result.bind in
   let rel mk e1 e2 =
-    let* l = expr_of_dim e1 mapping in
-    let* r = expr_of_dim e2 mapping in
+    let* l = expr_of_dim ?positive e1 mapping in
+    let* r = expr_of_dim ?positive e2 mapping in
     Ok (mk Z3utils.ctx l r)
   in
   match c with
@@ -1273,6 +1420,9 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
         | _ -> ())
       argtyps;
 
+    (* the int arguments come from an instance, which satisfies it. it's
+       about them alone, so the shapes being matched may rely on it *)
+    assume_invariant sg (StringMap.empty, StringMap.empty, param_mapping);
     best_failure := None;
     current_params :=
       Array.of_list
@@ -1294,8 +1444,6 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
              | None -> "Could not type check"))
     | Some mapping ->
         sig_progress := List.length sg.params;
-        (* the arguments come from an instance, which satisfies it *)
-        assume_invariant sg mapping;
         (* a -1 in an argument's shape is determined by an equation the
            callee requires, e.g. reshape's prod(A) = prod(B) *)
         let pending =
@@ -1358,6 +1506,9 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
           (fun c ->
             match constr_expr c mapping with
             | Ok e -> Z3.Solver.add Z3utils.solver [ e ]
+            (* like an invariant, a fact with a quotient the caller can't
+               state is dropped, which only assumes less *)
+            | Error (Bad_divisor _) -> ()
             | Error err -> raise (TypeError (show_dim_error err)))
           sg.ensures;
 
@@ -1441,6 +1592,8 @@ type stmt =
   | LetAnnot of string * typ * term (* y: T = f(x), checking the value is a T *)
   | Return of term
   | Unpack of string list * term (* a, b = f(x) *)
+  | Assume of constr
+    (* assert c: the rest of the body may assume c. its names are int locals *)
   | At of int * string * stmt (* a statement with its source line and text *)
 [@@deriving show]
 
@@ -1462,6 +1615,7 @@ let rec string_of_stmt = function
       x ^ ": " ^ string_of_typ typ ^ " = " ^ string_of_term t
   | Return t -> "return " ^ string_of_term t
   | Unpack (xs, t) -> String.concat ", " xs ^ " = " ^ string_of_term t
+  | Assume c -> "assert " ^ show_constr c
   | At (_, text, _) -> text
 
 (* a dimension equal to an int used as a shape entry *)
@@ -1482,7 +1636,7 @@ let dim_of_int (v : arg) : string =
            ^ string_of_expr (Z3utils.mk_int v)
            ^ " may be negative"))
   (* like zeros of an opaque int: some size, unknown *)
-  | Int -> Z3utils.fresh_dim ()
+  | Int -> Z3utils.fresh_dim ~label:"?" ()
   | Dimensions _ | Tuple _ ->
       raise (TypeError ("expected an int in a shape, got " ^ string_of_arg v))
 
@@ -1528,8 +1682,38 @@ let rigid_entry
       ([ l ], (var_mapping, StringMap.add a [ l ] spread_mapping, param_mapping))
   | Spread a -> (Z3utils.expand (StringMap.find a spread_mapping), mapping)
   | Broadcast a ->
-      (* whatever broadcasts with a: nothing more is known about it *)
-      ([ Z3utils.fresh_list ~label:(string_of_entry e) () ], mapping)
+      (* some shape that broadcasts to a's dims: that's all that's known
+         about it, so it has at most as many *)
+      let target = Z3utils.expand (StringMap.find a spread_mapping) in
+      let l = Z3utils.fresh_list ~label:("#" ^ a) () in
+      Hashtbl.replace Z3utils.broadcast_targets l target;
+      Z3.Solver.add Z3utils.solver
+        [
+          Z3.Arithmetic.mk_le Z3utils.ctx (Z3utils.rank_of_list l)
+            (length_expr target);
+        ];
+      ([ l ], mapping)
+  | BroadcastDim x ->
+      (* x or 1. an x not bound yet is rigid like any other dim *)
+      let v, mapping =
+        match expr_of_dim (Id x) mapping with
+        | Ok v -> (v, mapping)
+        | Error (Unknown_param _) when not (StringMap.mem x param_mapping) ->
+            let d = Z3utils.mk_int (Z3utils.fresh_dim ~label:x ()) in
+            (d, (StringMap.add x d var_mapping, spread_mapping, param_mapping))
+        | Error err -> raise (TypeError (show_dim_error err))
+      in
+      let d = Z3utils.fresh_dim ~label:(string_of_entry e) () in
+      let ed = Z3utils.mk_int d in
+      Z3.Solver.add Z3utils.solver
+        [
+          Z3.Boolean.mk_or Z3utils.ctx
+            [
+              Z3.Boolean.mk_eq Z3utils.ctx ed v;
+              Z3.Boolean.mk_eq Z3utils.ctx ed (mk_int_numeral 1);
+            ];
+        ];
+      ([ d ], mapping)
   | Id _ | Int _ | Add _ | Sub _ | Mul _ | Div _ | Prod _ | Rank _ | Index _
     -> (
       match expr_of_dim e mapping with
@@ -1539,7 +1723,8 @@ let rigid_entry
           Hashtbl.replace Z3utils.dim_labels d (string_of_entry e);
           ([ d ], mapping)
       | Error err -> raise (TypeError (show_dim_error err)))
-  | Drop _ | Keep _ | Broadcasted _ | Permute _ | SetAt _ | InsertAt _ -> (
+  | Drop _ | Keep _ | Broadcasted _ | Permute _ | Swap _ | SetAt _ | InsertAt _
+    -> (
       match derived_dims e mapping with
       | Some l -> (l, mapping)
       | None ->
@@ -1695,6 +1880,25 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
               List.fold_left2 (fun l x v -> StringMap.add x v l) locals xs vs
             in
             walk locals kinds mapping rest
+        | Assume c ->
+            (* the assert passed, so c holds from here on. a quotient needs a
+               positive divisor, which may be inferred like a size (x % 0
+               raises). a fact that can't be stated, e.g. about a tensor, is
+               dropped, as dropping an assert is sound *)
+            let mapping' = (StringMap.empty, StringMap.empty, locals) in
+            let positive e =
+              prove_or_infer
+                (Z3.Arithmetic.mk_gt Z3utils.ctx e (mk_int_numeral 0))
+            in
+            (* infer nothing for a fact that would be dropped anyway *)
+            let statable =
+              Result.is_ok (constr_expr ~positive:(fun _ -> true) c mapping')
+            in
+            (if statable then
+               match constr_expr ~positive c mapping' with
+               | Ok e -> Z3.Solver.add Z3utils.solver [ e ]
+               | Error _ -> ());
+            walk locals kinds mapping rest
         | LetAnnot (x, typ, t) ->
             let kinds =
               here (fun () ->
@@ -1717,14 +1921,23 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
             walk (StringMap.add x v locals) kinds mapping rest)
   in
   Z3utils.scoped (fun () ->
+      let rigid_params =
+        List.fold_left (fun (args, mapping) p ->
+            let arg, mapping = rigid_param mapping p in
+            (args @ [ (fst p, arg) ], mapping))
+      in
+      (* the invariant is about the int parameters, which come first, so the
+         arrays' shapes may rely on it, e.g. d // h for h >= 1 *)
+      let ints, arrays = List.partition is_int_typed fd.sg.params in
       let args, mapping =
         in_fn "" (fun () ->
-            List.fold_left
-              (fun (args, mapping) p ->
-                let arg, mapping = rigid_param mapping p in
-                (args @ [ (fst p, arg) ], mapping))
-              ([], (StringMap.empty, StringMap.empty, StringMap.empty))
-              (ints_first fd.sg.params))
+            let args, mapping =
+              rigid_params
+                ([], (StringMap.empty, StringMap.empty, StringMap.empty))
+                ints
+            in
+            assume_invariant fd.sg mapping;
+            rigid_params (args, mapping) arrays)
       in
       in_fn "" (fun () ->
           assume_invariant fd.sg mapping;

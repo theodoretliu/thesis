@@ -34,6 +34,17 @@ class JaxtypingSyntax(unittest.TestCase):
         self.assertEqual(user("#*b", scope=scope), [["Broadcast", "b"]])
         self.assertEqual(user("*b", scope=scope), [["Spread", "b"]])
 
+    def test_broadcastable_dim(self):
+        # #q is q or 1; like a dim, it binds q where it first appears
+        scope = Scope(stub=False)
+        self.assertEqual(
+            user("b #q m", scope=scope), [["Id", "b"], ["BroadcastDim", "q"], ["Id", "m"]]
+        )
+        self.assertIn("q", scope.dims)
+        self.assertEqual(user("#_"), [["Id", "_1"]])
+        with self.assertRaisesRegex(ShapeError, "only be in a parameter's shape"):
+            user("#q", binding=False, scope=scope)
+
     def test_arithmetic(self):
         self.assertEqual(
             user("n n-1 2*n (n+1)//2"),
@@ -56,7 +67,8 @@ class JaxtypingSyntax(unittest.TestCase):
 
     def test_rejected(self):
         for s, msg in [
-            ("#n", "single broadcastable dim"),
+            ("#3", "expected a name after `#`"),
+            ("*n #n", "both as a dim and as"),
             ("?n", "`\\?` dims"),
             ("n/2", "use //"),
             ("*drop(A,0)", "only available in stubs"),
@@ -77,6 +89,9 @@ class StubSyntax(unittest.TestCase):
             stub("*drop(A, dim) *keep(A,0,-1) *permute(A,1,0)", scope=scope),
             [["Drop", "A", ["dim"]], ["Keep", "A", [0, -1]], ["Permute", "A", [1, 0]]],
         )
+        self.assertEqual(stub("*swap(A,i,-1)", scope=scope), [["Swap", "A", "i", -1]])
+        with self.assertRaisesRegex(ShapeError, "two indices"):
+            stub("*swap(A,0)", scope=scope)
         self.assertEqual(
             stub("*setat(A,dim,1) *insertat(A,-1,n+1) *broadcast(A,B)", scope=scope),
             [

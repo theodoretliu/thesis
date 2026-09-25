@@ -39,10 +39,12 @@ let rec entry (j : Yojson.Safe.t) : entry =
   | `List [ `String "Div"; a; b ] -> Div (entry a, entry b)
   | `List [ `String "Spread"; a ] -> Spread (string a)
   | `List [ `String "Broadcast"; a ] -> Broadcast (string a)
+  | `List [ `String "BroadcastDim"; x ] -> BroadcastDim (string x)
   | `List [ `String "Broadcasted"; l ] -> Broadcasted (list string l)
   | `List [ `String "Drop"; a; l ] -> Drop (string a, list index l)
   | `List [ `String "Keep"; a; l ] -> Keep (string a, list index l)
   | `List [ `String "Permute"; a; l ] -> Permute (string a, list index l)
+  | `List [ `String "Swap"; a; i; j ] -> Swap (string a, index i, index j)
   | `List [ `String "SetAt"; a; l; d ] -> SetAt (string a, list index l, entry d)
   | `List [ `String "InsertAt"; a; i; d ] ->
       InsertAt (string a, index i, entry d)
@@ -113,6 +115,7 @@ let rec stmt (j : Yojson.Safe.t) : stmt =
   | `List [ `String "LetAnnot"; x; ty; t ] -> LetAnnot (string x, typ ty, term t)
   | `List [ `String "Return"; t ] -> Return (term t)
   | `List [ `String "Unpack"; xs; t ] -> Unpack (list string xs, term t)
+  | `List [ `String "Assume"; c ] -> Assume (constr c)
   | `List [ `String "At"; line; text; s ] -> At (int line, string text, stmt s)
   | j -> bad "a statement" j
 
