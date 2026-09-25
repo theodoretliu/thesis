@@ -24,8 +24,9 @@ let contains s sub =
   in
   go 0
 
-let sg ?(requires = []) ?(exists = []) ?(ensures = []) (params, ret) =
-  { params; ret; requires; exists; ensures }
+let sg ?(requires = []) ?(exists = []) ?(ensures = []) ?(invariant = [])
+    (params, ret) =
+  { params; ret; requires; exists; ensures; invariant }
 
 (* ---- the library bodies call ---- *)
 
@@ -116,9 +117,23 @@ let fit =
       sg ([ ("X", arr [ Id "n" ]); ("i", TypeInt) ], arr [ Id "n" ]);
     ]
 
+(* a module's method, lowered: nn.Linear's forward takes its instance's ints
+   first. its invariant is Linear's constructor's requires *)
+let lin_params =
+  [ ("i", TypeInt); ("o", TypeInt); ("X", arr [ Spread "B"; Id "i" ]) ]
+
+let lin_ret = arr [ Spread "B"; Id "o" ]
+
+let lin =
+  sg ~invariant:[ Le (Int 0, Id "i"); Le (Int 0, Id "o") ] (lin_params, lin_ret)
+
+let lin_bare = sg (lin_params, lin_ret)
+
 let env =
   [
     ("linear", Sig linear);
+    ("lin", Sig lin);
+    ("lin_bare", Sig lin_bare);
     ("relu", Sig relu);
     ("matmul", Sig matmul);
     ("add", Sig add);
@@ -140,8 +155,8 @@ let env =
 let call f args = Call (f, args)
 let var x = Var x
 
-let def ?requires ?exists ?ensures name params ret body =
-  { name; sg = sg ?requires ?exists ?ensures (params, ret); body }
+let def ?requires ?exists ?ensures ?invariant name params ret body =
+  { name; sg = sg ?requires ?exists ?ensures ?invariant (params, ret); body }
 
 let checks fd =
   match check_fundef env fd with
@@ -707,6 +722,54 @@ let () =
   expect "tuple parameters are rejected" (fun () ->
       match
         check_signature (sg ([ ("t", TypeTuple [ TypeInt ]) ], TypeInt))
+      with
+      | () -> false
+      | exception KindError _ -> true)
+
+(* ---- invariants: an instance's ints satisfy its constructor's requires ---- *)
+
+let () =
+  let project f =
+    def "f"
+      [ ("a", TypeInt); ("b", TypeInt); ("x", arr [ Id "n"; Id "a" ]) ]
+      (arr [ Id "n"; Id "b" ])
+      [ Return (call f [ var "a"; var "b"; var "x" ]) ]
+  in
+  expect "a call assumes the callee's invariant" (fun () ->
+      checks (project "lin"));
+  expect "without one, the callee's returned dim may be negative" (fun () ->
+      rejects ~saying:[ "b may be negative" ] (project "lin_bare"));
+  let zeros_k ?invariant () =
+    def ?invariant "f"
+      [ ("k", TypeInt) ]
+      (arr [ Id "k" ])
+      [ Return (call "zeros" [ var "k" ]) ]
+  in
+  expect "a body assumes its own invariant" (fun () ->
+      checks (zeros_k ~invariant:[ Le (Int 0, Id "k") ] ()));
+  expect "without it, the body fails" (fun () ->
+      rejects ~saying:[ "may be negative" ] (zeros_k ()));
+  expect "invariants don't leak out of the body" (fun () ->
+      let before = Z3.Solver.get_num_assertions solver in
+      ignore (checks (project "lin"));
+      Z3.Solver.get_num_assertions solver = before);
+  expect "an invariant the solver can't state is dropped" (fun () ->
+      (* h may not be positive, so n // h has no solver term *)
+      checks
+        (def
+           ~invariant:[ Eq (Id "q", Div (Id "n", Id "h")) ]
+           "f"
+           [
+             ("n", TypeInt);
+             ("h", TypeInt);
+             ("q", TypeInt);
+             ("x", arr [ Id "q" ]);
+           ]
+           (arr [ Id "q" ])
+           [ Return (var "x") ]));
+  expect "an invariant may only mention the parameters" (fun () ->
+      match
+        check_signature (sg ~invariant:[ Le (Int 0, Id "z") ] ([], TypeInt))
       with
       | () -> false
       | exception KindError _ -> true)

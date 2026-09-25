@@ -489,7 +489,7 @@ let () =
 (* ---- step 5: prod/rank, refinements, existentials ---- *)
 
 let sg ?(requires = []) ?(exists = []) ?(ensures = []) (params, ret) =
-  { params; ret; requires; exists; ensures }
+  { params; ret; requires; exists; ensures; invariant = [] }
 
 (* flatten(x: [b, *A]) -> [b, prod(A)]; linear(x: [n, 6272]) *)
 let flatten1 =

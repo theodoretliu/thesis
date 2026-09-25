@@ -54,6 +54,29 @@ class Examples(unittest.TestCase):
         )
         self.assertIn("causal_mask requires size >= 0 (inferred from its body)", report.notes[0])
 
+    def test_module_invariants(self):
+        # constructors infer what nn.Linear and nn.Embedding require. every
+        # instance satisfies it, so the methods assume it rather than
+        # inferring requires of their own
+        report = check_file(EXAMPLES / "pass" / "modules.py", STUBS, self.checker)
+        self.assertEqual(
+            report.inferred,
+            {
+                "FeedForward.__init__": ["d_model >= 0", "expansion >= 0"],
+                "Classifier.__init__": ["vocab >= 0", "d_model >= 0", "n_classes >= 0"],
+            },
+        )
+        self.assertEqual(
+            sorted(report.passed),
+            [
+                "Classifier.__init__",
+                "Classifier.features",
+                "Classifier.forward",
+                "FeedForward.__init__",
+                "FeedForward.forward",
+            ],
+        )
+
 
 class CheckerCli(unittest.TestCase):
     def test_invalid_ir(self):

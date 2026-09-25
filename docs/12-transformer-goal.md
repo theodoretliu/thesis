@@ -20,9 +20,12 @@ uvx --python 3.12 --with torch --with numpy --with jaxtyping --with beartype \
 - `test_progress` is a ratchet over `PASSING`. It fails if a function stops checking, or if one starts
   checking and isn't recorded.
 
-**Progress:** 3 of 24. Milestone 1 is done ([13-free-functions.md](13-free-functions.md)):
-`subsequent_mask`, `make_masks` and `loss` check. `attention` still fails on its `Optional` mask (G4), and
-the 9 classes are skipped.
+**Progress:** 13 of 24. Milestone 1 is done ([13-free-functions.md](13-free-functions.md)):
+`subsequent_mask`, `make_masks` and `loss` check. Milestone 2 is done ([14-modules.md](14-modules.md)):
+`PositionwiseFeedForward`, `Embeddings`, `MultiHeadedAttention.__init__`, `EncoderLayer.__init__`,
+`DecoderLayer.__init__` and `Transformer.encode`/`decode`/`forward` check. `attention` and
+`MultiHeadedAttention.forward` fail on their `Optional` masks (G4), which blocks the layers' `forward`s.
+`PositionalEncoding`, `Encoder`, `Decoder` and `Transformer.__init__` need milestone 4.
 
 ## What's missing
 
@@ -83,9 +86,10 @@ Callers only use signatures, so a method can check before the methods it calls d
 | Milestone | Gaps | Targets it unlocks |
 |---|---|---|
 | 1. Free functions (done) | G3, G6, G8, G13, and G15's functional stubs | `subsequent_mask`, `make_masks`, `loss` |
-| 2. Modules | G1, G2, and G15's `nn` classes | `PositionwiseFeedForward`, `Embeddings`, `EncoderLayer.__init__`, `DecoderLayer.__init__`, `Transformer.encode`/`decode`/`forward` |
+| 2. Modules (done) | G1, G2, and G15's `nn` classes | `PositionwiseFeedForward`, `Embeddings`, `EncoderLayer.__init__`, `DecoderLayer.__init__`, `Transformer.encode`/`decode`/`forward` (and `MultiHeadedAttention.__init__`) |
 | 3. Attention | G4, G7, G11, G12, G14 | `attention`, `MultiHeadedAttention`, and `EncoderLayer.forward`/`DecoderLayer.forward`, whose calls need its `Optional` and `#q` signature |
 | 4. Stacks and encodings | G5, G9, G10 | `Encoder`, `Decoder`, `PositionalEncoding`, `Transformer.__init__` |
 
-Milestone 2 is the biggest design step, because it decides how modules are typed. After each milestone,
-add the names that now check to `PASSING` in `test_goal.py`.
+Milestone 2 decided how modules are typed: they're lowered to their constructor's ints, and methods assume
+a class invariant ([14-modules.md](14-modules.md)). After each milestone, add the names that now check to
+`PASSING` in `test_goal.py`.

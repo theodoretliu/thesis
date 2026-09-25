@@ -6,6 +6,10 @@ existential, and asserts in the body are ignored (dropping them is sound).
 The exception is an int parameter: a dim with its name is its value, so
 subsequent_mask(size: int) -> Bool[Tensor, "1 size size"] says what it means.
 
+A method's signature starts with its instance's dims: the int parameters of
+its class's __init__, so forward(x: "b n d_model") refers to the d_model the
+module was built with. `self` itself isn't a parameter.
+
 Stubs follow the checker's own conventions: a shape may name an int
 parameter (sum's `dim`), Dim["..."] is an int equal to a dim expression,
 Shape["*S"] is a tuple of ints used as a shape, and asserts in the body are
@@ -86,6 +90,10 @@ def typ_of(ann: ast.expr | None, scope: Scope, binding: bool, what: str) -> tupl
     """The IR type of an annotation, and whether it's a Shape[...] (stubs)."""
     if ann is None:
         raise FrontendError(f"{what} needs an annotation")
+    if isinstance(ann, ast.Constant) and ann.value is None:
+        if binding:
+            raise FrontendError(f"`None` is only supported as a return type, on {what}", ann)
+        return ir.NoneType(), False
     if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
         # a forward reference, e.g. x: "Float[Tensor, 'n']"
         try:
@@ -208,14 +216,36 @@ def constraints(test: ast.expr, scope: Scope) -> list[Json]:
     return out
 
 
-def build_signature(fn: ast.FunctionDef, stub: bool) -> tuple[Overload, Scope]:
-    """The signature of fn, and the scope its body's annotations share."""
+def instance_ints(init: ast.FunctionDef | None) -> list[str]:
+    """A class's instance dims: the parameters of its __init__ annotated
+    `int` (bools are flags, not dims)."""
+    if init is None:
+        return []
+    a = init.args
+    return [
+        arg.arg
+        for arg in (a.posonlyargs + a.args)[1:] + a.kwonlyargs
+        if isinstance(arg.annotation, ast.Name) and arg.annotation.id == "int"
+    ]
+
+
+def build_signature(
+    fn: ast.FunctionDef, stub: bool, instance: list[str] | None = None, init: bool = False
+) -> tuple[Overload, Scope]:
+    """The signature of fn, and the scope its body's annotations share. A
+    method has an instance: its class's instance dims, which come first as
+    int parameters. A method or an __init__ doesn't list `self`. An __init__
+    returns None."""
     a = fn.args
     if a.kwarg is not None:
         raise FrontendError("**kwargs isn't supported", fn)
-    int_params: set[str] = set()
+    method = instance is not None or init
+    if method and not (a.posonlyargs + a.args):
+        raise FrontendError("a method needs a `self` parameter", fn)
+    instance = instance or []
+    int_params: set[str] = set(instance)
     scope = Scope(stub)
-    taken = set() if stub else names_in(shape_strings(fn))
+    taken = (set() if stub else names_in(shape_strings(fn))) | set(instance)
 
     def ir_name(name: str, typ: Json) -> str:
         # user functions keep shape names and parameter names apart, except
@@ -233,15 +263,21 @@ def build_signature(fn: ast.FunctionDef, stub: bool) -> tuple[Overload, Scope]:
     specs = [
         (arg, "positional" if i < len(a.posonlyargs) else "normal", d)
         for i, (arg, d) in enumerate(zip(positional, defaults))
-    ]
+    ][1 if method else 0 :]
     if a.vararg is not None:
         specs.append((a.vararg, "varargs", None))
     specs += [(arg, "keyword", d) for arg, d in zip(a.kwonlyargs, a.kw_defaults)]
 
     params: list[Param] = []
-    ir_params: list[Json] = []
+    ir_params: list[Json] = [[name, ir.IntType()] for name in instance]
     for arg, kind, default in specs:
         what = f"parameter {arg.arg}"
+        if arg.arg in instance:
+            raise FrontendError(
+                f"parameter {arg.arg} has the name of one of the instance's dims "
+                "(an int parameter of __init__)",
+                arg,
+            )
         try:
             typ, shape = typ_of(arg.annotation, scope, True, what)
         except FrontendError as e:
@@ -264,7 +300,10 @@ def build_signature(fn: ast.FunctionDef, stub: bool) -> tuple[Overload, Scope]:
         ir_params.append([name, typ])
     scope.int_params = int_params
 
-    ret, _ = typ_of(fn.returns, scope, False, "the return type")
+    if init and fn.returns is None:
+        ret = ir.NoneType()
+    else:
+        ret, _ = typ_of(fn.returns, scope, False, "the return type")
     # jaxtyping: a name only the return type mentions is existential
     exists: list[str] = []
     for e in (e for a in arrays(ret) for e in a[1]):

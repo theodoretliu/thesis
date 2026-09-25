@@ -114,7 +114,9 @@ same work around one target, the Transformer, and adds what it needs (modules, i
 2. **`x.shape[i]`**, as an int equal to a dim, like `x.size(i)` (done in 13-free-functions.md).
 3. **Control flow.** `if` needs a join of shapes (or both branches checked against the declared type), and
    loops need invariants.
-4. **Classes.** `nn.Module.forward`, with parameter shapes from annotations on `self` attributes.
+4. **Classes.** `nn.Module` subclasses check, typed by their constructor's ints rather than annotations on
+   `self` attributes ([14-modules.md](14-modules.md)). Modules as values (arguments, returns, locals) and
+   subclassing user classes remain.
 5. **Lists:** `torch.cat`, `torch.stack`. (Tuple returns and unpacking are done.)
 6. **Single broadcastable dims (`#b`)**, and an in-place `Broadcast` ("broadcasts *to* A") for `x += y`.
 7. **NumPy stubs**, and more of torch.

@@ -47,8 +47,9 @@ uvx ruff format . && uvx ruff check .
 
 ## What gets checked
 
-Every top-level function with at least one annotation. Classes are skipped with a note. Every parameter
-and the return type need annotations:
+Every top-level function with at least one annotation, and every such method of an `nn.Module` subclass
+(see [Modules](#modules)). Other classes are skipped with a note. Every parameter and the return type need
+annotations, except `self` and `__init__`'s return type:
 
 | Annotation | Checker type |
 |---|---|
@@ -58,6 +59,7 @@ and the return type need annotations:
 | `float` | a 0-d array: a float broadcasts like one |
 | `Tensor`, `np.ndarray` with no shape | a parameter of any shape (not allowed as a return type) |
 | `tuple[A, B]` (return types only) | a tuple of those types |
+| `None` (return types only) | the empty tuple |
 
 Shape strings follow jaxtyping:
 
@@ -102,6 +104,44 @@ Bodies must be straight-line code:
 Anything else gets an explicit error, and the rest of the file is still checked. That covers control flow,
 augmented assignment (`x += y`), indexing and `x.shape`, lambdas, and module-level values.
 
+## Modules
+
+A subclass of `nn.Module` is typed by its constructor's ints, its *instance dims*: the parameters of
+`__init__` annotated `int`. A dim named after one, in any method's annotations, is that int:
+
+```python
+class FeedForward(nn.Module):
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        self.w_1 = nn.Linear(d_model, d_ff)
+        self.w_2 = nn.Linear(d_ff, d_model)
+
+    def forward(self, x: Float[Tensor, "b n d_model"]) -> Float[Tensor, "b n d_model"]:
+        return self.w_2(self.w_1(x).relu())
+```
+
+An attribute's type comes from its one assignment in `__init__`, so `self.w_1(x)` is `nn.Linear(d_model,
+d_ff)`'s `forward`. The frontend lowers this away: a method becomes a function that takes its instance
+dims first, and `self.w_1(x)` becomes `torch.nn.Linear.forward(d_model, d_ff, x)`.
+
+- `module(x)` calls `forward`. `self.f(x)` calls an attribute's `forward` or `self`'s method `f`, and
+  `self.a.m(x)` calls an attribute's method `m`.
+- A module attribute is built by a constructor call, `self.f = Module(...)`. Its instance dims must be
+  computed from the int parameters of `__init__` (or other such attributes), not from its locals.
+- Any other attribute is its expression, evaluated again from the instance dims: `self.d_k = d_model //
+  h` makes `self.d_k` the int `d_model // h`.
+- An attribute must be assigned once, at the top level of `__init__`. It can't be assigned anywhere
+  else, and `__init__` can't reassign an int parameter.
+- `__init__` returns `None`, and `super().__init__()` is skipped.
+- A method may assume its class invariant: the requires of `__init__`, including those inferred for it.
+  Every instance was built satisfying them. So may a call: `nn.Linear`'s constructor requires
+  `out_features >= 0`, so `self.head(x)` returns a valid size without the method requiring it.
+
+Modules can't be passed around yet: not as arguments, return values, or locals. Only direct subclasses
+of `nn.Module` are checked. See [docs/14-modules.md](../docs/14-modules.md).
+
+## Calls
+
 Calls resolve through the file's imports (`import torch.nn.functional as F`, `from torch import
 relu`) to user functions, in any order and including recursion, or to stubs. Methods and properties
 resolve to the stub classes. Operators go to the stub module `operator`: `x @ w` becomes
@@ -129,9 +169,23 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
   needs an inferred precondition.
 - Asserts in the body are preconditions (`assert prod(A) == prod(B)`), or postconditions if they mention
   an existential (`assert m <= n` for `unique`).
+- A class that subclasses `Module` is a module class, typed like a user's module: its instance dims are
+  the `int` parameters of `__init__`, and its methods' annotations may name them. Asserts in `__init__`
+  are the constructor's requires, which its instances then satisfy:
 
-The shipped stubs cover common torch functions, `Tensor` methods, `torch.nn.functional` and Python's
-operators. A call with no stub is an error, never an unknown shape.
+  ```python
+  class Linear(Module):
+      def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+          assert in_features >= 0 and out_features >= 0
+
+      def forward(
+          self, input: Float[Tensor, "*B in_features"]
+      ) -> Float[Tensor, "*B out_features"]: ...
+  ```
+
+The shipped stubs cover common torch functions, `Tensor` methods, `torch.nn.functional`, the modules
+`nn.Linear`, `nn.Embedding`, `nn.LayerNorm`, `nn.Dropout` and `nn.ReLU`, `math.sqrt`/`math.log`, and
+Python's operators. A call with no stub is an error, never an unknown shape.
 
 ## The IR
 
@@ -145,7 +199,8 @@ entry  ["Id", n] ["Int", i] ["Add"|"Sub"|"Mul"|"Div", e, e] ["Spread", A] ["Broa
                                                                  idx is a name or an int
 typ    ["Array", [entry]] ["Int"] ["IntExpr", entry] ["Literal", i] ["Tuple", [typ]]
 constr ["Eq"|"Le"|"Lt", entry, entry]
-sig    {"params": [[name, typ]], "ret": typ, "requires": [constr], "exists": [name], "ensures": [constr]}
+sig    {"params": [[name, typ]], "ret": typ, "requires": [constr], "exists": [name], "ensures": [constr],
+        "invariant": [constr], "instances": [{"init": f, "ints": [[init_param, param]]}]}
 term   ["Var", x] ["Lit", i] ["Call", f, [term]] ["Shape", [term]] ["Scalar"] ["Tuple", [term]]
 stmt   ["Let", x, term] ["LetAnnot", x, typ, term] ["Unpack", [x], term] ["Return", term]
        ["At", line, text, stmt]
@@ -153,6 +208,11 @@ stmt   ["Let", x, term] ["LetAnnot", x, typ, term] ["Unpack", [x], term] ["Retur
 program {"env": [{"name": f, "overloads": [sig]}],
          "functions": [{"name": f, "sig": sig, "body": [stmt] | null}]}
 ```
+
+`None` is `["Tuple", []]`. A signature's `invariant` and `instances` are optional. An invariant is
+assumed by the body and by callers. Each instance says that some of the parameters are an instance's dims:
+the CLI adds the constructor `init`'s requires, renamed to those parameters, to the invariant. A method
+has one instance, for `self`.
 
 A function whose body couldn't be translated has `"body": null`, so callers still use its signature. The
 checker prints `{"results": [{"name": f, "error": null | message, "inferred": ["n >= 0", ...]}]}` and
