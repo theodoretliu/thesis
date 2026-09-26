@@ -8,7 +8,12 @@ subsequent_mask(size: int) -> Bool[Tensor, "1 size size"] says what it means.
 
 A method's signature starts with its instance's dims: the int parameters of
 its class's __init__, so forward(x: "b n d_model") refers to the d_model the
-module was built with. `self` itself isn't a parameter.
+module was built with. `self` itself isn't a parameter. A parameter annotated
+with a module class (dropout: nn.Dropout) is likewise its instance's dims.
+
+An Optional[T] parameter is either None or a T at each call, so a function
+has a signature for each choice of which Optional parameters are None. A
+None parameter isn't in that signature at all.
 
 Stubs follow the checker's own conventions: a shape may name an int
 parameter (sum's `dim`), Dim["..."] is an int equal to a dim expression,
@@ -20,8 +25,9 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from typing import Any
 
 from . import ir
 from .ir import Json
@@ -46,13 +52,21 @@ class FrontendError(Exception):
         self.line = getattr(node, "lineno", None)
 
 
+# a None argument, or an Optional parameter's None default. it selects a
+# signature rather than being passed, so it's never in the IR
+NONE: Json = ["None"]
+
+
 @dataclass
 class Param:
     name: str  # the Python name, for keyword arguments
     ir_name: str
     kind: str  # "positional" (before /), "normal", "keyword" (after *), "varargs"
-    default: Json | None  # a term, or None if the argument is required
+    default: Json | None  # a term, NONE, or None if the argument is required
     shape: bool  # Shape[...]: takes a tuple of ints, or collects *args
+    optional: bool = False  # Optional[T]: None or a T
+    module: Any = None  # a module class: an instance is passed as its dims
+    ints: list[str] = field(default_factory=list)  # a module parameter's IR ints
 
 
 @dataclass
@@ -158,6 +172,31 @@ def typ_of_ast(ann: ast.expr, scope: Scope, binding: bool, what: str) -> tuple[J
     raise FrontendError(f"unsupported annotation `{ast.unparse(ann)}` on {what}", ann)
 
 
+def is_none(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def optional_inner(ann: ast.expr) -> ast.expr | None:
+    """T, if the annotation is Optional[T], Union[T, None] or T | None."""
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        try:
+            ann = ast.copy_location(ast.parse(ann.value, mode="eval").body, ann)
+        except SyntaxError:
+            return None
+    if isinstance(ann, ast.Subscript) and last_name(ann.value) == "Optional":
+        return ann.slice
+    if isinstance(ann, ast.Subscript) and last_name(ann.value) == "Union":
+        elts = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else [ann.slice]
+        rest = [e for e in elts if not is_none(e)]
+        return rest[0] if len(elts) == 2 and len(rest) == 1 else None
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):
+        if is_none(ann.right):
+            return ann.left
+        if is_none(ann.left):
+            return ann.right
+    return None
+
+
 def literal_int(node: ast.expr) -> int | None:
     """The value of an int or bool literal (bools are 0 and 1), if node is one."""
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, bool)):
@@ -230,12 +269,21 @@ def instance_ints(init: ast.FunctionDef | None) -> list[str]:
 
 
 def build_signature(
-    fn: ast.FunctionDef, stub: bool, instance: list[str] | None = None, init: bool = False
+    fn: ast.FunctionDef,
+    stub: bool,
+    instance: list[str] | None = None,
+    init: bool = False,
+    module_class: Callable[[ast.expr], Any] | None = None,
+    nones: frozenset[str] = frozenset(),
 ) -> tuple[Overload, Scope]:
     """The signature of fn, and the scope its body's annotations share. A
     method has an instance: its class's instance dims, which come first as
     int parameters. A method or an __init__ doesn't list `self`. An __init__
-    returns None."""
+    returns None.
+
+    module_class gives the module class an annotation names, if any, and nones
+    are the Optional parameters that are None in this signature. Params lists
+    every parameter, for binding calls."""
     a = fn.args
     if a.kwarg is not None:
         raise FrontendError("**kwargs isn't supported", fn)
@@ -270,6 +318,7 @@ def build_signature(
 
     params: list[Param] = []
     ir_params: list[Json] = [[name, ir.IntType()] for name in instance]
+    instances: list[Json] = []
     for arg, kind, default in specs:
         what = f"parameter {arg.arg}"
         if arg.arg in instance:
@@ -278,8 +327,39 @@ def build_signature(
                 "(an int parameter of __init__)",
                 arg,
             )
+        ann = arg.annotation
+        inner = None if ann is None else optional_inner(ann)
+        optional = inner is not None
+        if optional:
+            if stub or init:
+                where = "in stubs" if stub else "on `__init__`"
+                raise FrontendError(f"`Optional` parameters aren't supported {where} yet", arg)
+            ann = inner
+        if optional and default is not None and is_none(default):
+            default_value = NONE
+        else:
+            default_value = None if default is None else default_term(default)
+        cls = None if ann is None or module_class is None else module_class(ann)
+        if cls is not None:
+            # an instance, passed as its dims: dropout.p for Dropout's p
+            if default_value is not None and default_value is not NONE:
+                raise FrontendError(f"{what} is a module; its default can only be None", arg)
+            ints = [f"{arg.arg}.{n}" for n in cls.ints]
+            params.append(Param(arg.arg, arg.arg, kind, default_value, False, optional, cls, ints))
+            if arg.arg not in nones:
+                ir_params += [[n, ir.IntType()] for n in ints]
+                int_params.update(ints)
+                if ints:
+                    instances.append(
+                        {"init": cls.init, "ints": [list(p) for p in zip(cls.ints, ints)]}
+                    )
+            continue
+        if arg.arg in nones:
+            # None here: not a parameter of this signature, so its shape binds nothing
+            params.append(Param(arg.arg, arg.arg, kind, default_value, False, optional))
+            continue
         try:
-            typ, shape = typ_of(arg.annotation, scope, True, what)
+            typ, shape = typ_of(ann, scope, True, what)
         except FrontendError as e:
             e.line = e.line or arg.lineno
             raise
@@ -293,8 +373,9 @@ def build_signature(
                 name=arg.arg,
                 ir_name=name,
                 kind=kind,
-                default=None if default is None else default_term(default),
+                default=default_value,
                 shape=shape,
+                optional=optional,
             )
         )
         ir_params.append([name, typ])
@@ -334,6 +415,8 @@ def build_signature(
                 (ensures if mentions_exists else requires).append(c)
 
     sig = ir.signature(ir_params, ret, requires, exists, ensures)
+    if instances:
+        sig["instances"] = instances
     return Overload(sig=sig, params=params), scope
 
 

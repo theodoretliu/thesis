@@ -8,10 +8,11 @@ The mapping onto the checker's entries:
     ...  *_     an unnamed run of dims        a fresh Spread
     _  _foo     one dim that isn't checked    a fresh Id
     *#batch     batch again, broadcastable    Broadcast (a first occurrence binds it)
+    #n          n or 1                        BroadcastDim (parameters only)
     dim-1       arithmetic on names and ints  Add/Sub/Mul/Div (+ - * //)
 
 Stubs may also use list functions that jaxtyping doesn't have, since library
-signatures need them: *drop(A,i), *keep(A,i), *permute(A,i,j),
+signatures need them: *drop(A,i), *keep(A,i), *permute(A,i,j), *swap(A,i,j),
 *setat(A,i,d), *insertat(A,i,d), *broadcast(A,B), and prod(A), rank(A),
 A[i] inside arithmetic.
 """
@@ -47,7 +48,7 @@ class Scope:
 
 
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-LIST_FUNCTIONS = ("drop", "keep", "permute", "setat", "insertat", "broadcast")
+LIST_FUNCTIONS = ("drop", "keep", "permute", "swap", "setat", "insertat", "broadcast")
 
 
 def tokens(s: str) -> list[str]:
@@ -116,10 +117,18 @@ def parse_token(tok: str, scope: Scope, binding: bool) -> Json:
         scope.spreads.add(tok)
         return ir.Spread(tok)
 
-    if broadcast:
-        raise ShapeError(f"`#{tok}` (a single broadcastable dim) isn't supported yet; `*#name` is")
     if anonymous:
         return ir.Id(scope.fresh_name())
+    if broadcast:
+        if not IDENT.match(tok):
+            raise ShapeError(f"expected a name after `#`, got {mods + tok!r}")
+        if tok in scope.spreads:
+            raise ShapeError(f"`{tok}` is used both as a dim and as `*{tok}`")
+        if not binding:
+            raise ShapeError(f"a broadcastable dim `#{tok}` can only be in a parameter's shape")
+        # like a dim, it binds tok where it first appears
+        scope.dims.add(tok)
+        return ir.BroadcastDim(tok)
     if re.fullmatch(r"[0-9]+", tok):
         return ir.Int(int(tok))
     if IDENT.match(tok):
@@ -213,6 +222,10 @@ def list_function(src: str, scope: Scope) -> Json:
     a = names[0]
     if f in ("drop", "keep", "permute"):
         return [f.capitalize(), a, [index(i) for i in args[1:]]]
+    if f == "swap":
+        if len(args) != 3:
+            raise ShapeError(f"*swap takes a spread and two indices, got *{src}")
+        return ["Swap", a, index(args[1]), index(args[2])]
     if len(args) != 3:
         raise ShapeError(f"*{f} takes a spread, an index and a dim, got *{src}")
     if f == "setat":

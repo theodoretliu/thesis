@@ -27,7 +27,7 @@ class Report:
     errors: list[str]  # "path:line: message"
     notes: list[str]
     checked: int  # functions whose bodies went to the checker
-    passed: list[str]  # functions whose bodies checked without errors
+    passed: list[str]  # functions whose bodies checked without errors, in every case
     inferred: dict[str, list[str]]  # preconditions the checker added, e.g. n >= 0
 
 
@@ -58,7 +58,8 @@ def check_file(path: Path, stubs: Stubs, checker: Path) -> Report:
     errors = [
         (e.line, f"in {e.function}: {e.message}" if e.function else e.message) for e in t.errors
     ]
-    lines = {name: f.node.lineno for name, f in t.functions.items()}
+    # a function with Optional parameters is several checker functions
+    lines = {v: t.functions[name].node.lineno for v, name in t.owners.items()}
     results = run_checker(program, checker) if program["functions"] else []
     for r in results:
         if r["error"] is None:
@@ -74,11 +75,14 @@ def check_file(path: Path, stubs: Stubs, checker: Path) -> Report:
         for name, cs in inferred.items()
     ]
     notes.sort(key=lambda n: n[0])
-    checked = sum(f["body"] is not None for f in program["functions"])
     failed = {r["name"] for r in results if r["error"] is not None}
+    ok = {
+        f["name"]: f["body"] is not None and f["name"] not in failed for f in program["functions"]
+    }
+    checked = sum(any(v.body is not None for v in f.variants) for f in t.functions.values())
     passed = [
-        f["name"] for f in program["functions"]
-        if f["body"] is not None and f["name"] not in failed
+        name for name, f in t.functions.items()
+        if f.variants and all(ok[v.name] for v in f.variants)
     ]  # fmt: skip
     errors.sort(key=lambda e: e[0])
     return Report(

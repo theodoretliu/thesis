@@ -37,6 +37,11 @@ def Broadcast(a: str) -> Json:
     return ["Broadcast", a]
 
 
+def BroadcastDim(x: str) -> Json:
+    """jaxtyping's #x: one dim equal to x or 1."""
+    return ["BroadcastDim", x]
+
+
 def Broadcasted(names: list[str]) -> Json:
     return ["Broadcasted", names]
 
@@ -138,6 +143,12 @@ def Return(t: Json) -> Json:
 
 def Unpack(names: list[str], t: Json) -> Json:
     return ["Unpack", names, t]
+
+
+def Assume(c: Json) -> Json:
+    """An assert: the rest of the body may assume the constraint c, whose
+    names are int locals."""
+    return ["Assume", c]
 
 
 def At(line: int, text: str, stmt: Json) -> Json:

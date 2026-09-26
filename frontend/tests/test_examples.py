@@ -77,6 +77,26 @@ class Examples(unittest.TestCase):
             ],
         )
 
+    def test_optional_cases_and_asserts(self):
+        report = check_file(EXAMPLES / "pass" / "masks.py", STUBS, self.checker)
+        # a function passes if it checks in every case: forward with and
+        # without a mask
+        self.assertEqual(
+            sorted(report.passed),
+            ["SelfAttention.__init__", "SelfAttention.forward", "fold", "masked_softmax"],
+        )
+        self.assertEqual(
+            report.inferred,
+            {
+                # % by h: h is inferred positive, and the assert is an ensures
+                "SelfAttention.__init__": ["h >= 1", "d_model >= 0"],
+                # torch can't infer a -1 if the other sizes multiply to 0
+                "SelfAttention.forward": ["b >= 1", "d_model >= 1"],
+                "SelfAttention.forward[mask=None]": ["b >= 1", "d_model >= 1"],
+                "fold": ["k >= 1", "b >= 1"],
+            },
+        )
+
 
 class CheckerCli(unittest.TestCase):
     def test_invalid_ir(self):

@@ -2,12 +2,18 @@
 
 Every top-level function with an annotation is checked, and so is every
 annotated method of an nn.Module subclass. A body must be straight-line code:
-assignments (plain, annotated, or unpacking a tuple), asserts (ignored), and a
-return. Calls resolve to user functions (in any order, through their
-signatures) or stubs; operators desugar to the stub module `operator` (x @ w
-is operator.matmul), methods and properties to the stub classes (x.sum(-1) is
+assignments (plain, annotated, or unpacking a tuple), asserts, and a return.
+Calls resolve to user functions (in any order, through their signatures) or
+stubs; operators desugar to the stub module `operator` (x @ w is
+operator.matmul), methods and properties to the stub classes (x.sum(-1) is
 torch.Tensor.sum(x, -1)). Keyword and default arguments are bound in the
 frontend, so the checker only sees positional arguments.
+
+An Optional parameter is None or not at each call, and the frontend always
+knows which. So a function with Optional parameters is checked once for each
+choice of which are None, as separate checker functions (attention and
+attention[mask=None]), and `if mask is not None:` is decided statically in
+each. A call goes to the one its arguments select.
 
 Modules are lowered away. An instance is known by its instance dims, the int
 arguments its __init__ was called with, and a method is a function that takes
@@ -29,11 +35,13 @@ from . import ir
 from .ir import Json
 from .shapes import Scope
 from .signatures import (
+    NONE,
     FrontendError,
     Overload,
     Param,
     build_signature,
     instance_ints,
+    is_none,
     typ_of,
 )
 
@@ -179,15 +187,35 @@ SYMBOLS = {
 }  # fmt: skip
 
 
+# each Optional parameter doubles the checks, so there's a limit
+MAX_OPTIONAL = 4
+
+
+@dataclass
+class Variant:
+    """A function where some of its Optional parameters are None: a checker
+    function of its own, named like attention[mask=None]."""
+
+    nones: frozenset[str]
+    name: str
+    overload: Overload
+    scope: Scope
+    body: list[Json] | None = None  # None if its body has errors
+
+
 @dataclass
 class Function:
     """A top-level function or a method to check."""
 
     node: ast.FunctionDef
     cls: ModuleClass | None = None  # a method's class
-    overload: Overload | None = None  # None if its signature has errors
-    scope: Scope | None = None
-    body: list[Json] | None = None  # None if its body has errors
+    # the variant where nothing is None, whose params bind calls. None if its
+    # signature has errors
+    overload: Overload | None = None
+    variants: list[Variant] = field(default_factory=list)
+
+    def variant(self, nones: frozenset[str]) -> Variant:
+        return next(v for v in self.variants if v.nones == nones)
 
 
 @dataclass
@@ -203,6 +231,10 @@ class BindError(Exception):
 
 class CycleError(FrontendError):
     pass
+
+
+class Unstated(Exception):
+    """Part of an assert the checker can't state, so it's dropped."""
 
 
 # an argument: an expression, or a term already translated (a receiver)
@@ -222,6 +254,9 @@ class Translator:
         self.terms: dict[int, Json] = {}
         self.classes: dict[str, ModuleClass] = {}  # user classes
         self.locals: dict[str, str] = {}  # Python name -> IR name
+        self.module_locals: dict[str, Instance] = {}  # module parameters
+        self.nones: set[str] = set()  # locals that are None here
+        self.owners: dict[str, str] = {}  # a checker function's Python function
         self.cls: ModuleClass | None = None  # the class of the method translated
         self.self_name: str | None = None  # its name for self
         self.in_init = False
@@ -261,32 +296,70 @@ class Translator:
 
         for name, f in self.functions.items():
             try:
-                if f.cls is None:
-                    f.overload, f.scope = build_signature(f.node, stub=False)
-                elif f.node.name == "__init__":
-                    f.overload, f.scope = build_signature(f.node, stub=False, init=True)
-                else:
-                    f.overload, f.scope = build_signature(f.node, stub=False, instance=f.cls.ints)
-                    if f.cls.ints:
-                        f.overload.sig["instances"] = f.cls.instances()
+                f.variants = self.variants(name, f)
+                f.overload = f.variants[0].overload
             except FrontendError as e:
                 self.errors.append(Error(e.line or f.node.lineno, name, e.message))
-        for name, f in self.functions.items():
-            if f.overload is None:
-                continue
-            try:
-                f.body = self.body(f)
-            except FrontendError as e:
-                self.errors.append(Error(e.line or f.node.lineno, name, e.message))
+            for v in f.variants:
+                self.owners[v.name] = name
+        for f in self.functions.values():
+            reported = set()
+            for v in f.variants:
+                try:
+                    v.body = self.body(f, v)
+                except FrontendError as e:
+                    line = e.line or f.node.lineno
+                    # the same error in each variant is reported once
+                    if (line, e.message) not in reported:
+                        reported.add((line, e.message))
+                        self.errors.append(Error(line, v.name, e.message))
 
         return {
             "env": [{"name": k, "overloads": v} for k, v in self.env.items()],
             "functions": [
-                {"name": name, "sig": f.overload.sig, "body": f.body}
-                for name, f in self.functions.items()
-                if f.overload is not None
+                {"name": v.name, "sig": v.overload.sig, "body": v.body}
+                for f in self.functions.values()
+                for v in f.variants
             ],
         }
+
+    def variants(self, name: str, f: Function) -> list[Variant]:
+        """f's signature for each choice of which Optional parameters are
+        None, starting with none of them."""
+
+        def build(nones: frozenset[str]) -> tuple[Overload, Scope]:
+            if f.cls is not None and f.node.name == "__init__":
+                return build_signature(f.node, stub=False, init=True)
+            instance = None if f.cls is None else f.cls.ints
+            ov, scope = build_signature(
+                f.node, stub=False, instance=instance, module_class=self.module_class, nones=nones
+            )
+            if f.cls is not None and f.cls.ints:
+                ov.sig["instances"] = f.cls.instances() + ov.sig.get("instances", [])
+            return ov, scope
+
+        full = build(frozenset())
+        for p in full[0].params:
+            if p.module is not None:
+                self.use_init(p.module)
+        optional = [p.name for p in full[0].params if p.optional]
+        if len(optional) > MAX_OPTIONAL:
+            raise FrontendError(
+                f"at most {MAX_OPTIONAL} parameters can be Optional: each one doubles "
+                "the cases checked",
+                f.node,
+            )
+        out = []
+        for k in range(2 ** len(optional)):
+            nones = frozenset(n for i, n in enumerate(optional) if k >> i & 1)
+            ov, scope = full if not nones else build(nones)
+            label = ",".join(f"{n}=None" for n in optional if n in nones)
+            out.append(Variant(nones, f"{name}[{label}]" if nones else name, ov, scope))
+        return out
+
+    def module_class(self, ann: ast.expr) -> ModuleClass | None:
+        """The module class an annotation names, e.g. nn.Dropout."""
+        return self.class_named(ann)
 
     # ---- classes ----
 
@@ -330,17 +403,25 @@ class Translator:
                 self.functions.pop(key, None)
                 self.unannotated.add(key)
 
+    def is_local(self, name: str) -> bool:
+        """A local variable of the body translated: a value, a module
+        parameter, or None."""
+        return name in self.locals or name in self.module_locals or name in self.nones
+
     def class_named(self, e: ast.expr) -> ModuleClass | None:
         """The module class an expression like nn.Linear or Encoder names."""
-        if isinstance(e, ast.Name) and e.id not in self.locals and e.id in self.classes:
+        if isinstance(e, ast.Name) and not self.is_local(e.id) and e.id in self.classes:
             return self.classes[e.id]
         q = self.qualname(e)
         return None if q is None else self.stubs.classes.get(q)
 
     def instance(self, e: ast.expr) -> Instance | None:
-        """The module e is, if it's self or a module attribute of one."""
+        """The module e is, if it's self, a module parameter, or a module
+        attribute of one of those."""
         if isinstance(e, ast.Name):
-            if self.cls is None or e.id != self.self_name or e.id in self.locals:
+            if e.id in self.module_locals:
+                return self.module_locals[e.id]
+            if self.cls is None or e.id != self.self_name or self.is_local(e.id):
                 return None
             return Instance(self.cls, [ir.Var(n) for n in self.cls.ints])
         if isinstance(e, ast.Attribute):
@@ -360,8 +441,17 @@ class Translator:
     def as_instance(self, cls: ModuleClass, f):
         """Run f where the names are those of cls's __init__, standing for an
         instance's dims: its int parameters, and self."""
-        saved = (self.locals, self.terms, self.cls, self.self_name, self.in_init, self.in_instance)
-        self.locals = {n: n for n in cls.ints}
+        saved = (
+            self.locals,
+            self.module_locals,
+            self.nones,
+            self.terms,
+            self.cls,
+            self.self_name,
+            self.in_init,
+            self.in_instance,
+        )
+        self.locals, self.module_locals, self.nones = {n: n for n in cls.ints}, {}, set()
         self.terms = {}
         self.cls, self.self_name, self.in_init, self.in_instance = cls, cls.self_name, False, True
         try:
@@ -369,6 +459,8 @@ class Translator:
         finally:
             (
                 self.locals,
+                self.module_locals,
+                self.nones,
                 self.terms,
                 self.cls,
                 self.self_name,
@@ -498,48 +590,223 @@ class Translator:
                         f"`{key}` has no annotations, so calls to it can't be checked", e
                     )
                 raise FrontendError(f"`{inst.cls.name}` has no method `{name}`", e)
-            if f.overload is None:
-                raise FrontendError(f"`{key}`'s signature has errors", e)
-            try:
-                return ir.Call(key, inst.ints + self.bind(f.overload.params, args, keywords))
-            except BindError as err:
-                raise FrontendError(f"`{key}` doesn't take these arguments: {err}", e) from None
+            return self.user_call(key, f, inst.ints, args, keywords, e)
         callee = self.stubs.functions.get(key)
         if callee is None:
             raise FrontendError(f"no stub for `{key}`", e)
-        # its invariant is the constructor's requires
-        init = self.stubs.functions.get(inst.cls.init)
-        if init is not None:
-            self.env[init.name] = [ov.sig for ov in init.overloads]
+        self.use_init(inst.cls)
         return self.stub_call(callee, args, keywords, e, prefix=inst.ints)
+
+    def use_init(self, cls: ModuleClass) -> None:
+        """A stub class's instances satisfy its constructor's requires, so the
+        checker needs its signature."""
+        init = self.stubs.functions.get(cls.init)
+        if not cls.user and init is not None:
+            self.env[init.name] = [ov.sig for ov in init.overloads]
+
+    def user_call(
+        self,
+        key: str,
+        f: Function,
+        prefix: list[Json],
+        args: list[Arg],
+        keywords: dict[str, ast.expr],
+        e: ast.AST,
+    ) -> Json:
+        """A call to a user function or method (after prefix, its instance
+        dims). The Optional parameters given None select the variant called,
+        and a module argument is passed as its dims."""
+        if f.overload is None:
+            raise FrontendError(f"`{key}`'s signature has errors", e)
+        params = f.overload.params
+        try:
+            terms = self.bind(params, args, keywords)
+        except BindError as err:
+            raise FrontendError(f"`{key}` doesn't take these arguments: {err}", e) from None
+        nones = frozenset(p.name for p, t in zip(params, terms) if t is NONE)
+        out = list(prefix)
+        for p, t in zip(params, terms):
+            if t is not NONE:
+                out += t if p.module is not None else [t]
+        return ir.Call(f.variant(nones).name, out)
 
     # ---- statements ----
 
-    def body(self, f: Function) -> list[Json]:
-        assert f.overload is not None and f.scope is not None
-        self.locals = {p.name: p.ir_name for p in f.overload.params}
+    def body(self, f: Function, v: Variant) -> list[Json]:
+        params = v.overload.params
+        present = [p for p in params if p.name not in v.nones]
+        self.locals = {p.name: p.ir_name for p in present if p.module is None}
+        self.module_locals = {
+            p.name: Instance(p.module, [ir.Var(n) for n in p.ints])
+            for p in present
+            if p.module is not None
+        }
+        self.nones = set(v.nones)
+        self.sig = v.overload.sig
         self.terms = {}
-        self.scope = f.scope
+        self.scope = v.scope
         self.cls = f.cls
         self.in_init = f.cls is not None and f.node.name == "__init__"
         self.self_name = f.node.args.args[0].arg if f.cls is not None else None
-        self.returns_none = f.overload.sig["ret"] == ir.NoneType()
-        out: list[Json] = []
+        self.returns_none = v.overload.sig["ret"] == ir.NoneType()
         stmts = list(f.node.body)
         if stmts and is_docstring(stmts[0]):
             stmts.pop(0)
-        for s in stmts:
-            if isinstance(s, (ast.Assert, ast.Pass)):
-                continue  # dropping a runtime check is sound
-            if self.in_init and is_super_init(s):
-                continue  # nn.Module's __init__
-            out.append(ir.At(s.lineno, self.text(s), self.stmt(s)))
-            if isinstance(s, ast.Return):
-                break
+        out, returned = self.block(stmts)
         # falling off the end returns None
-        if self.returns_none and not (out and out[-1][3][0] == "Return"):
+        if self.returns_none and not returned:
             out.append(ir.Return(ir.Tuple([])))
         return out
+
+    def block(self, stmts: list[ast.stmt]) -> tuple[list[Json], bool]:
+        """The statements' IR, and whether they return. An `if` on whether a
+        local is None is decided here, so only the branch taken is
+        translated."""
+        out: list[Json] = []
+        for s in stmts:
+            if isinstance(s, ast.Pass):
+                continue
+            if isinstance(s, ast.Assert):
+                out += self.assertion(s)
+                continue
+            if self.in_init and is_super_init(s):
+                continue  # nn.Module's __init__
+            if isinstance(s, ast.If):
+                taken = s.body if self.static_test(s.test, s, "`if`") else s.orelse
+                inner, returned = self.block(taken)
+                out += inner
+                if returned:
+                    return out, True
+                continue
+            if (
+                isinstance(s, ast.Assign)
+                and len(s.targets) == 1
+                and isinstance(s.targets[0], ast.Name)
+                and is_none(s.value)
+            ):
+                # x = None: known statically, like a None parameter
+                name = s.targets[0].id
+                self.assign(name)
+                del self.locals[name]
+                self.nones.add(name)
+                continue
+            out.append(ir.At(s.lineno, self.text(s), self.stmt(s)))
+            if isinstance(s, ast.Return):
+                return out, True
+        return out, False
+
+    def static_test(self, test: ast.expr, node: ast.AST, what: str) -> bool:
+        """The value of a test on whether locals are None, which is known in
+        each variant: x is None, x is not None, and not/and/or of those."""
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            return not self.static_test(test.operand, node, what)
+        if isinstance(test, ast.BoolOp):
+            # short-circuiting, so a later operand may be one that isn't known
+            stop = isinstance(test.op, ast.Or)
+            for v in test.values:
+                if self.static_test(v, node, what) == stop:
+                    return stop
+            return not stop
+        if (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], (ast.Is, ast.IsNot))
+        ):
+            left, right = test.left, test.comparators[0]
+            if is_none(left):
+                left, right = right, left
+            if is_none(right) and isinstance(left, ast.Name):
+                if not self.is_local(left.id):
+                    raise FrontendError(f"`{left.id}` isn't a local variable", left)
+                none = left.id in self.nones
+                return none if isinstance(test.ops[0], ast.Is) else not none
+        raise FrontendError(
+            f"{what} isn't supported yet, except on whether variables are None "
+            f"(`x is None`, `x is not None`): `{self.text(node)}`",
+            node,
+        )
+
+    # ---- asserts ----
+
+    def assertion(self, s: ast.Assert) -> list[Json]:
+        """An assert, which the rest of the body may assume: comparisons of
+        ints with + - * //, and `a % b == 0`, written b * (a // b) == a. A call
+        or attribute in one, like x.size(1), is evaluated first. Other
+        conjuncts are dropped, which is sound.
+
+        In __init__, a fact about the instance dims holds for every instance,
+        so it's also an ensures of the constructor, part of the class
+        invariant."""
+        lets: list[tuple[str, Json]] = []
+        cs: list[Json] = []
+        conjuncts = (
+            s.test.values
+            if isinstance(s.test, ast.BoolOp) and isinstance(s.test.op, ast.And)
+            else [s.test]
+        )
+        for test in conjuncts:
+            mark = len(lets)
+            try:
+                cs += self.comparison(test, lets)
+            except (Unstated, FrontendError, BindError):
+                del lets[mark:]
+        text = self.text(s)
+        out = [ir.At(s.lineno, text, ir.Let(x, t)) for x, t in lets]
+        out += [ir.At(s.lineno, text, ir.Assume(c)) for c in cs]
+        if self.in_init:
+            assert self.cls is not None
+            self.sig["ensures"] += [c for c in cs if about_ints(c, self.cls.ints)]
+        return out
+
+    def comparison(self, test: ast.expr, lets: list[tuple[str, Json]]) -> list[Json]:
+        if not isinstance(test, ast.Compare):
+            raise Unstated
+        a, b = test.left, test.comparators[0]
+        if len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq):
+            # a % b == 0: b divides a
+            mod = a if is_zero(b) else b if is_zero(a) else None
+            if isinstance(mod, ast.BinOp) and isinstance(mod.op, ast.Mod):
+                x = self.assert_arith(mod.left, lets)
+                y = self.assert_arith(mod.right, lets)
+                return [["Eq", ir.binop("Mul", y, ir.binop("Div", x, y)), x]]
+        out = []
+        left = self.assert_arith(a, lets)
+        for op, right_e in zip(test.ops, test.comparators):
+            right = self.assert_arith(right_e, lets)
+            if isinstance(op, ast.Eq):
+                out.append(["Eq", left, right])
+            elif isinstance(op, ast.LtE):
+                out.append(["Le", left, right])
+            elif isinstance(op, ast.Lt):
+                out.append(["Lt", left, right])
+            elif isinstance(op, ast.GtE):
+                out.append(["Le", right, left])
+            elif isinstance(op, ast.Gt):
+                out.append(["Lt", right, left])
+            else:
+                raise Unstated
+            left = right
+        return out
+
+    def assert_arith(self, e: ast.expr, lets: list[tuple[str, Json]]) -> Json:
+        """An int expression in an assert, over the body's int locals."""
+        ops = {ast.Add: "Add", ast.Sub: "Sub", ast.Mult: "Mul", ast.FloorDiv: "Div"}
+        if isinstance(e, ast.BinOp) and type(e.op) in ops:
+            return ir.binop(
+                ops[type(e.op)], self.assert_arith(e.left, lets), self.assert_arith(e.right, lets)
+            )
+        if isinstance(e, ast.Constant) and isinstance(e.value, (bool, int)):
+            return ir.Int(int(e.value))
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.USub):
+            return ir.binop("Sub", ir.Int(0), self.assert_arith(e.operand, lets))
+        if isinstance(e, ast.Name) and e.id in self.locals:
+            return ir.Id(self.locals[e.id])
+        if isinstance(e, (ast.Call, ast.Attribute)):
+            # evaluated first, into a local that no Python name can clash with
+            name = f"({ast.unparse(e)})"
+            lets.append((name, self.term(e)))
+            return ir.Id(name)
+        raise Unstated
 
     def stmt(self, s: ast.stmt) -> Json:
         if isinstance(s, ast.Assign):
@@ -590,6 +857,8 @@ class Translator:
         raise FrontendError(f"{kind} isn't supported yet: `{self.text(s)}`", s)
 
     def assign(self, name: str) -> str:
+        self.nones.discard(name)
+        self.module_locals.pop(name, None)
         if self.cls is not None and name in self.cls.ints:
             if self.in_init:
                 raise FrontendError(
@@ -640,6 +909,8 @@ class Translator:
         if isinstance(e, ast.Name):
             if e.id in self.locals:
                 return ir.Var(self.locals[e.id])
+            if e.id in self.nones:
+                raise FrontendError(f"`{e.id}` is None here", e)
             if self.instance(e) is not None:
                 raise FrontendError(
                     f"`{e.id}` can only be used for its attributes and methods here", e
@@ -676,6 +947,9 @@ class Translator:
             return self.call(e)
         if isinstance(e, ast.Attribute):
             return self.attribute(e)
+        if isinstance(e, ast.IfExp):
+            test = self.static_test(e.test, e, "a conditional expression")
+            return self.term(e.body if test else e.orelse)
         if isinstance(e, ast.Tuple):
             if any(isinstance(x, ast.Starred) for x in e.elts):
                 raise FrontendError("starred items in tuples aren't supported", e)
@@ -690,7 +964,7 @@ class Translator:
         """The qualified name an expression like F.relu or torch.nn.functional
         refers to, if it's rooted at an import."""
         if isinstance(e, ast.Name):
-            if e.id in self.locals:
+            if self.is_local(e.id):
                 return None
             return self.aliases.get(e.id)
         if isinstance(e, ast.Attribute):
@@ -719,14 +993,8 @@ class Translator:
         inst = self.instance(f.value) if isinstance(f, ast.Attribute) else None
         if inst is not None:
             return self.method_call(inst, f.attr, args, keywords, e)
-        if isinstance(f, ast.Name) and f.id not in self.locals and f.id in self.functions:
-            user = self.functions[f.id]
-            if user.overload is None:
-                raise FrontendError(f"`{f.id}`'s signature has errors", e)
-            try:
-                return ir.Call(f.id, self.bind(user.overload.params, args, keywords))
-            except BindError as err:
-                raise FrontendError(f"`{f.id}` doesn't take these arguments: {err}", e) from None
+        if isinstance(f, ast.Name) and not self.is_local(f.id) and f.id in self.functions:
+            return self.user_call(f.id, self.functions[f.id], [], args, keywords, e)
         q = self.qualname(f)
         if q is not None:
             callee = self.stubs.functions.get(q)
@@ -873,9 +1141,28 @@ class Translator:
             raise BindError("a tuple isn't expected here")
         return lambda: self.arg_term(a, p)
 
+    def none_value(self, a: Arg) -> bool:
+        """Whether an argument is None: the literal, or a local that's None."""
+        if isinstance(a, tuple):
+            return False
+        return is_none(a) or (isinstance(a, ast.Name) and a.id in self.nones)
+
     def arg_term(self, a: Arg, p: Param | None) -> Json:
+        """The term for an argument. For an Optional parameter it may be NONE,
+        and for a module parameter it's the instance's dims."""
         if isinstance(a, tuple):
             return a[1]
+        if p is not None and self.none_value(a):
+            if p.optional:
+                return NONE
+            if isinstance(a, ast.Name):
+                raise FrontendError(f"`{a.id}` is None here", a)
+            raise BindError(f"`{p.name}` can't be None")
+        if p is not None and p.module is not None:
+            inst = self.instance(a)
+            if inst is None or inst.cls is not p.module:
+                raise BindError(f"`{p.name}` takes a `{p.module.name}` module")
+            return inst.ints
         if p is not None and p.shape:
             if not isinstance(a, ast.Tuple):
                 raise BindError(f"`{p.name}` takes a tuple of ints")
@@ -934,6 +1221,29 @@ def fields_of(init: ast.FunctionDef, self_name: str) -> dict[str, ast.expr | Non
             if name is not None and id(node) not in top:
                 fields[name] = None
     return fields
+
+
+def is_zero(e: ast.expr) -> bool:
+    return isinstance(e, ast.Constant) and type(e.value) is int and e.value == 0
+
+
+def about_ints(c: Json, ints: list[str]) -> bool:
+    """Whether a constraint is only about the instance dims ints, with
+    divisors that are instance dims (which the constructor infers positive)
+    or positive numbers: so it can be stated wherever the invariant is."""
+
+    def ok(e: Json) -> bool:
+        if e[0] == "Id":
+            return e[1] in ints
+        if e[0] == "Int":
+            return True
+        if e[0] == "Div":
+            divisor = e[2]
+            positive = divisor[0] == "Int" and divisor[1] > 0
+            return ok(e[1]) and (positive or (divisor[0] == "Id" and divisor[1] in ints))
+        return e[0] in ("Add", "Sub", "Mul") and ok(e[1]) and ok(e[2])
+
+    return ok(c[1]) and ok(c[2])
 
 
 def is_super_init(s: ast.stmt) -> bool:

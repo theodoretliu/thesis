@@ -110,7 +110,10 @@ class Signatures(unittest.TestCase):
             ("def f(*xs: int) -> int: return 0", r"\*args is only supported in stubs"),
             ("def f(x: str) -> int: return 0", "unsupported annotation `str`"),
             ("def f(x: int) -> Tensor: return 0", "needs a shape"),
-            ('def f(x: Float[Tensor, "#n"]) -> int: return 0', "single broadcastable dim"),
+            (
+                'def f(x: Float[Tensor, "n"]) -> Float[Tensor, "#n"]: return x',
+                "only be in a parameter's shape",
+            ),
             ("def f(x: tuple[int, int]) -> int: return 0", "only supported as return types"),
             ("def f(x: int) -> tuple[int, ...]: return 0", "only fixed-length tuples"),
         ]:
@@ -160,16 +163,25 @@ class Bodies(unittest.TestCase):
         f = only_function(
             """
             def f(x: Float[Tensor, "n"]) -> Float[Tensor, "n"]:
-                '''docstrings and asserts are skipped'''
+                '''docstrings are skipped, and asserts are assumed'''
                 assert x.ndim == 1
                 y = x
                 z: Float[Tensor, "n"] = y
                 return z
             """
         )
+        assertion = "assert x.ndim == 1"
         self.assertEqual(
             f["body"],
             [
+                # x.ndim is evaluated into a local no Python name can clash with
+                [
+                    "At",
+                    4,
+                    assertion,
+                    ["Let", "(x.ndim)", ["Call", "torch.Tensor.ndim", [["Var", "x"]]]],
+                ],
+                ["At", 4, assertion, ["Assume", ["Eq", ["Id", "(x.ndim)"], ["Int", 1]]]],
                 ["At", 5, "y = x", ["Let", "y", ["Var", "x"]]],
                 [
                     "At",
@@ -645,6 +657,303 @@ class C(nn.Module):
         self.assertEqual(init.sig["requires"], [["Le", ["Int", 0], ["Id", "i"]]])
         self.assertEqual(init.sig["ret"], ["Tuple", []])
         self.assertNotIn("forward", stubs.methods)  # only called on instances
+
+
+OPTIONAL = """
+import torch
+import torch.nn as nn
+from typing import Optional, Union
+from jaxtyping import Bool, Float
+from torch import Tensor
+
+
+def attend(
+    x: Float[Tensor, "*b q m"],
+    mask: Optional[Bool[Tensor, "*#b #q m"]] = None,
+    dropout: Optional[nn.Dropout] = None,
+) -> Float[Tensor, "*b q m"]:
+    if mask is not None:
+        x = x.masked_fill(mask, -1e9)
+    p = x.softmax(dim=-1)
+    if dropout is None:
+        return p
+    return dropout(p)
+
+
+def caller(x: Float[Tensor, "b q m"], m: Bool[Tensor, "b 1 m"]) -> Float[Tensor, "b q m"]:
+    y = attend(x)
+    z = attend(y, m)
+    return attend(z, mask=None)
+
+
+class Block(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.dropout = nn.Dropout(0.1)
+        self.w = nn.Linear(d, d)
+
+    def forward(
+        self, x: Float[Tensor, "b q q"], mask: Union[Bool[Tensor, "b q q"], None] = None
+    ) -> Float[Tensor, "b q q"]:
+        # passing an Optional on, and a module argument
+        return attend(x, mask, dropout=self.dropout)
+"""
+
+
+def body_of(f):
+    return [s[3] for s in f["body"]]
+
+
+class Optionals(unittest.TestCase):
+    def test_a_variant_per_choice_of_nones(self):
+        fs, errors = functions(OPTIONAL)
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            [n for n in fs if n.startswith("attend")],
+            [
+                "attend",
+                "attend[mask=None]",
+                "attend[dropout=None]",
+                "attend[mask=None,dropout=None]",
+            ],
+        )
+        # a None parameter isn't in the signature, and Dropout has no dims
+        self.assertEqual([p[0] for p in fs["attend"]["sig"]["params"]], ["x", "mask"])
+        self.assertEqual([p[0] for p in fs["attend[mask=None]"]["sig"]["params"]], ["x"])
+        self.assertEqual(
+            fs["attend"]["sig"]["params"][1][1],
+            ["Array", [["Broadcast", "b"], ["BroadcastDim", "q"], ["Id", "m"]]],
+        )
+
+    def test_ifs_on_none_are_decided(self):
+        fs, _ = functions(OPTIONAL)
+        full = body_of(fs["attend"])
+        self.assertEqual(full[0][:2], ["Let", "x"])  # the masked_fill branch
+        self.assertEqual(full[-1][1][1], "torch.nn.Dropout.forward")
+        # no mask, no dropout: neither branch, and the early return
+        self.assertEqual(
+            body_of(fs["attend[mask=None,dropout=None]"]),
+            [
+                ["Let", "p", ["Call", "torch.Tensor.softmax", [["Var", "x"], ["Lit", -1]]]],
+                ["Return", ["Var", "p"]],
+            ],
+        )
+
+    def test_calls_select_a_variant(self):
+        fs, _ = functions(OPTIONAL)
+        y, z, ret = body_of(fs["caller"])
+        self.assertEqual(y[2], ["Call", "attend[mask=None,dropout=None]", [["Var", "x"]]])
+        # m is also a dim, so the parameter is m'
+        self.assertEqual(z[2], ["Call", "attend[dropout=None]", [["Var", "y"], ["Var", "m'"]]])
+        self.assertEqual(ret[1][1], "attend[mask=None,dropout=None]")
+
+    def test_optionals_are_passed_on(self):
+        fs, _ = functions(OPTIONAL)
+        # Union[T, None] is Optional[T]; the module argument has no dims
+        self.assertEqual(
+            returned(fs["Block.forward"]),
+            ["Call", "attend", [["Var", "x"], ["Var", "mask"]]],
+        )
+        self.assertEqual(
+            returned(fs["Block.forward[mask=None]"]), ["Call", "attend[mask=None]", [["Var", "x"]]]
+        )
+
+    def test_pep_604(self):
+        fs, errors = functions(
+            """
+            def f(x: Float[Tensor, "n"], y: Float[Tensor, "n"] | None = None) -> Float[Tensor, "n"]:
+                return x if y is None else x + y
+            """
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(returned(fs["f[y=None]"]), ["Var", "x"])
+        self.assertEqual(returned(fs["f"])[1], "operator.add")
+
+    def test_none_locals(self):
+        fs, errors = functions(
+            """
+            def f(x: Float[Tensor, "n"]) -> Float[Tensor, "n"]:
+                y = None
+                if y is None and not (x is None):
+                    y = x
+                return y
+            """
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(body_of(fs["f"]), [["Let", "y", ["Var", "x"]], ["Return", ["Var", "y"]]])
+
+    def test_module_parameters(self):
+        fs, errors = functions(
+            """
+            import torch.nn as nn
+
+            def f(lin: nn.Linear, x: Float[Tensor, "b i"]) -> Float[Tensor, "b o"]:
+                return lin(x)
+            """
+        )
+        self.assertEqual(errors, [])
+        sig = fs["f"]["sig"]
+        # an instance is its dims, and satisfies its constructor's requires
+        self.assertEqual(
+            [p[0] for p in sig["params"]], ["lin.in_features", "lin.out_features", "x"]
+        )
+        self.assertEqual(
+            sig["instances"],
+            [
+                {
+                    "init": "torch.nn.Linear.__init__",
+                    "ints": [
+                        ["in_features", "lin.in_features"],
+                        ["out_features", "lin.out_features"],
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(
+            returned(fs["f"]),
+            [
+                "Call",
+                "torch.nn.Linear.forward",
+                [["Var", "lin.in_features"], ["Var", "lin.out_features"], ["Var", "x"]],
+            ],
+        )
+
+    def test_errors(self):
+        for src, msg in [
+            ("return mask", "`mask` is None here"),
+            ("return g(x, None)", "`y` can't be None"),
+            ("return attend(x, dropout=x)", "`dropout` takes a `torch.nn.Dropout` module"),
+            (
+                "if x.sum() > 0:\n        return x\n    return x",
+                "`if` isn't supported yet, except on whether",
+            ),
+            ("return x if x.sum() else x", "a conditional expression isn't supported yet"),
+            ("return x if z is None else x", "`z` isn't a local variable"),
+        ]:
+            with self.subTest(src):
+                _, errors = program(
+                    OPTIONAL
+                    + "\n"
+                    + "def g(x: Float[Tensor, 'n'], y: Float[Tensor, 'n']) -> Float[Tensor, 'n']:\n"
+                    + "    return x\n"
+                    + "def f(\n"
+                    + "    x: Float[Tensor, 'n'], mask: Optional[Float[Tensor, 'n']] = None\n"
+                    + ") -> Float[Tensor, 'n']:\n"
+                    + f"    {src}\n"
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+    def test_errors_are_reported_once(self):
+        _, errors = program(
+            """
+            def f(
+                x: Float[Tensor, "n"], a: Optional[int] = None, b: Optional[int] = None
+            ) -> Float[Tensor, "n"]:
+                return x[0]
+            """
+        )
+        self.assertEqual(len(errors), 1)
+
+    def test_signature_errors(self):
+        five = ", ".join(f"a{i}: Optional[int] = None" for i in range(5))
+        for src, msg in [
+            (
+                f'def f(x: Float[Tensor, "n"], {five}) -> int: return 0',
+                "at most 4 parameters can be Optional",
+            ),
+            (
+                "class C(nn.Module):\n"
+                "    def __init__(self, d: Optional[int] = None):\n"
+                "        super().__init__()",
+                "`Optional` parameters aren't supported on `__init__`",
+            ),
+            (
+                "def f(x: nn.Dropout = 3) -> int: return 0",
+                "is a module; its default can only be None",
+            ),
+        ]:
+            with self.subTest(src):
+                _, errors = program("import torch.nn as nn\nfrom typing import Optional\n" + src)
+                self.assertRegex(" ".join(errors), msg)
+
+
+class Asserts(unittest.TestCase):
+    def test_divisibility(self):
+        [assume, ret] = body(
+            """
+            def f(x: Float[Tensor, "n"], a: int, b: int) -> Float[Tensor, "n"]:
+                assert a % b == 0
+                return x
+            """
+        )
+        # b * (a // b) == a
+        self.assertEqual(
+            assume,
+            [
+                "Assume",
+                ["Eq", ["Mul", ["Id", "b"], ["Div", ["Id", "a"], ["Id", "b"]]], ["Id", "a"]],
+            ],
+        )
+
+    def test_comparisons(self):
+        stmts = body(
+            """
+            def f(x: Float[Tensor, "n"], a: int, b: int) -> Float[Tensor, "n"]:
+                assert 0 < a <= b + 1 and a != b and a > -b
+                return x
+            """
+        )
+        # != can't be stated, so that conjunct is dropped
+        self.assertEqual(
+            [s[1] for s in stmts[:-1]],
+            [
+                ["Lt", ["Int", 0], ["Id", "a"]],
+                ["Le", ["Id", "a"], ["Add", ["Id", "b"], ["Int", 1]]],
+                ["Lt", ["Sub", ["Int", 0], ["Id", "b"]], ["Id", "a"]],
+            ],
+        )
+
+    def test_dropped(self):
+        for test in [
+            "x is not None",
+            "a > 0.5",
+            "isinstance(x, Tensor)",
+            "x.shape[0] == a",
+            "a % 2 == 1",
+        ]:
+            with self.subTest(test):
+                self.assertEqual(
+                    body(
+                        f"""
+                        def f(x: Float[Tensor, "n"], a: int) -> Float[Tensor, "n"]:
+                            assert {test}
+                            return x
+                        """
+                    ),
+                    [["Return", ["Var", "x"]]],
+                )
+
+    def test_init_asserts_are_ensures(self):
+        fs, errors = functions(
+            """
+            import torch.nn as nn
+
+            class C(nn.Module):
+                def __init__(self, d: int, h: int):
+                    super().__init__()
+                    assert d % h == 0 and d % (h - 1) == 0
+                    assert d >= 2 * h
+            """
+        )
+        self.assertEqual(errors, [])
+        # facts about the instance dims, whose divisors can be inferred positive
+        self.assertEqual(
+            fs["C.__init__"]["sig"]["ensures"],
+            [
+                ["Eq", ["Mul", ["Id", "h"], ["Div", ["Id", "d"], ["Id", "h"]]], ["Id", "d"]],
+                ["Le", ["Mul", ["Int", 2], ["Id", "h"]], ["Id", "d"]],
+            ],
+        )
 
 
 if __name__ == "__main__":

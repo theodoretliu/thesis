@@ -73,26 +73,29 @@ let check_all ({ env; items } : Ir_json.program) : result list =
         { fd.sg with requires = fd.sg.requires @ inferred_for inferred fd.name };
     }
   in
-  (* a constructor's requires, including those inferred so far *)
-  let requires_of inferred name =
+  (* what a constructor guarantees about its ints: its requires, including
+     those inferred so far, then its ensures (asserts in __init__), which may
+     need the requires to be stated *)
+  let guarantees_of inferred name =
     match
       List.find_opt (fun ({ fd; _ } : Ir_json.item) -> fd.name = name) items
     with
-    | Some { fd; _ } -> fd.sg.requires @ inferred_for inferred name
+    | Some { fd; _ } ->
+        fd.sg.requires @ inferred_for inferred name @ fd.sg.ensures
     | None -> (
         match
           List.find_opt (fun ({ name = n; _ } : Ir_json.lib) -> n = name) env
         with
-        | Some { callee = Sig sg; _ } -> sg.requires
+        | Some { callee = Sig sg; _ } -> sg.requires @ sg.ensures
         | _ -> [])
   in
-  (* every instance was built by its constructor, so it satisfies the
-     constructor's requires *)
+  (* every instance was built by its constructor, so it satisfies what the
+     constructor guarantees *)
   let with_invariant inferred instances (sg : signature) =
     let facts =
       List.concat_map
         (fun ({ init; ints } : Ir_json.instance) ->
-          List.filter_map (rename_constr ints) (requires_of inferred init))
+          List.filter_map (rename_constr ints) (guarantees_of inferred init))
         instances
     in
     { sg with invariant = sg.invariant @ facts }

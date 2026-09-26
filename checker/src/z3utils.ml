@@ -85,6 +85,10 @@ let list_vars : (string, string) Hashtbl.t = Hashtbl.create 16
 let is_list_var (name : string) = Hashtbl.mem list_vars name
 let list_label (name : string) = Hashtbl.find list_vars name
 
+(* a list variable standing for a parameter's *#A inside a body: some shape
+   that broadcasts to A's dims, which is all that's known about it *)
+let broadcast_targets : (string, string list) Hashtbl.t = Hashtbl.create 16
+
 (* the product and number of a list variable's dimensions *)
 let prod_of_list (name : string) = mk_int ("prod_" ^ name)
 let rank_of_list (name : string) = mk_int ("rank_" ^ name)

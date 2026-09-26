@@ -89,6 +89,15 @@ let permute (l : 'a list) (perm : int list) : 'a list option =
   if List.sort compare perm <> List.init len Fun.id then None
   else Some (List.map (List.nth l) perm)
 
+(* exchange the elements at two resolved positions *)
+let swap (l : 'a list) (positions : int list) : 'a list option =
+  match positions with
+  | [ p; q ] when p >= 0 && q >= 0 && p < List.length l && q < List.length l ->
+      let a = List.nth l p and b = List.nth l q in
+      Some
+        (List.mapi (fun i x -> if i = p then b else if i = q then a else x) l)
+  | _ -> None
+
 (* replace the elements at indices with x *)
 let set_at (l : 'a list) (indices : int list) (x : 'a) : 'a list option =
   let len = List.length l in
