@@ -28,7 +28,7 @@ uvx --python 3.12 --with torch --with numpy --with jaxtyping --with beartype \
 - `test_progress` is a ratchet over `PASSING`. It fails if a method stops checking, or if one starts
   checking and isn't recorded.
 
-**Progress:** 0 of 11.
+**Progress:** 4 of 11. Milestone 1 is done ([18-configs.md](18-configs.md)): `MLP` and `Block` check.
 
 ## What's missing
 
@@ -92,13 +92,14 @@ doc, as the Transformer's did.
 
 | Milestone | Gaps | Targets it unlocks |
 |---|---|---|
-| 1. Configs | N1, and `nn.GELU` | `MLP`, `Block` (4) |
+| 1. Configs (done) | N1, and `nn.GELU` | `MLP`, `Block` (4) |
 | 2. Flags | N4 in `__init__`, N5, and `nn.Parameter`, `x.shape`, `F.layer_norm`, `hasattr`, `print` | `LayerNorm`, `CausalSelfAttention.__init__` (3) |
 | 3. Causal attention | N2, N3, N4 in bodies, N9's `float`, N12, and `F.scaled_dot_product_attention`, `Tensor.split` | `CausalSelfAttention.forward` (1) |
 | 4. The model | N6, N7, N8, N9, N11, and `nn.ModuleDict`, `arange`'s keywords, `cross_entropy`'s `ignore_index` | `GPT.__init__`, `GPT.forward` (2) |
 | 5. Generation | N10, N13, and `topk`, `multinomial`, `cat`, `min` | `GPT.generate` (1) |
 
-Milestone 2 decides how a value whose `None`-ness depends on a `bool` is checked (N5): cases per flag, like
+Milestone 1 made a config's `int` fields instance dims, and its flags parameters of `__init__` only
+([18-configs.md](18-configs.md)). Milestone 2 decides how a value whose `None`-ness depends on a `bool` is checked (N5): cases per flag, like
 milestone 3 of the Transformer, or a maybe-`None` value that only an `Optional` parameter accepts.
 Milestone 5 decides how a loop's invariant names the iteration count (N13). After each milestone, add the
 names that now check to `PASSING` in `test_gpt_goal.py`.

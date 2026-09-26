@@ -704,6 +704,186 @@ def body_of(f):
     return [s[3] for s in f["body"]]
 
 
+CONFIG = """
+from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+from jaxtyping import Float
+from torch import Tensor
+
+
+class Inner(nn.Module):
+    def __init__(self, cfg: "Cfg"):
+        super().__init__()
+        assert cfg.d % cfg.h == 0
+        self.w = nn.Linear(cfg.d, 2 * cfg.d, bias=cfg.bias)
+        self.p = nn.Dropout(cfg.p)
+        self.cfg = cfg
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b 2*d"]:
+        return self.p(self.w(x))
+
+    def zeros(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b n"]:
+        return torch.zeros(x.size(0), self.cfg.n)
+
+
+class Outer(nn.Module):
+    def __init__(self, cfg: Cfg, k: int):
+        super().__init__()
+        self.inner = Inner(cfg)
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b 2*d"]:
+        return self.inner(x)
+
+
+@dataclass
+class Cfg:
+    n: int = 4
+    d: int = 8
+    h: int = 2
+    p: float = 0.1
+    bias: bool = True
+    name: str = "x"
+"""
+
+
+class Configs(unittest.TestCase):
+    def test_init_signature(self):
+        fs, errors = functions(CONFIG)
+        self.assertEqual(errors, [])
+        # a config is passed as its int and bool fields, named by field, in
+        # order; floats don't affect shapes, and other fields aren't passed
+        self.assertEqual(
+            fs["Inner.__init__"]["sig"]["params"],
+            [["n", ["Int"]], ["d", ["Int"]], ["h", ["Int"]], ["bias", ["Int"]]],
+        )
+        # config.d % config.h == 0 is about the instance dims, so it's part
+        # of the class invariant
+        self.assertEqual(
+            fs["Inner.__init__"]["sig"]["ensures"],
+            [["Eq", ["Mul", ["Id", "h"], ["Div", ["Id", "d"], ["Id", "h"]]], ["Id", "d"]]],
+        )
+
+    def test_method_signature(self):
+        fs, _ = functions(CONFIG)
+        # the int fields are the instance dims; the flag isn't one
+        sig = fs["Inner.forward"]["sig"]
+        self.assertEqual([p[0] for p in sig["params"]], ["n", "d", "h", "x"])
+        self.assertEqual(sig["exists"], [])  # 2*d is the instance's
+        self.assertEqual(
+            sig["instances"],
+            [{"init": "Inner.__init__", "ints": [["n", "n"], ["d", "d"], ["h", "h"]]}],
+        )
+        # in parameter order: the config's fields, then k
+        params = fs["Outer.forward"]["sig"]["params"]
+        self.assertEqual([p[0] for p in params], ["n", "d", "h", "k", "x"])
+
+    def test_fields(self):
+        fs, _ = functions(CONFIG)
+        stmts = [s[3] for s in fs["Inner.__init__"]["body"] if s[0] == "At"]
+        [linear] = [s for s in stmts if s[:2] == ["Let", "self.w"]]
+        self.assertEqual(
+            linear[2],
+            [
+                "Call",
+                "torch.nn.Linear.__init__",
+                [
+                    ["Var", "d"],
+                    ["Call", "operator.mul", [["Lit", 2], ["Var", "d"]]],
+                    ["Var", "bias"],
+                ],
+            ],
+        )
+        [dropout] = [s for s in stmts if s[:2] == ["Let", "self.p"]]
+        self.assertEqual(
+            dropout[2], ["Call", "torch.nn.Dropout.__init__", [["Scalar"], ["Lit", 0]]]
+        )
+
+    def test_stored_config(self):
+        # self.cfg = cfg, so self.cfg.n is the instance dim n
+        fs, _ = functions(CONFIG)
+        zeros = returned(fs["Inner.zeros"])
+        self.assertEqual(zeros[2][0][1][1], ["Var", "n"])
+
+    def test_passed_on(self):
+        fs, _ = functions(CONFIG)
+        [let] = [s[3] for s in fs["Outer.__init__"]["body"] if s[0] == "At"]
+        self.assertEqual(
+            let[2],
+            [
+                "Call",
+                "Inner.__init__",
+                [["Var", "n"], ["Var", "d"], ["Var", "h"], ["Var", "bias"]],
+            ],
+        )
+        # Inner(cfg) in __init__ gives self.inner's dims in terms of Outer's
+        self.assertEqual(
+            returned(fs["Outer.forward"]),
+            ["Call", "Inner.forward", [["Var", "n"], ["Var", "d"], ["Var", "h"], ["Var", "x"]]],
+        )
+
+    def test_locals_named_like_fields(self):
+        fs, errors = functions(
+            CONFIG.replace("self.cfg = cfg", "self.cfg = cfg\n        d = 2 * cfg.d")
+        )
+        self.assertEqual(errors, [])
+        stmts = [s[3] for s in fs["Inner.__init__"]["body"] if s[0] == "At"]
+        self.assertIn(["Let", "d'", ["Call", "operator.mul", [["Lit", 2], ["Var", "d"]]]], stmts)
+
+    def test_errors(self):
+        for code, msg in [
+            ("return self.q", "`Cfg.bias` is a flag, not an instance dim"),
+            ("return self.cfg", "`self.cfg` is a config: only its fields can be used"),
+            ("c = Cfg()\n        return x", r"building a config \(`Cfg\(...\)`\) isn't supported"),
+            ("return self.cfg.name", "only the int, bool and float fields of a config"),
+            ("return self.cfg.nope", "`Cfg` has no field `nope`"),
+        ]:
+            with self.subTest(code):
+                _, errors = program(
+                    CONFIG.replace("self.cfg = cfg", "self.cfg = cfg\n        self.q = cfg.bias")
+                    + f"""
+class C(nn.Module):
+    def __init__(self, cfg: Cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.q = cfg.bias
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b d"]:
+        {code}
+"""
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+    def test_signature_errors(self):
+        for params, msg in [
+            ("cfg: Cfg, d: int", "a `Cfg`, whose field `d` is a parameter already"),
+            ("cfg: Optional[Cfg] = None", "is a config, so it can't be Optional"),
+            ("d: int, cfg: Cfg", "a `Cfg`, whose field `d` is a parameter already"),
+        ]:
+            with self.subTest(params):
+                _, errors = program(
+                    CONFIG
+                    + f"""
+def f({params}) -> int:
+    return 0
+"""
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+    def test_config_arguments(self):
+        _, errors = program(
+            CONFIG
+            + """
+class C(nn.Module):
+    def __init__(self, cfg: Cfg, k: int):
+        super().__init__()
+        self.inner = Inner(k)
+"""
+        )
+        self.assertRegex(" ".join(errors), "`cfg` takes a `Cfg`")
+
+
 class Optionals(unittest.TestCase):
     def test_a_variant_per_choice_of_nones(self):
         fs, errors = functions(OPTIONAL)

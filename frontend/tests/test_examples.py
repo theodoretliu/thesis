@@ -77,6 +77,29 @@ class Examples(unittest.TestCase):
             ],
         )
 
+    def test_config_invariants(self):
+        # a config's int fields are the instance dims, so the constructors'
+        # requires are about them, and the methods assume them: blank's
+        # zeros need n_tags >= 0, which every Tagger has
+        report = check_file(EXAMPLES / "pass" / "configs.py", STUBS, self.checker)
+        self.assertEqual(
+            report.inferred,
+            {
+                "FeedForward.__init__": ["d_model >= 0", "expansion >= 0"],
+                "Tagger.__init__": ["vocab >= 0", "d_model >= 0", "n_tags >= 0", "expansion >= 0"],
+            },
+        )
+        self.assertEqual(
+            sorted(report.passed),
+            [
+                "FeedForward.__init__",
+                "FeedForward.forward",
+                "Tagger.__init__",
+                "Tagger.blank",
+                "Tagger.forward",
+            ],
+        )
+
     def test_optional_cases_and_asserts(self):
         report = check_file(EXAMPLES / "pass" / "masks.py", STUBS, self.checker)
         # a function passes if it checks in every case: forward with and

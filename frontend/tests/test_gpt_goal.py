@@ -14,7 +14,12 @@ from tests.test_goal import passing, targets
 GOAL = Path(__file__).resolve().parents[2] / "examples" / "goal" / "gpt.py"
 
 # the functions and methods that check so far
-PASSING: set[str] = set()
+PASSING = {
+    "MLP.__init__",
+    "MLP.forward",
+    "Block.__init__",
+    "Block.forward",
+}
 
 
 class NanoGPTGoal(unittest.TestCase):
