@@ -25,8 +25,10 @@ lines. Remaining frontend work is in [09-future-work.md § Frontend](09-future-w
 order of attack are in [12-transformer-goal.md](12-transformer-goal.md). `frontend/tests/test_goal.py` is the
 spec, and all 24 of its functions and methods check.
 
-**The next goal** (not started) is to check nanoGPT, Karpathy's GPT-2 `model.py`, with Llama as a stretch
-goal. See [09-future-work.md § Next goal](09-future-work.md#next-goal-nanogpt).
+**The next goal** is to check nanoGPT, Karpathy's GPT-2 `model.py`, as
+[`examples/goal/gpt.py`](../examples/goal/gpt.py), with Llama as a stretch goal. The gaps, decisions and
+milestones are in [17-nanogpt-goal.md](17-nanogpt-goal.md). `frontend/tests/test_gpt_goal.py` is the spec,
+and 4 of its 11 methods check.
 
 | Step | Gap | Status | Note |
 |---|---|---|---|
@@ -45,6 +47,8 @@ goal. See [09-future-work.md § Next goal](09-future-work.md#next-goal-nanogpt).
 | goal 2 | Modules: methods take their instance's constructor ints, class invariants | done | [14-modules.md](14-modules.md) |
 | goal 3 | Attention: `Optional` checked per case, asserts, `*#b`/`#q` broadcasting, `transpose(i, j)` | done | [15-attention.md](15-attention.md) |
 | goal 4 | Stacks and encodings: `nn.ModuleList` loops, declared attributes and weight tying, slices | done | [16-stacks.md](16-stacks.md) |
+| nanoGPT | Check nanoGPT's `model.py` (GPT-2) | 4 of 11 | [17-nanogpt-goal.md](17-nanogpt-goal.md) |
+| nanoGPT 1 | Configs: a dataclass's int fields are instance dims | done | [18-configs.md](18-configs.md) |
 
 ## Scorecard after steps 0–9
 

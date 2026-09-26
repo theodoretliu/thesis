@@ -41,6 +41,7 @@ uvx ruff format . && uvx ruff check .
 `examples/pass/*.py` must check, and each `examples/fail/*.py` must fail with
 every `# expect-error:` substring in its output.
 
-`examples/goal/transformer.py` is the goal (docs/12-transformer-goal.md).
-`frontend/tests/test_goal.py` ratchets which of its functions check: when one
-starts checking, add it to `PASSING`.
+`examples/goal/transformer.py` is the first goal (docs/12-transformer-goal.md),
+and `examples/goal/gpt.py` (nanoGPT) is the current one (docs/17-nanogpt-goal.md).
+`frontend/tests/test_goal.py` and `test_gpt_goal.py` ratchet which of their
+functions check: when one starts checking, add it to `PASSING`.
