@@ -20,10 +20,13 @@ cd frontend && python -m shapecheck ../examples/pass/*.py
 End-to-end tests are `examples/pass/*.py` and `examples/fail/*.py`. Each fail file has `# expect-error:`
 lines. Remaining frontend work is in [09-future-work.md § Frontend](09-future-work.md#frontend).
 
-**The next goal** is to check the Transformer from "Attention Is All You Need",
+**The first goal** was to check the Transformer from "Attention Is All You Need",
 [`examples/goal/transformer.py`](../examples/goal/transformer.py). The gaps, the decisions they need, and an
 order of attack are in [12-transformer-goal.md](12-transformer-goal.md). `frontend/tests/test_goal.py` is the
 spec, and all 24 of its functions and methods check.
+
+**The next goal** (not started) is to check nanoGPT, Karpathy's GPT-2 `model.py`, with Llama as a stretch
+goal. See [09-future-work.md § Next goal](09-future-work.md#next-goal-nanogpt).
 
 | Step | Gap | Status | Note |
 |---|---|---|---|
