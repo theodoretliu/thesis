@@ -128,28 +128,8 @@ same work around one target, the Transformer, and adds what it needs (modules, i
 
 ## Next goal: nanoGPT
 
-Not started. With the Transformer checking ([12-transformer-goal.md](12-transformer-goal.md)), the next
-target is [nanoGPT](https://github.com/karpathy/nanoGPT)'s `model.py`, GPT-2 in about 330 lines, annotated
-with jaxtyping. Set it up like the Transformer: `examples/goal/gpt.py`, a runtime harness, a failing
-`test_goal` ratchet, and a gap and decision doc.
-
-It reuses what already checks: multi-head attention with `view`, `transpose` and `-1`, a loop over an
-`nn.ModuleList`, weight tying, and a causal mask in a buffer sliced as `self.bias[:, :, :T, :T]`. What it
-would add, roughly easiest first:
-
-1. **`B, T, C = x.size()`:** `size()` with no argument, a tuple of dims.
-2. **`split`:** `q, k, v = self.c_attn(x).split(self.n_embd, dim=2)`, a tuple of shapes computed from a
-   size.
-3. **Int and list indexing:** `logits[:, -1, :]` drops a dim, and `logits[:, [-1], :]` keeps it.
-4. **`nn.ModuleDict`:** attributes of a dict of modules, like `self.transformer.wte`.
-5. **`if` on a flag:** `if self.flash:` chooses `F.scaled_dot_product_attention` or the manual path. Both
-   branches must be checked and give the same shape.
-6. **Config objects:** `GPT.__init__(self, config: GPTConfig)` takes a dataclass, not ints, so the
-   instance-dim rule has to extend to a config's `int` fields (`config.n_embd`, `config.block_size`).
-   This is user-facing, so decide it before building anything. It should stay plain jaxtyping.
-7. **Loops whose shapes change:** `generate` grows `idx` with `torch.cat` each iteration, so the invariant
-   is no longer "shapes are kept". It needs a length that grows with the iteration count. This could be
-   left out of the first target.
+Started: the target is [`examples/goal/gpt.py`](../examples/goal/gpt.py), nanoGPT's `model.py` with
+jaxtyping annotations. Its gaps, decisions and milestones are in [17-nanogpt-goal.md](17-nanogpt-goal.md).
 
 **Stretch goal: Llama** (Meta's reference `model.py`, or LitGPT's). It adds grouped-query attention
 (`repeat_kv`), rotary embeddings with complex tensors (`view_as_complex`), and a KV cache sliced from a

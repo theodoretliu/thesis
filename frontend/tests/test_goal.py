@@ -43,10 +43,10 @@ PASSING = {
 }
 
 
-def targets() -> list[str]:
+def targets(goal: Path = GOAL) -> list[str]:
     """Every annotated function and method, as f or Class.method."""
     names = []
-    for node in ast.parse(GOAL.read_text()).body:
+    for node in ast.parse(goal.read_text()).body:
         if isinstance(node, ast.FunctionDef) and annotated(node):
             names.append(node.name)
         elif isinstance(node, ast.ClassDef):
@@ -58,8 +58,8 @@ def targets() -> list[str]:
     return names
 
 
-def passing() -> set[str]:
-    report = check_file(GOAL, load_stubs([DEFAULT_STUBS]), checker_path())
+def passing(goal: Path = GOAL) -> set[str]:
+    report = check_file(goal, load_stubs([DEFAULT_STUBS]), checker_path())
     return set(report.passed)
 
 
