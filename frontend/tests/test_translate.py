@@ -806,6 +806,21 @@ class Configs(unittest.TestCase):
         zeros = returned(fs["Inner.zeros"])
         self.assertEqual(zeros[2][0][1][1], ["Var", "n"])
 
+    def test_attributes_from_fields(self):
+        # an int attribute copied from a field, read in a method, as
+        # nanoGPT's self.n_head = config.n_head is
+        src = CONFIG.replace(
+            "self.cfg = cfg", "self.cfg = cfg\n        self.dd = 2 * cfg.d"
+        ).replace(
+            "    def zeros(self",
+            '    def wide(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b 2*d"]:\n'
+            "        return torch.zeros(x.size(0), self.dd)\n\n    def zeros(self",
+        )
+        fs, errors = functions(src)
+        self.assertEqual(errors, [])
+        shape = returned(fs["Inner.wide"])[2][0][1]
+        self.assertEqual(shape[1], ["Call", "operator.mul", [["Lit", 2], ["Var", "d"]]])
+
     def test_passed_on(self):
         fs, _ = functions(CONFIG)
         [let] = [s[3] for s in fs["Outer.__init__"]["body"] if s[0] == "At"]
