@@ -93,7 +93,8 @@ Only size obligations are inferred: an int used as a size, a returned dim, the o
 (torch can't infer `-1` if they multiply to 0), and a callee's inferred requires. Relations, like a
 kernel fitting the image, must be proved. See [docs/13-free-functions.md](../docs/13-free-functions.md).
 
-Bodies must be straight-line code:
+Bodies must be straight-line code, apart from `if`s that are decided statically and loops over an
+`nn.ModuleList`:
 
 - `y = expr` and `y: Float[Tensor, "..."] = expr`. The annotation is checked, and it can bind new names.
 - `a, b = expr`, unpacking a tuple.
@@ -103,14 +104,21 @@ Bodies must be straight-line code:
 - `assert`: the rest of the body assumes it. Comparisons of ints with `+ - * //` are stated, and so is
   `a % b == 0`, as `b * (a // b) == a`. A call in one, like `x.size(1)`, is evaluated first. Anything else
   in an assert is dropped, which is sound. A divisor may be inferred positive, like a size.
+- `for layer in self.layers:` over an `nn.ModuleList`. The body is checked once, and the locals it
+  reassigns must keep their shapes. See [Modules](#modules).
+- `x[a:b] = v` assigns into a slice. `v` must broadcast to the slice, and `x` keeps its shape.
 - `pass` is skipped.
 - Expressions: local variables, int/bool/float literals, calls, `+ - * / // ** @ & | ^`, unary `-` and
   `~`, comparisons, methods (`x.sum(-1)`, `x.size(-1)`), properties (`x.mT`), tuples, and tuples of ints
   as shapes (`x.reshape((n, d))`). One entry of a shape may be `-1` where the stub determines it, as in
   `x.reshape(-1, d)`.
+- Slices `x[a:b:c, ...]` of the leading dims, with Python's rules: negative bounds count from the end,
+  and bounds past the end are clamped. So `x[:, :n]` has `min(n, m)` columns, which is `n` after
+  `assert n <= m`. The step must be positive.
 
 Anything else gets an explicit error, and the rest of the file is still checked. That covers other control
-flow, augmented assignment (`x += y`), indexing and `x.shape`, lambdas, and module-level values.
+flow, augmented assignment (`x += y`), int indexing (`x[0]`) and `x.shape`, lambdas, and module-level
+values.
 
 ## Optional parameters
 
@@ -175,9 +183,25 @@ dims first, and `self.w_1(x)` becomes `torch.nn.Linear.forward(d_model, d_ff, x)
   `self.head(x)` returns a valid size without the method requiring it.
 - A parameter annotated with a module class (`dropout: nn.Dropout`) takes an instance, like `self.dropout`,
   and is passed as its instance dims. It may be `Optional`.
+- A class-level annotation declares an attribute's shape, over the instance dims. Reads give that shape,
+  and every assignment is checked against it, including `self.register_buffer("pe", v)`. Declare an
+  attribute whose value is built from `__init__`'s locals:
+
+  ```python
+  class PositionalEncoding(nn.Module):
+      pe: Float[Tensor, "1 max_len d_model"]
+  ```
+
+  Stub modules declare theirs the same way (`nn.Linear.weight`), so weight tying,
+  `self.proj.weight = self.embed.weight`, checks that the shapes agree.
+- `self.layers = nn.ModuleList([Layer(d) for _ in range(n)])` is a list of modules built alike. `for
+  layer in self.layers:` checks its body once, with `layer` as one of them. Each local the body reassigns
+  must keep its shape, which makes the loop's invariant. A name only the body binds isn't known after the
+  loop.
 
 Modules can't be returned or stored in locals yet, and an annotation can't name a module parameter's
-dims. Only direct subclasses of `nn.Module` are checked. See [docs/14-modules.md](../docs/14-modules.md).
+dims. Only direct subclasses of `nn.Module` are checked. See [docs/14-modules.md](../docs/14-modules.md)
+and [docs/16-stacks.md](../docs/16-stacks.md).
 
 ## Calls
 
@@ -212,8 +236,12 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
   the `int` parameters of `__init__`, and its methods' annotations may name them. Asserts in `__init__`
   are the constructor's requires, which its instances then satisfy:
 
+  A class-level annotation declares an attribute:
+
   ```python
   class Linear(Module):
+      weight: Float[Tensor, "out_features in_features"]
+
       def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
           assert in_features >= 0 and out_features >= 0
 
@@ -224,7 +252,9 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
 
 The shipped stubs cover common torch functions, `Tensor` methods, `torch.nn.functional`, the modules
 `nn.Linear`, `nn.Embedding`, `nn.LayerNorm`, `nn.Dropout` and `nn.ReLU`, `math.sqrt`/`math.log`, and
-Python's operators. A call with no stub is an error, never an unknown shape.
+Python's operators. `operator.setitem(target, value)` is slice assignment: the frontend passes the slice
+itself as `target`. `nn.ModuleList` has no stub; the frontend handles it. A call with no stub is an error,
+never an unknown shape.
 
 ## The IR
 
@@ -242,8 +272,9 @@ constr ["Eq"|"Le"|"Lt", entry, entry]
 sig    {"params": [[name, typ]], "ret": typ, "requires": [constr], "exists": [name], "ensures": [constr],
         "invariant": [constr], "instances": [{"init": f, "ints": [[init_param, param]]}]}
 term   ["Var", x] ["Lit", i] ["Call", f, [term]] ["Shape", [term]] ["Scalar"] ["Tuple", [term]]
+       ["Slice", term, [[start, stop, step]]]            start, stop, step are terms or null
 stmt   ["Let", x, term] ["LetAnnot", x, typ, term] ["Unpack", [x], term] ["Return", term]
-       ["Assume", constr] ["At", line, text, stmt]
+       ["Assume", constr] ["Loop", [[x_before, x_after]], [stmt]] ["At", line, text, stmt]
 
 program {"env": [{"name": f, "overloads": [sig]}],
          "functions": [{"name": f, "sig": sig, "body": [stmt] | null}]}
@@ -253,7 +284,13 @@ program {"env": [{"name": f, "overloads": [sig]}],
 assumed by the body and by callers. Each instance says that some of the parameters are an instance's dims:
 the CLI adds the constructor `init`'s requires and ensures, renamed to those parameters, to the invariant.
 A method has one instance, for `self`, and each module parameter adds one. `Assume` is an assert: the
-rest of the body assumes the constraint, whose names are the body's int locals.
+rest of the body assumes the constraint, whose names are the body's int locals. `Loop` is a body that
+runs any number of times: each pair names a local before and after the body, which must keep its shape.
+Afterwards the locals are as before the loop.
+
+A declared attribute `a` of a class `C` is two functions in `env`: `C.a` takes the instance dims and
+returns the declared type, and `C.a (assigned)` takes the instance dims and the value, of the declared
+type, and returns `None`.
 
 A function with `Optional` parameters is one checker function per case, named like
 `attention[mask=None]`.

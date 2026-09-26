@@ -1078,3 +1078,149 @@ let () =
                     Shape [ call "size" [ var "y"; Lit 0 ]; Lit (-1); var "hk" ];
                   ]);
            ]))
+
+(* loops: the body is checked once, and must keep the carried locals' shapes *)
+let () =
+  (* def f(x: [b, d], w: [d, e]) -> [b, d]:
+       for _ in ...: x = linear(x, w)
+       return x *)
+  let stack ?(after = [ Return (var "x") ]) e body =
+    def "f"
+      [ ("x", arr [ Id "b"; Id "d" ]); ("w", arr [ Id "d"; Id e ]) ]
+      (arr [ Id "b"; Id "d" ])
+      (Loop ([ ("x", "x") ], body) :: after)
+  in
+  let apply = [ Let ("x", call "linear" [ var "x"; var "w" ]) ] in
+  expect "a loop whose body keeps x's shape" (fun () ->
+      checks (stack "d" apply));
+  expect "a body that changes it" (fun () ->
+      rejects
+        ~saying:
+          [ "`x` doesn't keep its shape in the loop"; "[b, d] before the body" ]
+        (stack "e" apply));
+  expect "a carried spread keeps its shape" (fun () ->
+      checks
+        (def "f"
+           [ ("x", arr [ Spread "B"; Id "d" ]) ]
+           (arr [ Spread "B"; Id "d" ])
+           [
+             Loop ([ ("x", "x") ], [ Let ("x", call "relu" [ var "x" ]) ]);
+             Return (var "x");
+           ]));
+  expect "a carried int must keep its value" (fun () ->
+      rejects
+        ~saying:[ "`i` doesn't keep its shape" ]
+        (def "f"
+           [ ("n", TypeInt) ]
+           TypeInt
+           [
+             Let ("i", var "n");
+             Loop ([ ("i", "i") ], [ Let ("i", call "mul" [ var "i"; Lit 2 ]) ]);
+             Return (var "i");
+           ]));
+  expect "a local the body binds is unbound after it" (fun () ->
+      rejects ~saying:[ "unbound variable y" ]
+        (def "f"
+           [ ("x", arr [ Id "n" ]) ]
+           (arr [ Id "n" ])
+           [ Loop ([], [ Let ("y", var "x") ]); Return (var "y") ]));
+  expect "return inside a loop" (fun () ->
+      rejects ~saying:[ "return inside a loop" ]
+        (stack "d" [ Return (var "x") ]));
+  (* an assert in the body only holds if the body runs *)
+  let assumed in_loop =
+    let a = Assume (Eq (Id "n", Int 3)) in
+    def "f"
+      [ ("n", TypeInt); ("x", arr [ Id "n" ]) ]
+      (arr [ Int 3 ])
+      [ (if in_loop then Loop ([], [ a ]) else a); Return (var "x") ]
+  in
+  expect "an assert is assumed after it" (fun () -> checks (assumed false));
+  expect "but not after a loop whose body asserts it" (fun () ->
+      rejects ~saying:[ "return value" ] (assumed true));
+  (* what the body infers is a requires, so it holds after the loop too: the
+     second ones(k) doesn't infer k >= 1 on top of k >= 0 *)
+  expect "a fact inferred in the body holds after it" (fun () ->
+      inferred
+        (def "f"
+           [ ("k", TypeInt) ]
+           (arr [ Id "k" ])
+           [
+             Loop ([], [ Let ("y", call "ones" [ var "k" ]) ]);
+             Return (call "ones" [ var "k" ]);
+           ])
+      = [ show_constr (at_least 0 "k") ])
+
+(* slices: x[start:stop:step] with Python's bounds *)
+let () =
+  let slice ?requires params ret x items =
+    def ?requires "f" params (arr ret) [ Return (Slice (var x, items)) ]
+  in
+  let n = [ ("x", arr [ Id "n" ]) ] in
+  let upto k = (None, Some (Lit k), None) in
+  expect "x[:2] of [n] is [2] when n >= 2" (fun () ->
+      checks (slice ~requires:[ at_least 2 "n" ] n [ Int 2 ] "x" [ upto 2 ]));
+  expect "and may be shorter otherwise" (fun () ->
+      rejects ~saying:[ "return value" ] (slice n [ Int 2 ] "x" [ upto 2 ]));
+  expect "x[-2:] counts from the end" (fun () ->
+      checks
+        (slice
+           ~requires:[ at_least 2 "n" ]
+           n [ Int 2 ] "x"
+           [ (Some (Lit (-2)), None, None) ]));
+  expect "x[::2] is (n + 1) // 2" (fun () ->
+      checks
+        (slice n
+           [ Div (Add (Id "n", Int 1), Int 2) ]
+           "x"
+           [ (None, None, Some (Lit 2)) ]));
+  expect "x[1::2] is n // 2" (fun () ->
+      checks
+        (slice n
+           [ Div (Id "n", Int 2) ]
+           "x"
+           [ (Some (Lit 1), None, Some (Lit 2)) ]));
+  (* positional encodings: sin fills x[0::2] and cos x[1::2], which have the
+     same width when n is even *)
+  let halves ?requires () =
+    def ?requires "f" n
+      (arr [ Div (Id "n", Int 2) ])
+      [
+        Return
+          (call "add"
+             [
+               Slice (var "x", [ (Some (Lit 0), None, Some (Lit 2)) ]);
+               Slice (var "x", [ (Some (Lit 1), None, Some (Lit 2)) ]);
+             ]);
+      ]
+  in
+  expect "x[0::2] and x[1::2] match when n is even" (fun () ->
+      checks
+        (halves ~requires:[ Eq (Mul (Int 2, Div (Id "n", Int 2)), Id "n") ] ()));
+  expect "and not otherwise" (fun () ->
+      rejects ~saying:[ "Broadcasted" ] (halves ()));
+  (* pe[:, :x.size(1)] *)
+  let prefix ?requires () =
+    def ?requires "f"
+      [ ("pe", arr [ Id "m"; Id "d" ]); ("x", arr [ Id "n"; Id "d" ]) ]
+      (arr [ Id "n"; Id "d" ])
+      [
+        Return
+          (Slice (var "pe", [ (None, Some (call "shape0" [ var "x" ]), None) ]));
+      ]
+  in
+  expect "a symbolic stop within bounds" (fun () ->
+      checks (prefix ~requires:[ Le (Id "n", Id "m") ] ()));
+  expect "may be past the end otherwise" (fun () ->
+      rejects ~saying:[ "expected n, got m[:n]" ] (prefix ()));
+  expect "a step must be positive" (fun () ->
+      rejects
+        ~saying:[ "step must be positive" ]
+        (slice n [ Id "n" ] "x" [ (None, None, Some (Lit 0)) ]));
+  expect "more slices than dims" (fun () ->
+      rejects ~saying:[ "too many slices" ]
+        (slice n [ Id "n" ] "x" [ upto 1; upto 1 ]));
+  expect "slicing a spread needs its dims" (fun () ->
+      rejects
+        ~saying:[ "the dims to slice aren't known" ]
+        (slice [ ("x", arr [ Spread "B" ]) ] [ Spread "B" ] "x" [ upto 1 ]))

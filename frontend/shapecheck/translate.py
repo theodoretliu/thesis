@@ -2,7 +2,9 @@
 
 Every top-level function with an annotation is checked, and so is every
 annotated method of an nn.Module subclass. A body must be straight-line code:
-assignments (plain, annotated, or unpacking a tuple), asserts, and a return.
+assignments (plain, annotated, unpacking a tuple, or into a slice), asserts,
+and a return. The exceptions are `if`s on whether a local is None, decided
+statically, and loops over an nn.ModuleList, whose body is checked once.
 Calls resolve to user functions (in any order, through their signatures) or
 stubs; operators desugar to the stub module `operator` (x @ w is
 operator.matmul), methods and properties to the stub classes (x.sum(-1) is
@@ -20,7 +22,8 @@ arguments its __init__ was called with, and a method is a function that takes
 them first. In a method of Encoder, `self.w = nn.Linear(d_model, d_ff)` in
 __init__ makes `self.w(x)` the call torch.nn.Linear.forward(d_model, d_ff, x),
 where d_model is the method's own instance dim. So an attribute's type comes
-from the one assignment to it in __init__.
+from the one assignment to it in __init__, unless a class-level annotation
+declares it.
 """
 
 from __future__ import annotations
@@ -39,6 +42,8 @@ from .signatures import (
     FrontendError,
     Overload,
     Param,
+    attribute_signatures,
+    attribute_type,
     build_signature,
     instance_ints,
     is_none,
@@ -67,10 +72,21 @@ class ModuleClass:
     # f is assigned more than once or elsewhere
     fields: dict[str, ast.expr | None] = field(default_factory=dict)
     self_name: str = "self"  # __init__'s name for self
+    # attributes declared at class level, e.g. pe: Float[Tensor, "1 max_len d"]:
+    # their IR types, over the instance dims
+    attrs: dict[str, Json] = field(default_factory=dict)
 
     @property
     def init(self) -> str:
         return f"{self.name}.__init__"
+
+    def getter(self, attr: str) -> str:
+        """The checker function that reads a declared attribute."""
+        return f"{self.name}.{attr}"
+
+    def setter(self, attr: str) -> str:
+        """The checker function that assigns a declared attribute."""
+        return f"{self.name}.{attr} (assigned)"
 
     def instances(self) -> list[Json]:
         """For a method's signature: its leading int parameters are an
@@ -144,6 +160,7 @@ def load_module_class(stubs: Stubs, qualname: str, node: ast.ClassDef) -> None:
     if len(inits) > 1:
         raise FrontendError("a module class's __init__ can't be overloaded", inits[1])
     cls = ModuleClass(qualname, instance_ints(inits[0] if inits else None))
+    cls.attrs = declared_attributes(node, cls.ints, stub=True)
     stubs.classes[qualname] = cls
     for m in methods:
         if m.name == "__init__":
@@ -153,6 +170,33 @@ def load_module_class(stubs: Stubs, qualname: str, node: ast.ClassDef) -> None:
             if cls.ints:
                 ov.sig["instances"] = cls.instances()
         stubs.add(f"{qualname}.{m.name}", ov)
+
+
+def declared_attributes(
+    node: ast.ClassDef, ints: list[str], stub: bool, errors: list[FrontendError] | None = None
+) -> dict[str, Json]:
+    """The attributes a class body declares, e.g. pe: Float[Tensor, "1 max_len
+    d"], with their types. A declaration with errors raises, or with errors
+    given is left out and its error appended."""
+    attrs = {}
+    for s in node.body:
+        if not (isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)):
+            continue
+        try:
+            if s.value is not None:
+                raise FrontendError(
+                    f"class attributes with values aren't supported; assign `{s.target.id}` "
+                    "in `__init__`",
+                    s,
+                )
+            what = f"`{node.name}.{s.target.id}`"
+            attrs[s.target.id] = attribute_type(s.annotation, ints, stub, what)
+        except FrontendError as e:
+            if errors is None:
+                raise
+            e.line = e.line or s.lineno
+            errors.append(e)
+    return attrs
 
 
 def last(node: ast.expr) -> str | None:
@@ -189,6 +233,9 @@ SYMBOLS = {
 
 # each Optional parameter doubles the checks, so there's a limit
 MAX_OPTIONAL = 4
+
+MODULE_LIST = "torch.nn.ModuleList"
+MODULE_LIST_FORM = "`nn.ModuleList([Module(...) for _ in range(n)])`"
 
 
 @dataclass
@@ -256,6 +303,7 @@ class Translator:
         self.locals: dict[str, str] = {}  # Python name -> IR name
         self.module_locals: dict[str, Instance] = {}  # module parameters
         self.nones: set[str] = set()  # locals that are None here
+        self.after_loop: set[str] = set()  # names bound only inside a loop's body
         self.owners: dict[str, str] = {}  # a checker function's Python function
         self.cls: ModuleClass | None = None  # the class of the method translated
         self.self_name: str | None = None  # its name for self
@@ -381,6 +429,9 @@ class Translator:
         if init is not None:
             cls.self_name = init.args.args[0].arg if init.args.args else "self"
             cls.fields = fields_of(init, cls.self_name)
+        errors: list[FrontendError] = []
+        cls.attrs = declared_attributes(node, cls.ints, stub=False, errors=errors)
+        self.errors += [Error(e.line or node.lineno, node.name, e.message) for e in errors]
         self.classes[node.name] = cls
         for m in methods:
             key = f"{node.name}.{m.name}"
@@ -486,6 +537,51 @@ class Translator:
         in __init__, as terms over base's instance dims."""
         value = self.field(base.cls, name, e)
         assert isinstance(value, ast.Call)
+        return self.built_instance(base, name, value, e)
+
+    def list_instance(self, e: ast.expr) -> Instance | None:
+        """The modules of an nn.ModuleList attribute such as self.layers. They
+        are all built by the same call, so one instance stands for each."""
+        if not isinstance(e, ast.Attribute):
+            return None
+        base = self.instance(e.value)
+        if base is None or not base.cls.user or e.attr not in base.cls.fields:
+            return None
+        value = self.field(base.cls, e.attr, e)
+        element = self.as_instance(base.cls, lambda: self.list_element(value))
+        return None if element is None else self.built_instance(base, e.attr, element, e)
+
+    def list_element(self, value: ast.expr) -> ast.Call | None:
+        """For nn.ModuleList([C(...) for _ in range(n)]), the call that builds
+        each module; None if value isn't an nn.ModuleList."""
+        if not (isinstance(value, ast.Call) and self.qualname(value.func) == MODULE_LIST):
+            return None
+        comp = value.args[0] if len(value.args) == 1 and not value.keywords else None
+        if not (isinstance(comp, ast.ListComp) and len(comp.generators) == 1):
+            raise FrontendError(f"an nn.ModuleList must be built as {MODULE_LIST_FORM}", value)
+        gen = comp.generators[0]
+        if (
+            gen.ifs
+            or gen.is_async
+            or not isinstance(gen.iter, ast.Call)
+            or not isinstance(gen.iter.func, ast.Name)
+            or gen.iter.func.id != "range"
+            or self.is_local("range")
+        ):
+            raise FrontendError(f"an nn.ModuleList must be built as {MODULE_LIST_FORM}", gen)
+        targets = {n.id for n in ast.walk(gen.target) if isinstance(n, ast.Name)}
+        if any(isinstance(n, ast.Name) and n.id in targets for n in ast.walk(comp.elt)):
+            raise FrontendError(
+                "the modules of an nn.ModuleList must all be built alike, so the loop "
+                "variable can't be used",
+                comp.elt,
+            )
+        if not (isinstance(comp.elt, ast.Call) and self.class_named(comp.elt.func) is not None):
+            raise FrontendError(f"an nn.ModuleList must be built as {MODULE_LIST_FORM}", comp.elt)
+        return comp.elt
+
+    def built_instance(self, base: Instance, name: str, value: ast.Call, e: ast.AST) -> Instance:
+        """The module the call value builds for base.name in __init__."""
         cls = self.in_class(base.cls, value.func)
         assert cls is not None
 
@@ -579,6 +675,8 @@ class Translator:
         key = f"{inst.cls.name}.{name}"
         if name == "__init__":
             raise FrontendError("calling `__init__` isn't supported", e)
+        if name in inst.cls.attrs:
+            raise FrontendError(f"`{name}` isn't a module, so it can't be called", e)
         if inst.cls.user:
             f = self.functions.get(key)
             if name in inst.cls.fields:
@@ -603,6 +701,21 @@ class Translator:
         init = self.stubs.functions.get(cls.init)
         if not cls.user and init is not None:
             self.env[init.name] = [ov.sig for ov in init.overloads]
+
+    def attribute_call(self, inst: Instance, attr: str, value: Json | None = None) -> Json:
+        """Reading a declared attribute, or with a value, assigning it: calls
+        to functions of the instance's dims, whose types are the declaration
+        (see attribute_signatures)."""
+        getter, setter = attribute_signatures(inst.cls.ints, inst.cls.attrs[attr])
+        if inst.cls.ints:
+            # the declaration may rely on the class invariant
+            getter["instances"] = setter["instances"] = inst.cls.instances()
+        self.use_init(inst.cls)
+        if value is None:
+            self.env[inst.cls.getter(attr)] = [getter]
+            return ir.Call(inst.cls.getter(attr), list(inst.ints))
+        self.env[inst.cls.setter(attr)] = [setter]
+        return ir.Call(inst.cls.setter(attr), list(inst.ints) + [value])
 
     def user_call(
         self,
@@ -642,6 +755,7 @@ class Translator:
             if p.module is not None
         }
         self.nones = set(v.nones)
+        self.after_loop = set()
         self.sig = v.overload.sig
         self.terms = {}
         self.scope = v.scope
@@ -671,6 +785,9 @@ class Translator:
                 continue
             if self.in_init and is_super_init(s):
                 continue  # nn.Module's __init__
+            if isinstance(s, ast.For):
+                out.append(ir.At(s.lineno, self.text(s), self.loop(s)))
+                continue
             if isinstance(s, ast.If):
                 taken = s.body if self.static_test(s.test, s, "`if`") else s.orelse
                 inner, returned = self.block(taken)
@@ -694,6 +811,57 @@ class Translator:
             if isinstance(s, ast.Return):
                 return out, True
         return out, False
+
+    def loop(self, s: ast.For) -> Json:
+        """for layer in self.layers:, over an nn.ModuleList. The body is
+        translated once, with layer as the list's instance, and each local it
+        reassigns must keep its shape: that's the loop's invariant, so one
+        check covers any number of iterations."""
+        inst = self.list_instance(s.iter)
+        if inst is None:
+            raise FrontendError(
+                "`for` is only supported over an nn.ModuleList attribute, e.g. "
+                f"`for layer in self.layers:`: `{self.text(s)}`",
+                s,
+            )
+        if s.orelse:
+            raise FrontendError("`for ... else` isn't supported", s)
+        if not isinstance(s.target, ast.Name):
+            raise FrontendError("the loop variable must be a name", s.target)
+        locals_before = dict(self.locals)
+        modules_before = dict(self.module_locals)
+        nones_before = set(self.nones)
+        assigned = {
+            n.id
+            for stmt in s.body
+            for n in ast.walk(stmt)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        }
+        modules = sorted(assigned & modules_before.keys())
+        if modules:
+            raise FrontendError(f"the loop can't reassign the module `{modules[0]}`", s)
+        target = s.target.id
+        self.assign(target)
+        del self.locals[target]
+        self.module_locals[target] = inst
+        body, returned = self.block(s.body)
+        if returned:
+            raise FrontendError("`return` inside a loop isn't supported", s)
+        carried = sorted(assigned & locals_before.keys() - {target})
+        for name in carried:
+            if name not in self.locals:
+                raise FrontendError(f"`{name}` must keep its shape in the loop", s)
+        pairs = [[locals_before[name], self.locals[name]] for name in carried]
+        # afterwards, a local the body reassigns has its shape from before the
+        # loop. one the body binds, and the loop variable, may be unbound or
+        # hold anything, so they're dropped
+        self.locals, self.module_locals, self.nones = locals_before, modules_before, nones_before
+        for name in (assigned | {target}) - set(carried):
+            self.locals.pop(name, None)
+            self.module_locals.pop(name, None)
+            self.nones.discard(name)
+            self.after_loop.add(name)
+        return ir.Loop(pairs, body)
 
     def static_test(self, test: ast.expr, node: ast.AST, what: str) -> bool:
         """The value of a test on whether locals are None, which is known in
@@ -816,6 +984,8 @@ class Translator:
                 return ir.Unpack([self.assign(x.id) for x in target.elts], t)
             if isinstance(target, ast.Attribute) and self.instance(target.value) is not None:
                 return self.set_attribute(target, s.value)
+            if isinstance(target, ast.Subscript):
+                return self.set_slice(target, s.value, s)
             if not isinstance(target, ast.Name):
                 raise FrontendError(
                     "only assignments to a name, or unpacking into names, are supported", s
@@ -843,6 +1013,13 @@ class Translator:
                 f"`{target} = {target} {op} {value}`",
                 s,
             )
+        if isinstance(s, ast.Expr) and self.cls is not None and self.self_name is not None:
+            buffer = buffer_of(s.value, self.self_name)
+            if buffer is not None and not self.is_local(self.self_name):
+                # like self.name = value
+                name, value = buffer
+                target = ast.Attribute(ast.Name(self.self_name, ast.Load()), name, ast.Store())
+                return self.set_attribute(ast.copy_location(target, s), value)
         if isinstance(s, ast.Return):
             if s.value is None or (isinstance(s.value, ast.Constant) and s.value.value is None):
                 if not self.returns_none:
@@ -852,12 +1029,14 @@ class Translator:
         kind = {
             ast.If: "`if`", ast.For: "`for`", ast.While: "`while`", ast.With: "`with`",
             ast.Try: "`try`", ast.FunctionDef: "a nested function",
-            ast.Expr: "an expression statement",
+            ast.Expr: "an expression statement", ast.Break: "`break`",
+            ast.Continue: "`continue`",
         }.get(type(s), "this statement")  # fmt: skip
         raise FrontendError(f"{kind} isn't supported yet: `{self.text(s)}`", s)
 
     def assign(self, name: str) -> str:
         self.nones.discard(name)
+        self.after_loop.discard(name)
         self.module_locals.pop(name, None)
         if self.cls is not None and name in self.cls.ints:
             if self.in_init:
@@ -880,12 +1059,24 @@ class Translator:
         this assignment (see field_instance)."""
         if not self.in_init:
             raise FrontendError("attributes can only be assigned in `__init__`", target)
+        inst = self.instance(target.value)
+        assert inst is not None
+        if target.attr in inst.cls.attrs:
+            # checked against the declaration, which is what reads of it give
+            t = self.attribute_call(inst, target.attr, self.term(value))
+            return ir.Let(ast.unparse(target), t)
         if not isinstance(target.value, ast.Name):
             raise FrontendError(
-                f"assigning to an attribute of a module (`{ast.unparse(target)}`) "
-                "isn't supported yet",
+                f"assigning to an attribute of a module (`{ast.unparse(target)}`) is only "
+                f"supported when `{inst.cls.name}` declares it, e.g. "
+                f'`{target.attr}: Float[Tensor, "..."]`',
                 target,
             )
+        element = self.list_element(value)
+        if element is not None:
+            # the modules are all built alike, so checking one constructor
+            # call checks them all (and asks for more when there are none)
+            value = element
         cls = self.class_named(value.func) if isinstance(value, ast.Call) else None
         t = self.construct(cls, value) if cls is not None else self.term(value)
         # later statements read self.f from the class's fields, not this name
@@ -917,6 +1108,12 @@ class Translator:
                 )
             if self.in_instance:
                 raise FrontendError(f"`{e.id}` isn't an int parameter of `__init__`", e)
+            if e.id in self.after_loop:
+                raise FrontendError(
+                    f"`{e.id}` is assigned in a loop's body, which may not run, so it isn't "
+                    "known after the loop",
+                    e,
+                )
             if e.id in self.functions or e.id in self.aliases or e.id in self.classes:
                 raise FrontendError(f"`{e.id}` is used as a value; only calls are supported", e)
             raise FrontendError(
@@ -957,8 +1154,35 @@ class Translator:
         if isinstance(e, ast.Subscript):
             if isinstance(e.value, ast.Attribute) and e.value.attr == "shape":
                 raise FrontendError("`x.shape[i]` isn't supported yet", e)
-            raise FrontendError("indexing isn't supported yet", e)
+            return self.subscript(e)
         raise FrontendError(f"unsupported expression `{ast.unparse(e)}`", e)
+
+    def subscript(self, e: ast.Subscript) -> Json:
+        """x[a:b:c, ...]: slices of x's leading dims, with Python's rules for
+        negative and out-of-range bounds (see slice_dim in the checker)."""
+        items = e.slice.elts if isinstance(e.slice, ast.Tuple) else [e.slice]
+        out = []
+        for item in items:
+            if not isinstance(item, ast.Slice):
+                raise FrontendError(
+                    "only slices like `x[a:b]` or `x[:, ::2]` are supported in indexing yet: "
+                    f"`{self.text(e)}`",
+                    e,
+                )
+            parts = (item.lower, item.upper, item.step)
+            out.append([None if p is None or is_none(p) else self.term(p) for p in parts])
+        return ir.Slice(self.term(e.value), out)
+
+    def set_slice(self, target: ast.Subscript, value: ast.expr, s: ast.stmt) -> Json:
+        """x[a:b] = value, which assigns into x in place: the value must
+        broadcast to the slice, and x keeps its shape."""
+        if not (isinstance(target.value, ast.Name) and target.value.id in self.locals):
+            raise FrontendError("only slices of local variables can be assigned", target)
+        callee = self.stubs.functions.get("operator.setitem")
+        if callee is None:
+            raise FrontendError("no stub for slice assignment (operator.setitem)", s)
+        t = self.stub_call(callee, [("target", self.subscript(target)), value], {}, s)
+        return ir.Let(f"({self.text(target)})", t)
 
     def qualname(self, e: ast.expr) -> str | None:
         """The qualified name an expression like F.relu or torch.nn.functional
@@ -1002,6 +1226,8 @@ class Translator:
                 raise FrontendError(f"no stub for `{q}`", e)
             return self.stub_call(callee, args, keywords, e)
         if isinstance(f, ast.Name):
+            if f.id in self.after_loop:
+                self.term(f)  # the error for a name bound only in a loop
             if f.id in self.unannotated:
                 raise FrontendError(
                     f"`{f.id}` has no annotations, so calls to it can't be checked", e
@@ -1015,14 +1241,22 @@ class Translator:
     def attribute(self, e: ast.Attribute) -> Json:
         base = self.instance(e.value)
         if base is not None:
+            if e.attr in base.cls.attrs:
+                return self.attribute_call(base, e.attr)
             if not base.cls.user:
-                raise FrontendError(f"attributes of `{base.cls.name}` aren't supported yet", e)
+                raise FrontendError(f"no stub declares the attribute `{base.cls.name}.{e.attr}`", e)
             key = f"{base.cls.name}.{e.attr}"
             if e.attr not in base.cls.fields and (key in self.functions or key in self.unannotated):
                 raise FrontendError(f"`{ast.unparse(e)}` is a method; call it", e)
             if self.instance(e) is not None:
                 raise FrontendError(
                     f"`{ast.unparse(e)}` is a module; only calls to it are supported", e
+                )
+            if self.list_instance(e) is not None:
+                raise FrontendError(
+                    f"`{ast.unparse(e)}` is an nn.ModuleList; only loops over it are "
+                    f"supported (`for layer in {ast.unparse(e)}:`)",
+                    e,
                 )
             return self.value_field(base, e.attr, e)
         if self.qualname(e) is not None:
@@ -1207,20 +1441,45 @@ def fields_of(init: ast.FunctionDef, self_name: str) -> dict[str, ast.expr | Non
     top: set[int] = set()
     for s in init.body:
         target = value = None
+        name = None
         if isinstance(s, ast.Assign) and len(s.targets) == 1:
             target, value = s.targets[0], s.value
         elif isinstance(s, ast.AnnAssign):
             target, value = s.target, s.value
-        name = None if target is None else attribute(target)
+        elif isinstance(s, ast.Expr) and buffer_of(s.value, self_name) is not None:
+            target = s.value
+            name, value = buffer_of(s.value, self_name)
+        name = name or (None if target is None else attribute(target))
         if name is not None and value is not None:
             top.add(id(target))
             fields[name] = value if name not in fields else None
     for node in ast.walk(init):
+        name = None
         if isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
             name = attribute(node)
-            if name is not None and id(node) not in top:
-                fields[name] = None
+        elif isinstance(node, ast.Call) and buffer_of(node, self_name) is not None:
+            name = buffer_of(node, self_name)[0]
+        if name is not None and id(node) not in top:
+            fields[name] = None
     return fields
+
+
+def buffer_of(e: ast.expr, self_name: str) -> tuple[str, ast.expr] | None:
+    """self.register_buffer("name", value), which is like self.name = value:
+    the name and the value."""
+    if (
+        isinstance(e, ast.Call)
+        and isinstance(e.func, ast.Attribute)
+        and e.func.attr == "register_buffer"
+        and isinstance(e.func.value, ast.Name)
+        and e.func.value.id == self_name
+        and len(e.args) == 2
+        and isinstance(e.args[0], ast.Constant)
+        and isinstance(e.args[0].value, str)
+        and all(k.arg == "persistent" for k in e.keywords)
+    ):
+        return e.args[0].value, e.args[1]
+    return None
 
 
 def is_zero(e: ast.expr) -> bool:

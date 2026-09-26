@@ -1,10 +1,9 @@
 """The goal: check the Transformer of "Attention Is All You Need"
 (examples/goal/transformer.py). See docs/12-transformer-goal.md.
 
-test_goal is the failing spec: it's an expected failure until every
-annotated function and method in the file checks. test_progress is a ratchet
-over PASSING, so progress can't silently regress, and a newly passing
-function has to be recorded."""
+test_goal is the spec: every annotated function and method in the file
+checks. It was an expected failure until milestone 4 met it. test_progress is
+a ratchet over PASSING, so a function can't silently stop checking."""
 
 import ast
 import unittest
@@ -15,7 +14,7 @@ from shapecheck.translate import annotated, load_stubs
 
 GOAL = Path(__file__).resolve().parents[2] / "examples" / "goal" / "transformer.py"
 
-# the functions and methods that check today; add to it as gaps close
+# the functions and methods that check: all of them
 PASSING = {
     "attention",
     "subsequent_mask",
@@ -27,10 +26,17 @@ PASSING = {
     "PositionwiseFeedForward.forward",
     "Embeddings.__init__",
     "Embeddings.forward",
+    "PositionalEncoding.__init__",
+    "PositionalEncoding.forward",
     "EncoderLayer.__init__",
     "EncoderLayer.forward",
     "DecoderLayer.__init__",
     "DecoderLayer.forward",
+    "Encoder.__init__",
+    "Encoder.forward",
+    "Decoder.__init__",
+    "Decoder.forward",
+    "Transformer.__init__",
     "Transformer.encode",
     "Transformer.decode",
     "Transformer.forward",
@@ -69,7 +75,6 @@ class TransformerGoal(unittest.TestCase):
         self.assertFalse(PASSING - now, "these used to check and no longer do")
         self.assertFalse(now - PASSING, "these check now: add them to PASSING")
 
-    @unittest.expectedFailure
     def test_goal(self):
         missing = sorted(set(targets()) - passing())
         self.assertEqual(missing, [], f"{len(missing)} of {len(targets())} don't check yet")

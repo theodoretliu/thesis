@@ -20,10 +20,13 @@ cd frontend && python -m shapecheck ../examples/pass/*.py
 End-to-end tests are `examples/pass/*.py` and `examples/fail/*.py`. Each fail file has `# expect-error:`
 lines. Remaining frontend work is in [09-future-work.md § Frontend](09-future-work.md#frontend).
 
-**The next goal** is to check the Transformer from "Attention Is All You Need",
+**The first goal** was to check the Transformer from "Attention Is All You Need",
 [`examples/goal/transformer.py`](../examples/goal/transformer.py). The gaps, the decisions they need, and an
 order of attack are in [12-transformer-goal.md](12-transformer-goal.md). `frontend/tests/test_goal.py` is the
-failing spec.
+spec, and all 24 of its functions and methods check.
+
+**The next goal** (not started) is to check nanoGPT, Karpathy's GPT-2 `model.py`, with Llama as a stretch
+goal. See [09-future-work.md § Next goal](09-future-work.md#next-goal-nanogpt).
 
 | Step | Gap | Status | Note |
 |---|---|---|---|
@@ -37,10 +40,11 @@ failing spec.
 | 7 | Symbolic variadic arguments (function bodies, `Any`) | done | [08-symbolic-variadics.md](08-symbolic-variadics.md) |
 | 8 | Checking whole function bodies, rank-guided unfolding | done | [10-function-bodies.md](10-function-bodies.md) |
 | 9 | A jaxtyping frontend (Python → JSON IR → OCaml CLI) | done | [11-frontend.md](11-frontend.md) |
-| goal | Check the Transformer ("Attention Is All You Need") | 17 of 24 | [12-transformer-goal.md](12-transformer-goal.md) |
+| goal | Check the Transformer ("Attention Is All You Need") | done, 24 of 24 | [12-transformer-goal.md](12-transformer-goal.md) |
 | goal 1 | Free functions: int params as dims, inferred preconditions, `-1`, tuples, `x.size(i)` | done | [13-free-functions.md](13-free-functions.md) |
 | goal 2 | Modules: methods take their instance's constructor ints, class invariants | done | [14-modules.md](14-modules.md) |
 | goal 3 | Attention: `Optional` checked per case, asserts, `*#b`/`#q` broadcasting, `transpose(i, j)` | done | [15-attention.md](15-attention.md) |
+| goal 4 | Stacks and encodings: `nn.ModuleList` loops, declared attributes and weight tying, slices | done | [16-stacks.md](16-stacks.md) |
 
 ## Scorecard after steps 0–9
 
@@ -60,7 +64,8 @@ failing spec.
 Step 8 adds the body checker (`check_fundef`) and closes the smaller variadic gaps (unfolding, the
 empty-list axiom, 1s broadcasting against list variables).
 
-Not attempted: general list unification, control flow in bodies, and dtypes. Classes (`nn.Module`) came
+Not attempted: general list unification, general control flow in bodies (only `None` tests and loops
+over an `nn.ModuleList`), and dtypes. Classes (`nn.Module`) came
 with the Transformer goal ([14-modules.md](14-modules.md)). [09-future-work.md](09-future-work.md) lists all remaining work in order,
 including the design for checking the bodies of variadic functions.
 
