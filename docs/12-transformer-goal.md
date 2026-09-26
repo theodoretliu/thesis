@@ -14,18 +14,20 @@ uvx --python 3.12 --with torch --with numpy --with jaxtyping --with beartype \
     python examples/goal/run_transformer.py
 ```
 
-**The failing spec** is `frontend/tests/test_goal.py`:
+**The spec** is `frontend/tests/test_goal.py`:
 
-- `test_goal` is an expected failure until all 24 annotated functions and methods check.
+- `test_goal` checks that all 24 annotated functions and methods check. It was an expected failure until
+  milestone 4.
 - `test_progress` is a ratchet over `PASSING`. It fails if a function stops checking, or if one starts
   checking and isn't recorded.
 
-**Progress:** 17 of 24. Milestone 1 is done ([13-free-functions.md](13-free-functions.md)):
+**Progress:** 24 of 24: the goal is met. Milestone 1 is done ([13-free-functions.md](13-free-functions.md)):
 `subsequent_mask`, `make_masks` and `loss` check. Milestone 2 is done ([14-modules.md](14-modules.md)):
 `PositionwiseFeedForward`, `Embeddings`, `MultiHeadedAttention.__init__`, `EncoderLayer.__init__`,
 `DecoderLayer.__init__` and `Transformer.encode`/`decode`/`forward` check. Milestone 3 is done
 ([15-attention.md](15-attention.md)): `attention`, `MultiHeadedAttention.forward` and the layers'
-`forward`s check. `PositionalEncoding`, `Encoder`, `Decoder` and `Transformer.__init__` need milestone 4.
+`forward`s check. Milestone 4 is done ([16-stacks.md](16-stacks.md)): `PositionalEncoding`, `Encoder`,
+`Decoder` and `Transformer.__init__` check.
 
 ## What's missing
 
@@ -88,9 +90,11 @@ Callers only use signatures, so a method can check before the methods it calls d
 | 1. Free functions (done) | G3, G6, G8, G13, and G15's functional stubs | `subsequent_mask`, `make_masks`, `loss` |
 | 2. Modules (done) | G1, G2, and G15's `nn` classes | `PositionwiseFeedForward`, `Embeddings`, `EncoderLayer.__init__`, `DecoderLayer.__init__`, `Transformer.encode`/`decode`/`forward` (and `MultiHeadedAttention.__init__`) |
 | 3. Attention (done) | G4, G7, G11, G12, G14 | `attention`, `MultiHeadedAttention`, and `EncoderLayer.forward`/`DecoderLayer.forward`, whose calls need its `Optional` and `#q` signature |
-| 4. Stacks and encodings | G5, G9, G10 | `Encoder`, `Decoder`, `PositionalEncoding`, `Transformer.__init__` |
+| 4. Stacks and encodings (done) | G5, G9, G10, and G15's `arange`, `sin`/`cos` | `Encoder`, `Decoder`, `PositionalEncoding`, `Transformer.__init__` |
 
 Milestone 2 decided how modules are typed: they're lowered to their constructor's ints, and methods assume
 a class invariant ([14-modules.md](14-modules.md)). Milestone 3 decided how `Optional` is checked: once for
-each choice of which `Optional` parameters are `None` ([15-attention.md](15-attention.md)). After each milestone, add the names that now check to
-`PASSING` in `test_goal.py`.
+each choice of which `Optional` parameters are `None` ([15-attention.md](15-attention.md)). Milestone 4
+made class-level annotations the types of attributes, and a loop's invariant that the locals it
+reassigns keep their shapes ([16-stacks.md](16-stacks.md)). After each milestone, add the names that now
+check to `PASSING` in `test_goal.py`.

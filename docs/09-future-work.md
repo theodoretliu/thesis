@@ -112,14 +112,19 @@ same work around one target, the Transformer, and adds what it needs (modules, i
    body. (`torch.zeros(n)` for `n: int` now infers `requires n >= 0`; see
    [13-free-functions.md](13-free-functions.md).)
 2. **`x.shape[i]`**, as an int equal to a dim, like `x.size(i)` (done in 13-free-functions.md).
-3. **Control flow.** `if` needs a join of shapes (or both branches checked against the declared type), and
-   loops need invariants.
-4. **Classes.** `nn.Module` subclasses check, typed by their constructor's ints rather than annotations on
-   `self` attributes ([14-modules.md](14-modules.md)). Modules as values (arguments, returns, locals) and
-   subclassing user classes remain.
-5. **Lists:** `torch.cat`, `torch.stack`. (Tuple returns and unpacking are done.)
-6. **Single broadcastable dims (`#b`)**, and an in-place `Broadcast` ("broadcasts *to* A") for `x += y`.
-7. **NumPy stubs**, and more of torch.
+3. **Control flow.** `if` needs a join of shapes (or both branches checked against the declared type).
+   `if` on whether a variable is `None` is decided statically ([15-attention.md](15-attention.md)), and
+   loops over an `nn.ModuleList` check with the invariant that reassigned locals keep their shapes
+   ([16-stacks.md](16-stacks.md)). `range` loops, and loops whose shapes change, need other invariants.
+4. **Classes.** `nn.Module` subclasses check, typed by their constructor's ints
+   ([14-modules.md](14-modules.md)), with class-level annotations for attributes built outside the
+   attribute's assignment ([16-stacks.md](16-stacks.md)). Modules as returns and locals, and subclassing
+   user classes, remain.
+5. **Indexing:** slices check ([16-stacks.md](16-stacks.md)). Int indices, `None`, `...` and advanced
+   indexing remain.
+6. **Lists:** `torch.cat`, `torch.stack`. (Tuple returns and unpacking are done.)
+7. **Single broadcastable dims (`#b`)**, and an in-place `Broadcast` ("broadcasts *to* A") for `x += y`.
+8. **NumPy stubs**, and more of torch.
 
 ## Other
 

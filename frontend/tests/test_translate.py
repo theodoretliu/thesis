@@ -341,7 +341,7 @@ class Bodies(unittest.TestCase):
     def test_errors(self):
         for src, msg in [
             ("if x: pass", "`if` isn't supported yet"),
-            ("for i in x: pass", "`for` isn't supported yet"),
+            ("for i in x: pass", "`for` is only supported over an nn.ModuleList"),
             ("x += 1", "write `x = x \\+ 1`"),
             ("a = b = x", "only assignments to a name"),
             ("a, b.c = x, x", "only assignments to a name"),
@@ -349,7 +349,7 @@ class Bodies(unittest.TestCase):
             ("return", "must return a value"),
             ("return y", "`y` isn't a local variable"),
             ("return (*x, x)", "starred items in tuples"),
-            ("return x[0]", "indexing isn't supported"),
+            ("return x[0]", r"only slices like `x\[a:b\]`"),
             ("return x.shape", "`x.shape` isn't supported"),
             ("return x.shape[0]", r"`x.shape\[i\]` isn't supported"),
             ("return x.frob()", "no stub for the method `.frob`"),
@@ -591,7 +591,7 @@ class C(nn.Module):
     def test_init_errors(self):
         for body, msg in [
             ("d = 2 * d", "can't reassign `d`: it's one of the instance's dims"),
-            ("self.w.weight = None", "assigning to an attribute of a module"),
+            ("self.w.bias = d", "only supported when `torch.nn.Linear` declares it"),
             ("self.a = self.b\n        self.b = self.a", "`self.b` is defined in terms of itself"),
         ]:
             with self.subTest(body):
@@ -954,6 +954,252 @@ class Asserts(unittest.TestCase):
                 ["Le", ["Mul", ["Int", 2], ["Id", "h"]], ["Id", "d"]],
             ],
         )
+
+
+STACK = """
+import torch
+import torch.nn as nn
+from jaxtyping import Float
+from torch import Tensor
+
+
+class Layer(nn.Module):
+    def __init__(self, d: int, e: int):
+        super().__init__()
+        self.w = nn.Linear(d, e)
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b e"]:
+        return self.w(x)
+
+
+class Stack(nn.Module):
+    table: Float[Tensor, "n d"]
+
+    def __init__(self, n: int, d: int):
+        super().__init__()
+        self.layers = nn.ModuleList([Layer(d, d) for _ in range(n)])
+        self.embed = nn.Embedding(n, d)
+        self.proj = nn.Linear(d, n)
+        self.proj.weight = self.embed.weight
+        t = torch.zeros(n, d)
+        self.register_buffer("table", t)
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b d"]:
+        for layer in self.layers:
+            y = layer(x)
+            x = y
+        return x + self.table[:1]
+"""
+
+
+class Attributes(unittest.TestCase):
+    def test_stub_declarations(self):
+        lin = STUBS.classes["torch.nn.Linear"]
+        self.assertEqual(
+            lin.attrs["weight"], ["Array", [["Id", "out_features"], ["Id", "in_features"]]]
+        )
+
+    def test_user_declarations(self):
+        _, t = translate(textwrap.dedent(STACK), STUBS)
+        self.assertEqual(t.errors, [])
+        self.assertEqual(t.classes["Stack"].attrs["table"], ["Array", [["Id", "n"], ["Id", "d"]]])
+
+    def test_assignments_check_the_declaration(self):
+        prog, errors = program(STACK)
+        self.assertEqual(errors, [])
+        init = {f["name"]: f for f in prog["functions"]}["Stack.__init__"]
+        stmts = [s[3] for s in init["body"] if s[0] == "At"]
+        # self.proj.weight = self.embed.weight: Linear(d, n)'s setter, given
+        # Embedding(n, d)'s getter
+        tie = next(s for s in stmts if s[1] == "self.proj.weight")
+        self.assertEqual(
+            tie[2],
+            [
+                "Call",
+                "torch.nn.Linear.weight (assigned)",
+                [
+                    ["Var", "d"],
+                    ["Var", "n"],
+                    ["Call", "torch.nn.Embedding.weight", [["Var", "n"], ["Var", "d"]]],
+                ],
+            ],
+        )
+        # register_buffer is an assignment too
+        buf = next(s for s in stmts if s[1] == "self.table")
+        self.assertEqual(
+            buf[2], ["Call", "Stack.table (assigned)", [["Var", "n"], ["Var", "d"], ["Var", "t"]]]
+        )
+        env = {e["name"]: e["overloads"] for e in prog["env"]}
+        [setter] = env["Stack.table (assigned)"]
+        self.assertEqual(setter["params"][-1], ["(value)", ["Array", [["Id", "n"], ["Id", "d"]]]])
+        self.assertEqual(setter["ret"], ["Tuple", []])
+        self.assertEqual(setter["instances"][0]["init"], "Stack.__init__")
+
+    def test_reads_give_the_declaration(self):
+        fs, _ = functions(STACK)
+        ret = returned(fs["Stack.forward"])
+        table = ret[2][1][1]
+        self.assertEqual(table, ["Call", "Stack.table", [["Var", "n"], ["Var", "d"]]])
+
+    def test_errors(self):
+        for decl, init, msg in [
+            ('t: Float[Tensor, "n m"]', "pass", "can only name the instance's dims.*`m`"),
+            ('t: Float[Tensor, "n"] = None', "pass", "class attributes with values"),
+            ("", "self.w.bias = d", "only supported when `torch.nn.Linear` declares it"),
+            ("", "self.w.weight = torch.zeros(n, n)", r"torch.nn.Linear.weight \(assigned\)"),
+            ("", "self.w.weight(n)", "an expression statement isn't supported"),
+        ]:
+            with self.subTest(init):
+                _, errors = program(
+                    f"""
+import torch
+import torch.nn as nn
+
+class C(nn.Module):
+    {decl}
+
+    def __init__(self, n: int, d: int):
+        super().__init__()
+        self.w = nn.Linear(d, n)
+        {init}
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b n"]:
+        return self.w(x)
+"""
+                )
+                if "assigned" in msg:
+                    # a mismatch is the checker's to find, not the frontend's
+                    self.assertEqual(errors, [])
+                else:
+                    self.assertRegex(" ".join(errors), msg)
+
+    def test_stub_attributes_that_arent_declared(self):
+        _, errors = program(
+            """
+            import torch.nn as nn
+
+            class C(nn.Module):
+                def __init__(self, d: int):
+                    super().__init__()
+                    self.w = nn.Linear(d, d)
+
+                def forward(self, x: Float[Tensor, "d"]) -> Float[Tensor, "d"]:
+                    return self.w.bias
+            """
+        )
+        self.assertRegex(" ".join(errors), "no stub declares the attribute `torch.nn.Linear.bias`")
+
+
+class Loops(unittest.TestCase):
+    def test_module_list(self):
+        fs, errors = functions(STACK)
+        self.assertEqual(errors, [])
+        stmts = [s[3] for s in fs["Stack.__init__"]["body"] if s[0] == "At"]
+        # every layer is built by the same call, which is checked once
+        self.assertEqual(
+            stmts[0],
+            ["Let", "self.layers", ["Call", "Layer.__init__", [["Var", "d"], ["Var", "d"]]]],
+        )
+
+    def test_loop(self):
+        fs, _ = functions(STACK)
+        loop = fs["Stack.forward"]["body"][0][3]
+        self.assertEqual(loop[0], "Loop")
+        # x is carried: the body must keep its shape. y isn't
+        self.assertEqual(loop[1], [["x", "x"]])
+        call = loop[2][0][3]
+        self.assertEqual(
+            call,
+            ["Let", "y", ["Call", "Layer.forward", [["Var", "d"], ["Var", "d"], ["Var", "x"]]]],
+        )
+
+    def test_errors(self):
+        loop = "for layer in self.layers:"
+        for lines, msg in [
+            ([loop, "    return x"], "`return` inside a loop"),
+            ([loop, "    y = x", "return y"], "`y` is assigned in a loop's body"),
+            ([loop, "    pass", "return layer(x)"], "`layer` is assigned in a loop's body"),
+            ([loop, "    break", "return x"], "`break` isn't supported"),
+            ([loop, "    pass", "else:", "    pass", "return x"], "`for ... else`"),
+            (
+                ["for i in range(3):", "    pass", "return x"],
+                "only supported over an nn.ModuleList",
+            ),
+            (["return self.layers(x)"], "`self.layers` isn't a module"),
+            (["return torch.relu(self.layers)"], "`self.layers` is an nn.ModuleList"),
+            (["return self.bad(x)"], "can't be used"),
+            (["for layer in self.lit:", "    pass", "return x"], "must be built as"),
+        ]:
+            body = "\n        ".join(lines)
+            with self.subTest(body):
+                _, errors = program(
+                    f"""
+import torch
+import torch.nn as nn
+
+class L(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b d"]:
+        return x
+
+class C(nn.Module):
+    def __init__(self, n: int, d: int):
+        super().__init__()
+        self.layers = nn.ModuleList([L(d) for _ in range(n)])
+        self.bad = nn.ModuleList([L(i) for i in range(n)])
+        self.lit = nn.ModuleList([L(d), L(d)])
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b d"]:
+        {body}
+"""
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+
+class Slices(unittest.TestCase):
+    def test_slices(self):
+        [ret] = body(
+            """
+            def f(x: Float[Tensor, "n d"], k: int) -> Float[Tensor, "n d"]:
+                return x[1:k, ::2]
+            """
+        )
+        self.assertEqual(
+            ret[1],
+            ["Slice", ["Var", "x"], [[["Lit", 1], ["Var", "k"], None], [None, None, ["Lit", 2]]]],
+        )
+
+    def test_slice_assignment(self):
+        stmts = body(
+            """
+            import torch
+
+            def f(x: Float[Tensor, "n d"]) -> Float[Tensor, "n d"]:
+                x[:, 0::2] = torch.sin(x[:, 0::2])
+                return x
+            """
+        )
+        let = stmts[0]
+        self.assertEqual(let[1], "(x[:, 0::2])")
+        # the slice is the target: the value must broadcast to it
+        self.assertEqual(let[2][1], "operator.setitem")
+        self.assertEqual(let[2][2][0][0], "Slice")
+
+    def test_errors(self):
+        for src, msg in [
+            ("return x[0]", "only slices like"),
+            ("return x[..., :1]", "only slices like"),
+            ("y = x\n    y.T[:1] = x\n    return x", "only slices of local variables"),
+        ]:
+            with self.subTest(src):
+                _, errors = program(
+                    "import torch\n"
+                    'def f(x: Float[Tensor, "n"]) -> Float[Tensor, "n"]:\n'
+                    f"    {src}\n"
+                )
+                self.assertRegex(" ".join(errors), msg)
 
 
 if __name__ == "__main__":

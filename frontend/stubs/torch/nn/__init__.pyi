@@ -4,7 +4,8 @@
 # parameters of __init__: a dim in a method's annotation named after one is
 # that int, so Linear's forward maps "*B in_features" to "*B out_features".
 # Asserts in __init__ are preconditions of the constructor, and every
-# instance satisfies them, so its methods may assume them.
+# instance satisfies them, so its methods may assume them. A class-level
+# annotation declares an attribute's shape, over the instance dims.
 
 from jaxtyping import Float, Int, Shaped
 from torch import Tensor
@@ -12,11 +13,13 @@ from torch import Tensor
 class Module: ...
 
 class Linear(Module):
+    weight: Float[Tensor, "out_features in_features"]
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
         assert in_features >= 0 and out_features >= 0
     def forward(self, input: Float[Tensor, "*B in_features"]) -> Float[Tensor, "*B out_features"]: ...
 
 class Embedding(Module):
+    weight: Float[Tensor, "num_embeddings embedding_dim"]
     def __init__(self, num_embeddings: int, embedding_dim: int) -> None:
         assert num_embeddings >= 0 and embedding_dim >= 0
     def forward(self, input: Int[Tensor, "*A"]) -> Float[Tensor, "*A embedding_dim"]: ...

@@ -107,6 +107,13 @@ let rec term (j : Yojson.Safe.t) : term =
   | `List [ `String "Shape"; ts ] -> Shape (list term ts)
   | `List [ `String "Scalar" ] -> Scalar
   | `List [ `String "Tuple"; ts ] -> Tup (list term ts)
+  | `List [ `String "Slice"; t; items ] ->
+      let part = function `Null -> None | j -> Some (term j) in
+      let item = function
+        | `List [ a; b; c ] -> (part a, part b, part c)
+        | j -> bad "a slice [start, stop, step]" j
+      in
+      Slice (term t, list item items)
   | j -> bad "a term" j
 
 let rec stmt (j : Yojson.Safe.t) : stmt =
@@ -116,6 +123,12 @@ let rec stmt (j : Yojson.Safe.t) : stmt =
   | `List [ `String "Return"; t ] -> Return (term t)
   | `List [ `String "Unpack"; xs; t ] -> Unpack (list string xs, term t)
   | `List [ `String "Assume"; c ] -> Assume (constr c)
+  | `List [ `String "Loop"; carried; body ] ->
+      let pair = function
+        | `List [ a; b ] -> (string a, string b)
+        | j -> bad "a pair [local before, local after]" j
+      in
+      Loop (list pair carried, list stmt body)
   | `List [ `String "At"; line; text; s ] -> At (int line, string text, stmt s)
   | j -> bad "a statement" j
 

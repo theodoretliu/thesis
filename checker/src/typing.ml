@@ -111,9 +111,13 @@ let rec string_of_expr (e : Z3.Expr.expr) : string =
   | Some i -> string_of_int i
   | None -> (
       let args = Z3.Expr.get_args e in
+      (* a dim labeled by an expression, like d + 1, is one operand too *)
       let operand a =
         let s = string_of_expr a in
-        if Z3.Expr.get_num_args a = 0 || Z3utils.determined_int a <> None then s
+        if
+          (Z3.Expr.get_num_args a = 0 && not (String.contains s ' '))
+          || Z3utils.determined_int a <> None
+        then s
         else "(" ^ s ^ ")"
       in
       let infix op = String.concat (" " ^ op ^ " ") (List.map operand args) in
@@ -1322,7 +1326,12 @@ let rec check_ret_type_with_mapping (rettyp : typ)
                              ("Returned dimension "
                              ^ with_value (string_of_entry h) e
                              ^ " may be negative"));
-                      Z3utils.add_to_solver e
+                      let d = Z3utils.add_to_solver e in
+                      (* named by its value, e.g. d // 2 for arange *)
+                      if not (Hashtbl.mem Z3utils.dim_labels d) then
+                        Hashtbl.replace Z3utils.dim_labels d
+                          (string_of_expr (Z3.Expr.simplify e None));
+                      d
                   (* an integer parameter of unknown value yields a fresh,
                      unconstrained dimension *)
                   | Error (Unknown_param _) -> Z3utils.fresh_dim ()
@@ -1585,6 +1594,8 @@ type term =
   | Shape of term list (* ints used as a shape, e.g. reshape(x, (n, d)) *)
   | Scalar (* a float, which broadcasts like a 0-d array *)
   | Tup of term list (* a tuple, e.g. return a, b *)
+  | Slice of term * (term option * term option * term option) list
+    (* x[start:stop:step, ...]: slices of x's leading dims *)
 [@@deriving show]
 
 type stmt =
@@ -1594,6 +1605,11 @@ type stmt =
   | Unpack of string list * term (* a, b = f(x) *)
   | Assume of constr
     (* assert c: the rest of the body may assume c. its names are int locals *)
+  | Loop of (string * string) list * stmt list
+    (* a body that runs any number of times, e.g. for layer in self.layers.
+       each pair names a local before the body and after it; the body must
+       leave it with the shape (or int value) it had before, the loop's
+       invariant. afterwards the locals are as before the loop *)
   | At of int * string * stmt (* a statement with its source line and text *)
 [@@deriving show]
 
@@ -1608,6 +1624,13 @@ let rec string_of_term = function
   | Shape ts -> "(" ^ String.concat ", " (List.map string_of_term ts) ^ ")"
   | Scalar -> "<float>"
   | Tup ts -> "(" ^ String.concat ", " (List.map string_of_term ts) ^ ")"
+  | Slice (t, items) ->
+      let part = function None -> "" | Some t -> string_of_term t in
+      let item (a, b, c) =
+        part a ^ ":" ^ part b
+        ^ match c with None -> "" | Some _ -> ":" ^ part c
+      in
+      string_of_term t ^ "[" ^ String.concat ", " (List.map item items) ^ "]"
 
 let rec string_of_stmt = function
   | Let (x, t) -> x ^ " = " ^ string_of_term t
@@ -1616,7 +1639,36 @@ let rec string_of_stmt = function
   | Return t -> "return " ^ string_of_term t
   | Unpack (xs, t) -> String.concat ", " xs ^ " = " ^ string_of_term t
   | Assume c -> "assert " ^ show_constr c
+  | Loop _ -> "for ..."
   | At (_, text, _) -> text
+
+(* whether after is provably the same shape or int as before: a loop
+   invariant. an int with no known value is still one afterwards *)
+let rec same_value (before : arg) (after : arg) : bool =
+  let int_expr = function
+    | LiteralInt i -> Some (mk_int_numeral i)
+    | SymInt v -> Some (Z3utils.mk_int v)
+    | _ -> None
+  in
+  match (before, after) with
+  | Dimensions l1, Dimensions l2 ->
+      let l1 = Z3utils.expand l1 and l2 = Z3utils.expand l2 in
+      List.length l1 = List.length l2
+      && List.for_all2
+           (fun a b ->
+             match (Z3utils.is_list_var a, Z3utils.is_list_var b) with
+             | true, true -> a = b
+             | false, false ->
+                 Z3utils.prove_int_eq (Z3utils.mk_int a) (Z3utils.mk_int b)
+             | _ -> false)
+           l1 l2
+  | Int, (Int | SymInt _ | LiteralInt _) -> true
+  | Tuple a, Tuple b ->
+      List.length a = List.length b && List.for_all2 same_value a b
+  | _ -> (
+      match (int_expr before, int_expr after) with
+      | Some a, Some b -> Z3utils.prove_int_eq a b
+      | _ -> false)
 
 (* a dimension equal to an int used as a shape entry *)
 let dim_of_int (v : arg) : string =
@@ -1661,6 +1713,108 @@ let define_int ?(label = "") (e : Z3.Expr.expr) : string =
     [ Z3.Boolean.mk_eq Z3utils.ctx (Z3utils.mk_int name) e ];
   if label <> "" then Hashtbl.replace Z3utils.dim_labels name label;
   name
+
+let rec has_ite (e : Z3.Expr.expr) : bool =
+  Z3.Boolean.is_ite e || List.exists has_ite (Z3.Expr.get_args e)
+
+(* the length of dim[start:stop:step], as Python computes it: a negative
+   bound counts from the end, bounds are clamped to [0, dim], and the length
+   is ceil((stop - start) / step), or 0 if stop <= start. torch only allows a
+   positive step. each case the solver decides is taken, so the length is
+   plain arithmetic when the bounds are known to be in range. an int of
+   unknown value gives a length of at most dim *)
+let slice_dim (dim : string)
+    ((start, stop, step) : arg option * arg option * arg option) : string =
+  let open Z3.Arithmetic in
+  let ctx = Z3utils.ctx and n = Z3utils.mk_int dim in
+  let zero = mk_int_numeral 0 in
+  let int_expr what = function
+    | LiteralInt i -> Some (mk_int_numeral i)
+    | SymInt v -> Some (Z3utils.mk_int v)
+    | Int -> None
+    | v ->
+        raise
+          (TypeError
+             (Printf.sprintf "a slice's %s must be an int, got %s" what
+                (string_of_arg v)))
+  in
+  (* if c then a else b, deciding c when the solver can *)
+  let ite c a b =
+    if Z3utils.prove c then a
+    else if Z3utils.prove (Z3.Boolean.mk_not ctx c) then b
+    else Z3.Boolean.mk_ite ctx c a b
+  in
+  let bound what default = function
+    | None -> Some default
+    | Some v ->
+        Option.map
+          (fun x ->
+            let x = ite (mk_lt ctx x zero) (mk_add ctx [ x; n ]) x in
+            ite (mk_lt ctx x zero) zero (ite (mk_gt ctx x n) n x))
+          (int_expr what v)
+  in
+  let text = function
+    | None | Some Int -> ""
+    | Some (LiteralInt i) -> string_of_int i
+    | Some (SymInt v) -> string_of_dim v
+    | Some v -> string_of_arg v
+  in
+  let label =
+    string_of_dim dim ^ "[" ^ text start ^ ":" ^ text stop
+    ^ (match step with None -> "" | Some _ -> ":" ^ text step)
+    ^ "]"
+  in
+  let step =
+    match step with
+    | None -> Some (mk_int_numeral 1)
+    | Some v -> (
+        match int_expr "step" v with
+        | Some k when Z3utils.prove (mk_ge ctx k (mk_int_numeral 1)) -> Some k
+        | _ ->
+            raise
+              (TypeError
+                 ("a slice's step must be positive, got " ^ string_of_arg v)))
+  in
+  match (bound "start" zero start, bound "stop" n stop, step) with
+  | Some a, Some b, Some k ->
+      let len =
+        ite (mk_ge ctx b a)
+          (mk_div ctx
+             (mk_sub ctx [ mk_add ctx [ b; k ]; a; mk_int_numeral 1 ])
+             k)
+          zero
+      in
+      let len = Z3.Expr.simplify len None in
+      let d = Z3utils.add_to_solver len in
+      (* named by its value when that's arithmetic, e.g. d // 2 *)
+      if not (Hashtbl.mem Z3utils.dim_labels d) then
+        Hashtbl.replace Z3utils.dim_labels d
+          (if has_ite len then label else string_of_expr len);
+      d
+  | _ ->
+      let d = Z3utils.fresh_dim ~label () in
+      Z3.Solver.add Z3utils.solver [ mk_le ctx (Z3utils.mk_int d) n ];
+      d
+
+(* the dims of x[items]: each item slices one of x's leading dims *)
+let slice_dims (dims : string list) items : string list =
+  let rec go dims items =
+    match (items, Z3utils.expand dims) with
+    | [], rest -> rest
+    | _ :: _, [] -> raise (TypeError "too many slices for the array's dims")
+    | item :: items, d :: rest when not (Z3utils.is_list_var d) ->
+        slice_dim d item :: go rest items
+    | _ :: _, (d :: _ as dims) ->
+        if Z3utils.can_unfold d then (
+          Z3utils.unfold ~right:false d;
+          go dims items)
+        else
+          raise
+            (TypeError
+               ("can't slice " ^ string_of_dims dims
+              ^ ": the dims to slice aren't known"))
+  in
+  go dims items
 
 (* the dims an entry of a parameter's shape stands for inside the function's
    body. its dimension and spread variables become rigid: unknowns that stand
@@ -1816,6 +1970,12 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
     | Shape ts -> Dimensions (dims_of_shape (List.map (eval locals) ts))
     | Scalar -> Dimensions []
     | Tup ts -> Tuple (List.map (eval locals) ts)
+    | Slice (t, items) -> (
+        let opt = Option.map (eval locals) in
+        let items = List.map (fun (a, b, c) -> (opt a, opt b, opt c)) items in
+        match eval locals t with
+        | Dimensions l -> Dimensions (slice_dims l items)
+        | v -> raise (TypeError ("can't slice " ^ string_of_arg v)))
     | Call (f, ts) -> (
         let args = List.map (eval locals) ts in
         try
@@ -1832,11 +1992,14 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
         raise (TypeError ("the return value doesn't determine " ^ x))
     | Error err -> raise (TypeError (show_dim_error err))
   in
-  (* kinds: the names annotations may use; mapping: their values *)
-  let rec walk ?at locals kinds mapping = function
-    | [] -> in_fn "" (fun () -> raise (TypeError "missing return"))
+  (* kinds: the names annotations may use; mapping: their values. in a loop's
+     body, the walk falls off the end, and gives the locals there *)
+  let rec walk ?at ?(loop = false) locals kinds mapping = function
+    | [] ->
+        if not loop then in_fn "" (fun () -> raise (TypeError "missing return"));
+        locals
     | At (line, text, stmt) :: rest ->
-        walk ~at:(line, text) locals kinds mapping (stmt :: rest)
+        walk ~at:(line, text) ~loop locals kinds mapping (stmt :: rest)
     | stmt :: rest -> (
         let label =
           match at with
@@ -1847,6 +2010,9 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
         match stmt with
         | At _ -> assert false (* unwrapped above *)
         | Return t ->
+            if loop then
+              here (fun () ->
+                  raise (TypeError "return inside a loop isn't supported"));
             if rest <> [] then
               here (fun () -> raise (TypeError "statements after return"));
             let mapping =
@@ -1861,10 +2027,11 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
                         (TypeError
                            ("Postcondition not provable: "
                           ^ string_of_constr c mapping))))
-              fd.sg.ensures
+              fd.sg.ensures;
+            locals
         | Let (x, t) ->
             let v = here (fun () -> eval locals t) in
-            walk (StringMap.add x v locals) kinds mapping rest
+            walk ~loop (StringMap.add x v locals) kinds mapping rest
         | Unpack (xs, t) ->
             let vs =
               here (fun () ->
@@ -1879,7 +2046,7 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
             let locals =
               List.fold_left2 (fun l x v -> StringMap.add x v l) locals xs vs
             in
-            walk locals kinds mapping rest
+            walk ~loop locals kinds mapping rest
         | Assume c ->
             (* the assert passed, so c holds from here on. a quotient needs a
                positive divisor, which may be inferred like a size (x % 0
@@ -1898,7 +2065,50 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
                match constr_expr ~positive c mapping' with
                | Ok e -> Z3.Solver.add Z3utils.solver [ e ]
                | Error _ -> ());
-            walk locals kinds mapping rest
+            walk ~loop locals kinds mapping rest
+        | Loop (carried, body) ->
+            (* checking the body once, from the locals before it, covers
+               every iteration: it starts from those shapes and restores them.
+               what it assumes (asserts, unfoldings) holds only if it runs,
+               so it's scoped *)
+            let inferred =
+              match !inference with Some inf -> inf.inferred | None -> []
+            in
+            Z3utils.scoped (fun () ->
+                let after = walk ~loop:true locals kinds mapping body in
+                List.iter
+                  (fun (x, y) ->
+                    let find x l =
+                      match StringMap.find_opt x l with
+                      | Some v -> v
+                      | None -> raise (TypeError ("unbound variable " ^ x))
+                    in
+                    let before = here (fun () -> find x locals)
+                    and now = here (fun () -> find y after) in
+                    if not (same_value before now) then
+                      here (fun () ->
+                          raise
+                            (TypeError
+                               (Printf.sprintf
+                                  "`%s` doesn't keep its shape in the loop: %s \
+                                   before the body, %s after"
+                                  y (string_of_arg before) (string_of_arg now)))))
+                  carried);
+            (* what the body inferred is a requires, which holds after it
+               too; the scope took it out of the solver *)
+            (match !inference with
+            | Some inf ->
+                List.iter
+                  (fun c ->
+                    if not (List.mem c inferred) then
+                      match
+                        List.find_opt (fun (_, c') -> c' = c) inf.candidates
+                      with
+                      | Some (fact, _) -> Z3.Solver.add Z3utils.solver [ fact ]
+                      | None -> ())
+                  inf.inferred
+            | None -> ());
+            walk ~loop locals kinds mapping rest
         | LetAnnot (x, typ, t) ->
             let kinds =
               here (fun () ->
@@ -1918,7 +2128,7 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
             let mapping =
               here (fun () -> match_typ ("annotation of " ^ x) typ v mapping)
             in
-            walk (StringMap.add x v locals) kinds mapping rest)
+            walk ~loop (StringMap.add x v locals) kinds mapping rest)
   in
   Z3utils.scoped (fun () ->
       let rigid_params =
@@ -1971,10 +2181,11 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
           inference := None;
           pending_sizes := StringSet.empty)
         (fun () ->
-          walk
-            (StringMap.of_seq (List.to_seq args))
-            (check_args_signature fd.sg.params)
-            mapping fd.body);
+          ignore
+            (walk
+               (StringMap.of_seq (List.to_seq args))
+               (check_args_signature fd.sg.params)
+               mapping fd.body));
       List.rev inf.inferred)
 
 let check_fundef (env : (string * callee) list) (fd : fundef) : unit =

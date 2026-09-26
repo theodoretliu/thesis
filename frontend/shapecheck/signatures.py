@@ -11,6 +11,10 @@ its class's __init__, so forward(x: "b n d_model") refers to the d_model the
 module was built with. `self` itself isn't a parameter. A parameter annotated
 with a module class (dropout: nn.Dropout) is likewise its instance's dims.
 
+A class-level annotation declares an attribute's type over the instance dims
+(attribute_type), and reading or assigning it is a call to a getter or a
+setter of that type (attribute_signatures).
+
 An Optional[T] parameter is either None or a T at each call, so a function
 has a signature for each choice of which Optional parameters are None. A
 None parameter isn't in that signature at all.
@@ -268,6 +272,24 @@ def instance_ints(init: ast.FunctionDef | None) -> list[str]:
     ]
 
 
+def attribute_type(ann: ast.expr, ints: list[str], stub: bool, what: str) -> Json:
+    """The type a class-level annotation declares for an attribute, e.g.
+    pe: Float[Tensor, "1 max_len d_model"]. Every instance has it, so it may
+    only name the instance's dims."""
+    scope = Scope(stub, set(ints))
+    typ, _ = typ_of(ann, scope, False, what)
+    for a in arrays(typ):
+        for name in entry_names(a[1]):
+            if name not in ints:
+                shown = "`_`" if name.startswith("_") else f"`{name}`"
+                raise FrontendError(
+                    f"the annotation of {what} can only name the instance's dims (the int "
+                    f"parameters of __init__), and {shown} isn't one",
+                    ann,
+                )
+    return typ
+
+
 def build_signature(
     fn: ast.FunctionDef,
     stub: bool,
@@ -418,6 +440,20 @@ def build_signature(
     if instances:
         sig["instances"] = instances
     return Overload(sig=sig, params=params), scope
+
+
+def attribute_signatures(ints: list[str], typ: Json) -> tuple[Json, Json]:
+    """An attribute of declared type typ, as functions of an instance's dims:
+    reading it gives a typ, and assigning it checks the value is one."""
+    params = [[n, ir.IntType()] for n in ints]
+    getter = ir.signature(params, typ, [], [], [])
+    setter = ir.signature(params + [[ATTRIBUTE_VALUE, typ]], ir.NoneType(), [], [], [])
+    return getter, setter
+
+
+# the setter's parameter for the value assigned; not a Python name, so it
+# can't clash with an instance dim
+ATTRIBUTE_VALUE = "(value)"
 
 
 def arrays(typ: Json) -> Iterable[Json]:

@@ -129,6 +129,12 @@ def Tuple(terms: list[Json]) -> Json:
     return ["Tuple", terms]
 
 
+def Slice(t: Json, items: list[list[Json | None]]) -> Json:
+    """t[start:stop:step, ...]: each item is [start, stop, step], where None
+    is a bound left out."""
+    return ["Slice", t, items]
+
+
 def Let(x: str, t: Json) -> Json:
     return ["Let", x, t]
 
@@ -149,6 +155,12 @@ def Assume(c: Json) -> Json:
     """An assert: the rest of the body may assume the constraint c, whose
     names are int locals."""
     return ["Assume", c]
+
+
+def Loop(carried: list[list[str]], body: list[Json]) -> Json:
+    """A body that runs any number of times. carried pairs each local the body
+    reassigns, before it and after it: it must keep its shape."""
+    return ["Loop", carried, body]
 
 
 def At(line: int, text: str, stmt: Json) -> Json:
