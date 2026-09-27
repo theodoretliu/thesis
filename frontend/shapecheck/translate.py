@@ -24,6 +24,11 @@ __init__ makes `self.w(x)` the call torch.nn.Linear.forward(d_model, d_ff, x),
 where d_model is the method's own instance dim. So an attribute's type comes
 from the one assignment to it in __init__, unless a class-level annotation
 declares it.
+
+A config is a @dataclass of settings, like GPTConfig. A parameter annotated
+with one is passed as its int and bool fields, as int parameters named by
+field, and a module whose __init__ takes one has its int fields as instance
+dims: forward(x: "b t n_embd") refers to config.n_embd.
 """
 
 from __future__ import annotations
@@ -75,6 +80,10 @@ class ModuleClass:
     # attributes declared at class level, e.g. pe: Float[Tensor, "1 max_len d"]:
     # their IR types, over the instance dims
     attrs: dict[str, Json] = field(default_factory=dict)
+    # user classes: __init__'s config parameters, and for each instance dim
+    # that's a config's field, the parameter and the field
+    configs: dict[str, ConfigClass] = field(default_factory=dict)
+    sources: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     @property
     def init(self) -> str:
@@ -100,6 +109,46 @@ class Instance:
 
     cls: ModuleClass
     ints: list[Json]
+
+
+@dataclass
+class ConfigClass:
+    """A @dataclass of settings, e.g. GPTConfig. Its int fields are dims,
+    its bool fields are flags, and its float fields don't affect shapes."""
+
+    name: str
+    kinds: dict[str, str]  # field -> "int", "bool", "float" or "other"
+
+    @property
+    def ints(self) -> list[str]:
+        return [n for n, k in self.kinds.items() if k == "int"]
+
+    @property
+    def passed(self) -> list[str]:
+        """The fields a config is passed as, in order: its ints and flags."""
+        return [n for n, k in self.kinds.items() if k in ("int", "bool")]
+
+
+@dataclass
+class Config:
+    """A config value: a term for each int, bool and float field. A flag is
+    None where it isn't known, in a method (only the ints are instance dims)."""
+
+    cls: ConfigClass
+    terms: dict[str, Json | None]
+
+    @staticmethod
+    def of(cls: ConfigClass, flags: bool) -> Config:
+        """A config parameter, whose fields are the parameters named by field."""
+        terms: dict[str, Json | None] = {}
+        for n, k in cls.kinds.items():
+            if k == "int" or (k == "bool" and flags):
+                terms[n] = ir.Var(n)
+            elif k == "bool":
+                terms[n] = None
+            elif k == "float":
+                terms[n] = ir.Scalar()
+        return Config(cls, terms)
 
 
 @dataclass
@@ -236,6 +285,7 @@ MAX_OPTIONAL = 4
 
 MODULE_LIST = "torch.nn.ModuleList"
 MODULE_LIST_FORM = "`nn.ModuleList([Module(...) for _ in range(n)])`"
+DATACLASS = "dataclasses.dataclass"
 
 
 @dataclass
@@ -302,6 +352,10 @@ class Translator:
         self.classes: dict[str, ModuleClass] = {}  # user classes
         self.locals: dict[str, str] = {}  # Python name -> IR name
         self.module_locals: dict[str, Instance] = {}  # module parameters
+        self.config_locals: dict[str, Config] = {}  # config parameters
+        self.reserved: set[str] = set()  # IR names locals can't take
+        self.config_fields: set[tuple[str, str]] = set()  # attributes config_value is in
+        self.configs: dict[str, ConfigClass] = {}  # user config classes
         self.nones: set[str] = set()  # locals that are None here
         self.after_loop: set[str] = set()  # names bound only inside a loop's body
         self.owners: dict[str, str] = {}  # a checker function's Python function
@@ -315,6 +369,8 @@ class Translator:
         self.field_terms: dict[tuple[str, str], list[Json] | None] = {}
 
     def translate(self, tree: ast.Module) -> Json:
+        # imports and configs first: a module's instance dims may come from a
+        # config class defined after it
         for node in tree.body:
             if isinstance(node, ast.Import):
                 for a in node.names:
@@ -326,14 +382,18 @@ class Translator:
             elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                 for a in node.names:
                     self.aliases[a.asname or a.name] = f"{node.module}.{a.name}"
-            elif isinstance(node, ast.FunctionDef):
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and self.is_dataclass(node):
+                self.config_def(node)
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
                 if annotated(node):
                     self.functions[node.name] = Function(node)
                     self.unannotated.discard(node.name)
                 else:
                     self.functions.pop(node.name, None)
                     self.unannotated.add(node.name)
-            elif isinstance(node, ast.ClassDef):
+            elif isinstance(node, ast.ClassDef) and node.name not in self.configs:
                 self.class_def(node)
             elif isinstance(node, ast.AsyncFunctionDef):
                 self.notes.append(
@@ -377,10 +437,17 @@ class Translator:
 
         def build(nones: frozenset[str]) -> tuple[Overload, Scope]:
             if f.cls is not None and f.node.name == "__init__":
-                return build_signature(f.node, stub=False, init=True)
+                return build_signature(
+                    f.node, stub=False, init=True, config_class=self.config_class
+                )
             instance = None if f.cls is None else f.cls.ints
             ov, scope = build_signature(
-                f.node, stub=False, instance=instance, module_class=self.module_class, nones=nones
+                f.node,
+                stub=False,
+                instance=instance,
+                module_class=self.module_class,
+                config_class=self.config_class,
+                nones=nones,
             )
             if f.cls is not None and f.cls.ints:
                 ov.sig["instances"] = f.cls.instances() + ov.sig.get("instances", [])
@@ -409,6 +476,103 @@ class Translator:
         """The module class an annotation names, e.g. nn.Dropout."""
         return self.class_named(ann)
 
+    def config_class(self, ann: ast.expr) -> ConfigClass | None:
+        """The config class an annotation names, e.g. GPTConfig or the
+        forward reference "GPTConfig"."""
+        if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+            try:
+                ann = ast.parse(ann.value, mode="eval").body
+            except SyntaxError:
+                return None
+        if isinstance(ann, ast.Name) and not self.is_local(ann.id):
+            return self.configs.get(ann.id)
+        return None
+
+    # ---- configs ----
+
+    def is_dataclass(self, node: ast.ClassDef) -> bool:
+        return any(
+            self.qualname(d.func if isinstance(d, ast.Call) else d) == DATACLASS
+            for d in node.decorator_list
+        )
+
+    def config_def(self, node: ast.ClassDef) -> None:
+        """A @dataclass: a config class, known by its annotated fields."""
+        kinds = {}
+        for s in node.body:
+            if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
+                ann = s.annotation
+                name = ann.id if isinstance(ann, ast.Name) else None
+                kinds[s.target.id] = name if name in ("int", "bool", "float") else "other"
+            elif isinstance(s, ast.FunctionDef) and annotated(s):
+                self.notes.append(
+                    Error(
+                        s.lineno,
+                        None,
+                        f"skipped `{node.name}.{s.name}`: methods of dataclasses aren't checked",
+                    )
+                )
+        self.configs[node.name] = ConfigClass(node.name, kinds)
+
+    def config_value(self, e: ast.expr) -> Config | None:
+        """The config e is, if it's a config parameter, or an attribute that
+        __init__ assigns one, like self.config."""
+        if isinstance(e, ast.Name):
+            return self.config_locals.get(e.id)
+        if not isinstance(e, ast.Attribute):
+            return None
+        base = self.instance(e.value)
+        if base is None or not base.cls.user:
+            return None
+        value = base.cls.fields.get(e.attr)
+        key = (base.cls.name, e.attr)
+        if value is None or key in self.config_fields:
+            return None  # an attribute defined in terms of itself is reported elsewhere
+        self.config_fields.add(key)
+        try:
+            cfg = self.as_instance(base.cls, lambda: self.config_value(value))
+        finally:
+            self.config_fields.discard(key)
+        if cfg is None:
+            return None
+        terms = {n: None if t is None else substitute(t, base) for n, t in cfg.terms.items()}
+        return Config(cfg.cls, terms)
+
+    def config_field(self, cfg: Config, name: str, e: ast.AST) -> Json:
+        """The term for a config's field, e.g. config.n_embd."""
+        kind = cfg.cls.kinds.get(name)
+        if kind is None:
+            raise FrontendError(f"`{cfg.cls.name}` has no field `{name}`", e)
+        if kind == "other":
+            raise FrontendError(
+                f"only the int, bool and float fields of a config can be used, and "
+                f"`{cfg.cls.name}.{name}` isn't one",
+                e,
+            )
+        t = cfg.terms[name]
+        if t is None:
+            raise FrontendError(
+                f"`{cfg.cls.name}.{name}` is a flag, not an instance dim, so it's only known "
+                "in `__init__`",
+                e,
+            )
+        return t
+
+    def flatten(self, params: list[Param], terms: list[Json], e: ast.AST) -> list[Json]:
+        """The IR arguments for bound terms: a module is passed as its
+        instance dims, a config as its ints and flags, and None not at all."""
+        out: list[Json] = []
+        for p, t in zip(params, terms):
+            if t is NONE:
+                continue
+            if p.module is not None:
+                out += t
+            elif p.config is not None:
+                out += [self.config_field(t, n, e) for n in p.config.passed]
+            else:
+                out.append(t)
+        return out
+
     # ---- classes ----
 
     def class_def(self, node: ast.ClassDef) -> None:
@@ -425,7 +589,8 @@ class Translator:
             return
         methods = [m for m in node.body if isinstance(m, ast.FunctionDef)]
         init = next((m for m in reversed(methods) if m.name == "__init__"), None)
-        cls = ModuleClass(node.name, instance_ints(init), user=True)
+        cls = ModuleClass(node.name, [], user=True)
+        self.instance_dims(cls, init)
         if init is not None:
             cls.self_name = init.args.args[0].arg if init.args.args else "self"
             cls.fields = fields_of(init, cls.self_name)
@@ -454,10 +619,35 @@ class Translator:
                 self.functions.pop(key, None)
                 self.unannotated.add(key)
 
+    def instance_dims(self, cls: ModuleClass, init: ast.FunctionDef | None) -> None:
+        """cls's instance dims: the int parameters of __init__, and the int
+        fields of its config parameters, named by field."""
+        if init is None:
+            return
+        ints = instance_ints(init)
+        a = init.args
+        for arg in (a.posonlyargs + a.args)[1:] + a.kwonlyargs:
+            if arg.arg in ints:
+                cls.ints.append(arg.arg)
+                continue
+            cfg = None if arg.annotation is None else self.config_class(arg.annotation)
+            if cfg is None:
+                continue
+            cls.configs[arg.arg] = cfg
+            for n in cfg.ints:
+                if n not in cls.ints:  # a clash is an error in __init__'s signature
+                    cls.ints.append(n)
+                    cls.sources[n] = (arg.arg, n)
+
     def is_local(self, name: str) -> bool:
-        """A local variable of the body translated: a value, a module
+        """A local variable of the body translated: a value, a module or config
         parameter, or None."""
-        return name in self.locals or name in self.module_locals or name in self.nones
+        return (
+            name in self.locals
+            or name in self.module_locals
+            or name in self.config_locals
+            or name in self.nones
+        )
 
     def class_named(self, e: ast.expr) -> ModuleClass | None:
         """The module class an expression like nn.Linear or Encoder names."""
@@ -495,6 +685,7 @@ class Translator:
         saved = (
             self.locals,
             self.module_locals,
+            self.config_locals,
             self.nones,
             self.terms,
             self.cls,
@@ -502,7 +693,9 @@ class Translator:
             self.in_init,
             self.in_instance,
         )
-        self.locals, self.module_locals, self.nones = {n: n for n in cls.ints}, {}, set()
+        self.locals = {n: n for n in cls.ints if n not in cls.sources}
+        self.module_locals, self.nones = {}, set()
+        self.config_locals = {p: Config.of(c, flags=False) for p, c in cls.configs.items()}
         self.terms = {}
         self.cls, self.self_name, self.in_init, self.in_instance = cls, cls.self_name, False, True
         try:
@@ -511,6 +704,7 @@ class Translator:
             (
                 self.locals,
                 self.module_locals,
+                self.config_locals,
                 self.nones,
                 self.terms,
                 self.cls,
@@ -589,7 +783,12 @@ class Translator:
             params = self.init_params(cls, value)
             thunks = self.bind_thunks(params, list(value.args), keywords_of(value))
             by_name = dict(zip((p.name for p in params), thunks))
-            return [by_name[n]() for n in cls.ints]
+            out = []
+            for n in cls.ints:
+                param, fld = cls.sources.get(n, (n, None))
+                t = by_name[param]()
+                out.append(t if fld is None else self.config_field(t, fld, value))
+            return out
 
         ints = self.field_terms_of(
             base.cls, name, terms, e, f"the arguments that build `self.{name}`"
@@ -656,7 +855,7 @@ class Translator:
                     raise FrontendError(f"`{cls.name}` takes no arguments", e)
                 return ir.Tuple([])
             try:
-                return ir.Call(cls.init, self.bind(params, args, keywords))
+                return ir.Call(cls.init, self.flatten(params, self.bind(params, args, keywords), e))
             except BindError as err:
                 raise FrontendError(
                     f"`{cls.name}` doesn't take these arguments: {err}", e
@@ -737,22 +936,25 @@ class Translator:
         except BindError as err:
             raise FrontendError(f"`{key}` doesn't take these arguments: {err}", e) from None
         nones = frozenset(p.name for p, t in zip(params, terms) if t is NONE)
-        out = list(prefix)
-        for p, t in zip(params, terms):
-            if t is not NONE:
-                out += t if p.module is not None else [t]
-        return ir.Call(f.variant(nones).name, out)
+        return ir.Call(f.variant(nones).name, list(prefix) + self.flatten(params, terms, e))
 
     # ---- statements ----
 
     def body(self, f: Function, v: Variant) -> list[Json]:
         params = v.overload.params
         present = [p for p in params if p.name not in v.nones]
-        self.locals = {p.name: p.ir_name for p in present if p.module is None}
+        self.locals = {p.name: p.ir_name for p in present if p.module is None and p.config is None}
         self.module_locals = {
             p.name: Instance(p.module, [ir.Var(n) for n in p.ints])
             for p in present
             if p.module is not None
+        }
+        self.config_locals = {
+            p.name: Config.of(p.config, flags=True) for p in present if p.config is not None
+        }
+        # IR names that locals can't take: the instance dims, and config fields
+        self.reserved = set(f.cls.ints if f.cls is not None else ()) | {
+            n for c in self.config_locals.values() for n in c.cls.passed
         }
         self.nones = set(v.nones)
         self.after_loop = set()
@@ -830,6 +1032,7 @@ class Translator:
             raise FrontendError("the loop variable must be a name", s.target)
         locals_before = dict(self.locals)
         modules_before = dict(self.module_locals)
+        configs_before = dict(self.config_locals)
         nones_before = set(self.nones)
         assigned = {
             n.id
@@ -837,7 +1040,7 @@ class Translator:
             for n in ast.walk(stmt)
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
         }
-        modules = sorted(assigned & modules_before.keys())
+        modules = sorted(assigned & (modules_before.keys() | configs_before.keys()))
         if modules:
             raise FrontendError(f"the loop can't reassign the module `{modules[0]}`", s)
         target = s.target.id
@@ -856,6 +1059,7 @@ class Translator:
         # loop. one the body binds, and the loop variable, may be unbound or
         # hold anything, so they're dropped
         self.locals, self.module_locals, self.nones = locals_before, modules_before, nones_before
+        self.config_locals = configs_before
         for name in (assigned | {target}) - set(carried):
             self.locals.pop(name, None)
             self.module_locals.pop(name, None)
@@ -969,6 +1173,11 @@ class Translator:
             return ir.binop("Sub", ir.Int(0), self.assert_arith(e.operand, lets))
         if isinstance(e, ast.Name) and e.id in self.locals:
             return ir.Id(self.locals[e.id])
+        if isinstance(e, ast.Attribute) and self.config_value(e.value) is not None:
+            # config.n_head is an int parameter, so the fact is about it
+            t = self.term(e)
+            if t[0] == "Var":
+                return ir.Id(t[1])
         if isinstance(e, (ast.Call, ast.Attribute)):
             # evaluated first, into a local that no Python name can clash with
             name = f"({ast.unparse(e)})"
@@ -1038,20 +1247,19 @@ class Translator:
         self.nones.discard(name)
         self.after_loop.discard(name)
         self.module_locals.pop(name, None)
-        if self.cls is not None and name in self.cls.ints:
-            if self.in_init:
+        self.config_locals.pop(name, None)
+        if self.in_init and self.cls is not None and name in self.locals:
+            if name in self.cls.ints and name not in self.cls.sources:
                 raise FrontendError(
                     f"`__init__` can't reassign `{name}`: it's one of the instance's dims, "
                     "which its methods refer to"
                 )
-            # the IR name is the method's instance dim
-            ir_name = name
-            while ir_name in self.cls.ints:
-                ir_name += "'"
-            self.locals[name] = ir_name
-            return ir_name
-        self.locals[name] = name
-        return name
+        # the IR name of an instance dim or a config's field is taken
+        ir_name = name
+        while ir_name in self.reserved:
+            ir_name += "'"
+        self.locals[name] = ir_name
+        return ir_name
 
     def set_attribute(self, target: ast.Attribute, value: ast.expr) -> Json:
         """self.f = value, in __init__. A module attribute is built by
@@ -1077,6 +1285,11 @@ class Translator:
             # the modules are all built alike, so checking one constructor
             # call checks them all (and asks for more when there are none)
             value = element
+        cfg = self.config_value(value)
+        if cfg is not None:
+            # self.config = config: later reads go through the field
+            t = ir.Tuple([self.config_field(cfg, n, value) for n in cfg.cls.passed])
+            return ir.Let(f"{target.value.id}.{target.attr}", t)
         cls = self.class_named(value.func) if isinstance(value, ast.Call) else None
         t = self.construct(cls, value) if cls is not None else self.term(value)
         # later statements read self.f from the class's fields, not this name
@@ -1102,6 +1315,11 @@ class Translator:
                 return ir.Var(self.locals[e.id])
             if e.id in self.nones:
                 raise FrontendError(f"`{e.id}` is None here", e)
+            if e.id in self.config_locals:
+                raise FrontendError(
+                    f"`{e.id}` is a config: only its fields can be used, or it can be passed on",
+                    e,
+                )
             if self.instance(e) is not None:
                 raise FrontendError(
                     f"`{e.id}` can only be used for its attributes and methods here", e
@@ -1217,6 +1435,8 @@ class Translator:
         inst = self.instance(f.value) if isinstance(f, ast.Attribute) else None
         if inst is not None:
             return self.method_call(inst, f.attr, args, keywords, e)
+        if isinstance(f, ast.Name) and not self.is_local(f.id) and f.id in self.configs:
+            raise FrontendError(f"building a config (`{f.id}(...)`) isn't supported yet", e)
         if isinstance(f, ast.Name) and not self.is_local(f.id) and f.id in self.functions:
             return self.user_call(f.id, self.functions[f.id], [], args, keywords, e)
         q = self.qualname(f)
@@ -1239,6 +1459,9 @@ class Translator:
         raise FrontendError(f"unsupported call `{ast.unparse(e)}`", e)
 
     def attribute(self, e: ast.Attribute) -> Json:
+        cfg = self.config_value(e.value)
+        if cfg is not None:
+            return self.config_field(cfg, e.attr, e)
         base = self.instance(e.value)
         if base is not None:
             if e.attr in base.cls.attrs:
@@ -1251,6 +1474,12 @@ class Translator:
             if self.instance(e) is not None:
                 raise FrontendError(
                     f"`{ast.unparse(e)}` is a module; only calls to it are supported", e
+                )
+            if self.config_value(e) is not None:
+                raise FrontendError(
+                    f"`{ast.unparse(e)}` is a config: only its fields can be used, or it can "
+                    "be passed on",
+                    e,
                 )
             if self.list_instance(e) is not None:
                 raise FrontendError(
@@ -1392,6 +1621,11 @@ class Translator:
             if isinstance(a, ast.Name):
                 raise FrontendError(f"`{a.id}` is None here", a)
             raise BindError(f"`{p.name}` can't be None")
+        if p is not None and p.config is not None:
+            cfg = self.config_value(a)
+            if cfg is None or cfg.cls is not p.config:
+                raise BindError(f"`{p.name}` takes a `{p.config.name}`")
+            return cfg  # flattened into its fields at the call
         if p is not None and p.module is not None:
             inst = self.instance(a)
             if inst is None or inst.cls is not p.module:

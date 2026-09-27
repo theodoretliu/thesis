@@ -48,8 +48,9 @@ uvx ruff format . && uvx ruff check .
 ## What gets checked
 
 Every top-level function with at least one annotation, and every such method of an `nn.Module` subclass
-(see [Modules](#modules)). Other classes are skipped with a note. Every parameter and the return type need
-annotations, except `self` and `__init__`'s return type:
+(see [Modules](#modules)). A `@dataclass` is a config (see [Configs](#configs)), and other classes are
+skipped with a note. Every parameter and the return type need annotations, except `self` and
+`__init__`'s return type:
 
 | Annotation | Checker type |
 |---|---|
@@ -62,6 +63,7 @@ annotations, except `self` and `__init__`'s return type:
 | `None` (return types only) | the empty tuple |
 | `Optional[T]`, `T \| None` (parameters only) | `None` or a `T`: checked once for each (see [Optional](#optional-parameters)) |
 | `nn.Dropout`, a user's `nn.Module` subclass | an instance of that module (see [Modules](#modules)) |
+| a `@dataclass` like `GPTConfig` | its `int` and `bool` fields, as ints named by field (see [Configs](#configs)) |
 
 Shape strings follow jaxtyping:
 
@@ -203,6 +205,39 @@ Modules can't be returned or stored in locals yet, and an annotation can't name 
 dims. Only direct subclasses of `nn.Module` are checked. See [docs/14-modules.md](../docs/14-modules.md)
 and [docs/16-stacks.md](../docs/16-stacks.md).
 
+## Configs
+
+A module may be built from a config, a `@dataclass` of settings, as nanoGPT's are. Its `int` fields are
+the instance dims, named by field:
+
+```python
+class MLP(nn.Module):
+    def __init__(self, config: "GPTConfig"):
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+
+    def forward(self, x: Float[Tensor, "b t n_embd"]) -> Float[Tensor, "b t n_embd"]:
+        return self.c_proj(F.gelu(self.c_fc(x)))
+
+
+@dataclass
+class GPTConfig:
+    n_embd: int = 768
+    bias: bool = True
+```
+
+- A config parameter is its `int` and `bool` fields, as int parameters named by field. The annotation may
+  be a forward reference (`"GPTConfig"`), and a field can't share a name with another parameter.
+- `config.n_embd` is that field, and a `float` field is a float. `self.config = config` stores it, so
+  `self.config.n_embd` works in methods.
+- `bool` fields are flags, not instance dims, so a method can't read them. `__init__` can pass them on
+  (`bias=config.bias`).
+- `Block(config)` passes a config on. A config can't be used as a value otherwise, or built in checked
+  code.
+
+See [docs/18-configs.md](../docs/18-configs.md).
+
 ## Calls
 
 Calls resolve through the file's imports (`import torch.nn.functional as F`, `from torch import
@@ -251,7 +286,7 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
   ```
 
 The shipped stubs cover common torch functions, `Tensor` methods, `torch.nn.functional`, the modules
-`nn.Linear`, `nn.Embedding`, `nn.LayerNorm`, `nn.Dropout` and `nn.ReLU`, `math.sqrt`/`math.log`, and
+`nn.Linear`, `nn.Embedding`, `nn.LayerNorm`, `nn.Dropout`, `nn.ReLU` and `nn.GELU`, `math.sqrt`/`math.log`, and
 Python's operators. `operator.setitem(target, value)` is slice assignment: the frontend passes the slice
 itself as `target`. `nn.ModuleList` has no stub; the frontend handles it. A call with no stub is an error,
 never an unknown shape.

@@ -71,6 +71,7 @@ class Param:
     optional: bool = False  # Optional[T]: None or a T
     module: Any = None  # a module class: an instance is passed as its dims
     ints: list[str] = field(default_factory=list)  # a module parameter's IR ints
+    config: Any = None  # a config class: passed as its ints and flags, named by field
 
 
 @dataclass
@@ -296,6 +297,7 @@ def build_signature(
     instance: list[str] | None = None,
     init: bool = False,
     module_class: Callable[[ast.expr], Any] | None = None,
+    config_class: Callable[[ast.expr], Any] | None = None,
     nones: frozenset[str] = frozenset(),
 ) -> tuple[Overload, Scope]:
     """The signature of fn, and the scope its body's annotations share. A
@@ -303,9 +305,11 @@ def build_signature(
     int parameters. A method or an __init__ doesn't list `self`. An __init__
     returns None.
 
-    module_class gives the module class an annotation names, if any, and nones
-    are the Optional parameters that are None in this signature. Params lists
-    every parameter, for binding calls."""
+    module_class gives the module class an annotation names, if any, and
+    config_class the config class. A config parameter is its int and bool
+    fields, as int parameters named by field. nones are the Optional
+    parameters that are None in this signature. Params lists every parameter,
+    for binding calls."""
     a = fn.args
     if a.kwarg is not None:
         raise FrontendError("**kwargs isn't supported", fn)
@@ -357,6 +361,24 @@ def build_signature(
                 where = "in stubs" if stub else "on `__init__`"
                 raise FrontendError(f"`Optional` parameters aren't supported {where} yet", arg)
             ann = inner
+        cfg = None if ann is None or config_class is None else config_class(ann)
+        if cfg is not None:
+            if optional or default is not None:
+                raise FrontendError(
+                    f"{what} is a config, so it can't be Optional or have a default", arg
+                )
+            names = {x.arg for x, _, _ in specs}
+            for n in cfg.passed:
+                if n in int_params or n in names:
+                    raise FrontendError(
+                        f"{what} is a `{cfg.name}`, whose field `{n}` is a parameter already: "
+                        "its fields are parameters named by field",
+                        arg,
+                    )
+            params.append(Param(arg.arg, arg.arg, kind, None, False, config=cfg))
+            ir_params += [[n, ir.IntType()] for n in cfg.passed]
+            int_params.update(cfg.passed)
+            continue
         if optional and default is not None and is_none(default):
             default_value = NONE
         else:
