@@ -22,6 +22,16 @@ def layer_norm(
     eps: float = 1e-5,
 ) -> Float[Tensor, "*B n"]: ...
 def dropout(input: Shaped[Tensor, "*A"], p: float = 0.5, training: bool = True) -> Shaped[Tensor, "*A"]: ...
+# softmax(q @ k.mT / sqrt(e) + mask) @ v, where the mask broadcasts to the
+# scores. torch also broadcasts the batch dims of q, k and v, which are equal here
+def scaled_dot_product_attention(
+    query: Float[Tensor, "*B l e"],
+    key: Float[Tensor, "*B s e"],
+    value: Float[Tensor, "*B s ev"],
+    attn_mask: Optional[Shaped[Tensor, "*#B #l #s"]] = None,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+) -> Float[Tensor, "*B l ev"]: ...
 
 # weight is [out_features, in_features]
 @overload

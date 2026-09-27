@@ -26,7 +26,7 @@ let contains s sub =
 
 let sg ?(requires = []) ?(exists = []) ?(ensures = []) ?(invariant = [])
     (params, ret) =
-  { params; ret; requires; exists; ensures; invariant }
+  { params; ret; requires; inferred = []; exists; ensures; invariant }
 
 (* ---- the library bodies call ---- *)
 
@@ -1223,4 +1223,70 @@ let () =
   expect "slicing a spread needs its dims" (fun () ->
       rejects
         ~saying:[ "the dims to slice aren't known" ]
-        (slice [ ("x", arr [ Spread "B" ]) ] [ Spread "B" ] "x" [ upto 1 ]))
+        (slice [ ("x", arr [ Spread "B" ]) ] [ Spread "B" ] "x" [ upto 1 ]));
+  (* nanoGPT milestone 3: a stop within its dim may be inferred *)
+  let within = show_constr (Le (Id "n", Id "m")) in
+  expect "the stop within its dim is inferred when the body needs it" (fun () ->
+      inferred (prefix ()) = [ within ]);
+  expect "and not when it doesn't" (fun () ->
+      inferred
+        (def "f"
+           [ ("pe", arr [ Id "m"; Id "d" ]); ("x", arr [ Id "n"; Id "d" ]) ]
+           (arr [ Id "n"; Id "d" ])
+           [
+             Let
+               ( "y",
+                 Slice
+                   (var "pe", [ (None, Some (call "shape0" [ var "x" ]), None) ])
+               );
+             Return (var "x");
+           ])
+      = []);
+  (* a causal mask: bias[:t, :t] broadcasts to the scores *)
+  let mask =
+    def "f"
+      [ ("bias", arr [ Id "m"; Id "m" ]); ("x", arr [ Id "n"; Id "n" ]) ]
+      (arr [ Id "n"; Id "n" ])
+      [
+        Let ("t", call "shape0" [ var "x" ]);
+        Return
+          (call "masked_fill"
+             [
+               var "x";
+               Slice
+                 ( var "bias",
+                   [
+                     (None, Some (var "t"), None); (None, Some (var "t"), None);
+                   ] );
+             ]);
+      ]
+  in
+  expect "for a later call in the statement" (fun () ->
+      inferred mask = [ within ]);
+  expect "and it's checked given it" (fun () ->
+      checks
+        { mask with sg = { mask.sg with requires = [ Le (Id "n", Id "m") ] } });
+  (* a callee whose body inferred it *)
+  let head =
+    {
+      (sg
+         ( [ ("pe", arr [ Id "m"; Id "d" ]); ("x", arr [ Id "n"; Id "d" ]) ],
+           arr [ Id "n"; Id "d" ] ))
+      with
+      inferred = [ Le (Id "n", Id "m") ];
+    }
+  in
+  let caller =
+    def "g"
+      [ ("p", arr [ Id "k"; Id "e" ]); ("y", arr [ Id "j"; Id "e" ]) ]
+      (arr [ Id "j"; Id "e" ])
+      [ Return (call "head" [ var "p"; var "y" ]) ]
+  in
+  expect "a callee's inferred relation is inferred in turn" (fun () ->
+      match infer_requires (("head", Sig head) :: env) caller with
+      | cs -> List.map show_constr cs = [ show_constr (Le (Id "j", Id "k")) ]
+      | exception TypeError _ -> false);
+  expect "but must be proved without inference" (fun () ->
+      match check_fundef (("head", Sig head) :: env) caller with
+      | () -> false
+      | exception TypeError m -> contains m "Precondition not provable")

@@ -13,6 +13,8 @@ type result = { name : string; error : string option; inferred : constr list }
 (* a bound inferred for a parameter, e.g. n >= 0 *)
 let string_of_inferred = function
   | Le (Int k, Id x) -> x ^ " >= " ^ string_of_int k
+  | Le (Id x, Id y) -> x ^ " <= " ^ y
+  | Lt (Id x, Id y) -> x ^ " < " ^ y
   | c -> show_constr c
 
 (* bodies may infer preconditions, which callers' bodies then have to prove,
@@ -79,7 +81,7 @@ let check_all ({ env; items } : Ir_json.program) : result list =
     {
       fd with
       sg =
-        { fd.sg with requires = fd.sg.requires @ inferred_for inferred fd.name };
+        { fd.sg with inferred = fd.sg.inferred @ inferred_for inferred fd.name };
     }
   in
   (* what a constructor guarantees about its ints: its requires, including

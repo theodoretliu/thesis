@@ -129,6 +129,22 @@ class Examples(unittest.TestCase):
             },
         )
 
+    def test_inferred_relations(self):
+        report = check_file(EXAMPLES / "pass" / "causal.py", STUBS, self.checker)
+        self.assertEqual(len(report.passed), 8)
+        # broadcasting the sliced mask needs n <= max_len: the slow case
+        # infers it, Block passes it on, and GPTish proves it from its assert.
+        # split needs pieces of size d >= 1
+        self.assertEqual(
+            {k: v for k, v in report.inferred.items() if k.endswith("forward")},
+            {
+                "CausalSelfAttention.forward": ["d >= 1", "n <= max_len"],
+                "GLU.forward": ["d >= 1"],
+                "Block.forward": ["d >= 1", "n <= max_len"],
+                "GPTish.forward": ["d >= 1"],
+            },
+        )
+
     def test_optional_cases_and_asserts(self):
         report = check_file(EXAMPLES / "pass" / "masks.py", STUBS, self.checker)
         # a function passes if it checks in every case: forward with and

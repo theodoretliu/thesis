@@ -79,6 +79,7 @@ let signature (j : Yojson.Safe.t) : signature =
     params = list param (field "params" j);
     ret = typ (field "ret" j);
     requires = list constr (field "requires" j);
+    inferred = [];
     exists = list string (field "exists" j);
     ensures = list constr (field "ensures" j);
     invariant = optional "invariant" [] (list constr) j;
