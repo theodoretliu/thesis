@@ -27,7 +27,7 @@ class Report:
     errors: list[str]  # "path:line: message"
     notes: list[str]
     checked: int  # functions whose bodies went to the checker
-    passed: list[str]  # functions whose bodies checked without errors, in every case
+    passed: list[str]  # functions whose bodies checked without errors, in every variant and case
     inferred: dict[str, list[str]]  # preconditions the checker added, e.g. n >= 0
 
 
@@ -69,7 +69,12 @@ def check_file(path: Path, stubs: Stubs, checker: Path) -> Report:
             errors.append((int(m.group(2)), f"in {m.group(1)}, {m.group(3)}"))
         else:
             errors.append((lines.get(r["name"], 1), r["error"]))
-    inferred = {r["name"]: r["inferred"] for r in results if r.get("inferred")}
+    # a function's cases share its signature, so what they infer is reported
+    # once, for the function
+    cases = {f["name"] for f in program["functions"] if "group" in f}
+    inferred = {
+        r["name"]: r["inferred"] for r in results if r.get("inferred") and r["name"] not in cases
+    }
     notes = [(n.line, n.message) for n in t.notes] + [
         (lines.get(name, 1), f"{name} requires {', '.join(cs)} (inferred from its body)")
         for name, cs in inferred.items()
@@ -79,10 +84,12 @@ def check_file(path: Path, stubs: Stubs, checker: Path) -> Report:
     ok = {
         f["name"]: f["body"] is not None and f["name"] not in failed for f in program["functions"]
     }
-    checked = sum(any(v.body is not None for v in f.variants) for f in t.functions.values())
+    checked = sum(
+        any(c.body is not None for v in f.variants for c in v.cases) for f in t.functions.values()
+    )
     passed = [
         name for name, f in t.functions.items()
-        if f.variants and all(ok[v.name] for v in f.variants)
+        if f.variants and all(ok[c.name] for v in f.variants for c in v.cases)
     ]  # fmt: skip
     errors.sort(key=lambda e: e[0])
     return Report(

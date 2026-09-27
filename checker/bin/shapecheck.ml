@@ -63,8 +63,17 @@ let check_all ({ env; items } : Ir_json.program) : result list =
               })
       env
   in
+  (* the cases of a function share its signature, so what one infers is a
+     requires of them all: inferred requires are kept per group *)
+  let group_of name =
+    match
+      List.find_opt (fun ({ fd; _ } : Ir_json.item) -> fd.name = name) items
+    with
+    | Some { group = Some g; _ } -> g
+    | _ -> name
+  in
   let inferred_for inferred name =
-    Option.value ~default:[] (List.assoc_opt name inferred)
+    Option.value ~default:[] (List.assoc_opt (group_of name) inferred)
   in
   let with_requires inferred (fd : fundef) =
     {
@@ -147,18 +156,24 @@ let check_all ({ env; items } : Ir_json.program) : result list =
     let results = check_round ~infer:true ~only inferred in
     let fresh =
       List.filter_map
-        (function name, Ok (_ :: _ as cs) -> Some (name, cs) | _ -> None)
+        (function
+          | name, Ok (_ :: _ as cs) -> Some (group_of name, cs) | _ -> None)
         results
     in
     if fresh = [] then (results, inferred)
     else
+      (* several cases of a group may infer the same fact in a round *)
+      let add known cs =
+        List.fold_left
+          (fun acc c -> if List.mem c acc then acc else acc @ [ c ])
+          known cs
+      in
       let inferred =
-        List.map
-          (fun (name, cs) -> (name, inferred_for inferred name @ cs))
-          fresh
-        @ List.filter
-            (fun (name, _) -> not (List.mem_assoc name fresh))
-            inferred
+        List.fold_left
+          (fun inferred (g, cs) ->
+            let known = Option.value ~default:[] (List.assoc_opt g inferred) in
+            (g, add known cs) :: List.remove_assoc g inferred)
+          inferred fresh
       in
       (* the last round's bodies assumed facts their callers didn't see *)
       if n >= max_rounds then (check_round ~infer:false ~only inferred, inferred)
@@ -172,7 +187,9 @@ let check_all ({ env; items } : Ir_json.program) : result list =
         List.map (fun ({ init; _ } : Ir_json.instance) -> init) instances)
       items
   in
-  let _, seed = rounds ~only:(fun name -> List.mem name inits) [] 1 in
+  let _, seed =
+    rounds ~only:(fun name -> List.mem (group_of name) inits) [] 1
+  in
   let results, inferred = rounds ~only:(fun _ -> true) seed 1 in
   stub_results
   @ List.map

@@ -345,12 +345,12 @@ class Bodies(unittest.TestCase):
             ("x += 1", "write `x = x \\+ 1`"),
             ("a = b = x", "only assignments to a name"),
             ("a, b.c = x, x", "only assignments to a name"),
-            ("print(x)", "an expression statement isn't supported"),
+            ("x.sum()", "an expression statement isn't supported"),
             ("return", "must return a value"),
             ("return y", "`y` isn't a local variable"),
             ("return (*x, x)", "starred items in tuples"),
             ("return x[0]", r"only slices like `x\[a:b\]`"),
-            ("return x.shape", "`x.shape` isn't supported"),
+            ("return x.shape", "`x.shape` is only supported where a shape is expected"),
             ("return x.shape[0]", r"`x.shape\[i\]` isn't supported"),
             ("return x.frob()", "no stub for the method `.frob`"),
             ("return x.sum", "`.sum` is a method; call it"),
@@ -1070,6 +1070,261 @@ class Optionals(unittest.TestCase):
             with self.subTest(src):
                 _, errors = program("import torch.nn as nn\nfrom typing import Optional\n" + src)
                 self.assertRegex(" ".join(errors), msg)
+
+
+FLAGS = """
+import torch
+import torch.nn as nn
+from jaxtyping import Float
+from torch import Tensor
+from torch.nn import functional as F
+
+
+class Norm(nn.Module):
+    def __init__(self, d: int, bias: bool):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d))
+        self.bias = nn.Parameter(torch.zeros(d)) if bias else None
+
+    def forward(self, x: Float[Tensor, "*b d"]) -> Float[Tensor, "*b d"]:
+        return F.layer_norm(x, self.weight.shape, self.weight, self.bias, 1e-5)
+
+    def shifted(self, x: Float[Tensor, "*b d"]) -> Float[Tensor, "*b d"]:
+        if self.bias is None:
+            return x
+        return x + self.bias
+
+
+class Masked(nn.Module):
+    def __init__(self, n: int, d: int, shift: bool):
+        super().__init__()
+        self.fast = hasattr(F, "scaled_dot_product_attention")
+        self.use_shift = shift
+        self.norm = Norm(d, shift)
+        if not self.fast:
+            print("slow", n)
+            assert n >= 1
+            self.register_buffer("mask", torch.ones(n, n))
+            if self.use_shift:
+                self.register_buffer("shift", torch.zeros(n))
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b d"]:
+        return self.norm(x)
+"""
+
+
+def stmts(f):
+    """A body's statements, without At wrappers, including the return that
+    falling off the end of __init__ adds."""
+    return [s[3] if s[0] == "At" else s for s in f["body"]]
+
+
+class Flags(unittest.TestCase):
+    def test_a_case_per_value(self):
+        fs, errors = functions(FLAGS)
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            [n for n in fs if n.startswith("Norm")],
+            [
+                "Norm.__init__",
+                "Norm.__init__[bias=True]",
+                "Norm.__init__[bias=False]",
+                "Norm.forward",
+                "Norm.forward[bias=True]",
+                "Norm.forward[bias=False]",
+                "Norm.shifted",
+                "Norm.shifted[bias=True]",
+                "Norm.shifted[bias=False]",
+            ],
+        )
+        # callers see the function's signature, which has no body; the cases
+        # share it, and their group names it
+        head = fs["Norm.forward"]
+        self.assertIsNone(head["body"])
+        self.assertNotIn("group", head)
+        for name in ("Norm.forward[bias=True]", "Norm.forward[bias=False]"):
+            self.assertEqual(fs[name]["group"], "Norm.forward")
+            self.assertEqual(fs[name]["sig"], head["sig"])
+        # the flag is a parameter of __init__, as an int
+        self.assertEqual([p[0] for p in fs["Norm.__init__"]["sig"]["params"]], ["d", "bias"])
+
+    def test_attributes_that_are_none(self):
+        fs, _ = functions(FLAGS)
+        self.assertEqual(
+            stmts(fs["Norm.__init__[bias=False]"])[1], ["Let", "self.bias", ["Tuple", []]]
+        )
+        self.assertEqual(stmts(fs["Norm.__init__[bias=True]"])[1][2][1], "torch.nn.Parameter")
+        # None selects layer_norm's variant, and isn't passed
+        with_bias = returned(fs["Norm.forward[bias=True]"])
+        without = returned(fs["Norm.forward[bias=False]"])
+        self.assertEqual(with_bias[1], "torch.nn.functional.layer_norm")
+        self.assertEqual(without[1], "torch.nn.functional.layer_norm[bias=None]")
+        self.assertEqual(len(with_bias[2]), 5)
+        self.assertEqual(len(without[2]), 4)
+        # x.shape where a shape is expected
+        self.assertEqual(with_bias[2][1][1], "torch.Tensor.shape")
+        # self.bias is None is decided in each case
+        self.assertEqual(stmts(fs["Norm.shifted[bias=False]"]), [["Return", ["Var", "x"]]])
+        self.assertEqual(returned(fs["Norm.shifted[bias=True]"])[1], "operator.add")
+
+    def test_flag_attributes(self):
+        fs, errors = functions(FLAGS)
+        self.assertEqual(errors, [])
+        # use_shift is the flag shift, and it's only tested without the fast
+        # path, so only that case splits on it
+        self.assertEqual(
+            [n for n in fs if n.startswith("Masked.__init__")],
+            [
+                "Masked.__init__",
+                "Masked.__init__[self.fast=True]",
+                "Masked.__init__[self.fast=False,shift=True]",
+                "Masked.__init__[self.fast=False,shift=False]",
+            ],
+        )
+        fast = stmts(fs["Masked.__init__[self.fast=True]"])
+        # setting a flag isn't a statement of the IR
+        self.assertEqual([s[1] for s in fast[:-1]], ["self.norm"])
+        slow = stmts(fs["Masked.__init__[self.fast=False,shift=True]"])
+        self.assertEqual(
+            [s[1] if s[0] == "Let" else s[0] for s in slow],
+            ["self.norm", "(print)", "Assume", "self.mask", "self.shift", "Return"],
+        )
+        self.assertEqual(slow[1][2], ["Tuple", [["Var", "n"]]])  # the string isn't printed
+        # the forward doesn't test a flag
+        self.assertNotIn("group", fs["Masked.forward"])
+        self.assertIsNotNone(fs["Masked.forward"]["body"])
+
+    def test_ensures_are_common_to_the_cases(self):
+        fs, _ = functions(FLAGS)
+        # the assert is only reached without the fast path
+        for name in [n for n in fs if n.startswith("Masked.__init__")]:
+            self.assertEqual(fs[name]["sig"]["ensures"], [])
+
+    def test_errors(self):
+        for src, msg in [
+            ("bias = False", "`__init__` can't reassign `bias`: it's a flag"),
+            ("if self.w:\n            pass", "`if` isn't supported yet, except on whether"),
+            ("if self.inner.on:\n            pass", "`self.inner.on` is a flag of another module"),
+            ("if self.twice:\n            pass", "`self.twice` must be assigned once"),
+            (
+                "if a and b and c and d2 and bias:\n            pass",
+                "at most 4 flags can be tested",
+            ),
+            ("print(*self.w)", r"`print\(\*args\)` isn't supported"),
+        ]:
+            with self.subTest(src):
+                _, errors = program(
+                    "import torch\nimport torch.nn as nn\n"
+                    "class Inner(nn.Module):\n"
+                    "    def __init__(self, on: bool):\n"
+                    "        super().__init__()\n"
+                    "        self.on = on\n"
+                    "class C(nn.Module):\n"
+                    "    def __init__(\n"
+                    "        self, d: int, a: bool, b: bool, c: bool, d2: bool, bias: bool\n"
+                    "    ):\n"
+                    "        super().__init__()\n"
+                    "        self.w = torch.ones(d)\n"
+                    "        self.inner = Inner(bias)\n"
+                    "        self.twice = bias\n"
+                    "        self.twice = a\n"
+                    f"        {src}\n"
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+    def test_errors_are_reported_once(self):
+        _, errors = program(
+            """
+            import torch.nn as nn
+
+            class C(nn.Module):
+                def __init__(self, a: bool, b: bool):
+                    super().__init__()
+                    if a or b:
+                        y = frob()
+            """
+        )
+        # reached in three of the four cases
+        self.assertEqual(len(errors), 1)
+
+
+class StubOptionals(unittest.TestCase):
+    def test_variants(self):
+        stubs = Stubs()
+        load_stub_module(
+            stubs,
+            "m",
+            ast.parse(
+                textwrap.dedent(
+                    """
+                    def f(
+                        x: Float[Tensor, "n"], w: Optional[Float[Tensor, "n"]] = None
+                    ) -> Float[Tensor, "n"]: ...
+                    """
+                )
+            ),
+        )
+        [ov] = stubs.functions["m.f"].overloads
+        self.assertEqual([p[0] for p in ov.sig["params"]], ["x", "w"])
+        self.assertEqual(
+            {k: [p[0] for p in v["params"]] for k, v in ov.variants.items()},
+            {frozenset({"w"}): ["x"]},
+        )
+
+    def test_calls(self):
+        prog, errors = program(
+            """
+            import torch
+            from torch.nn import functional as F
+
+            def f(x: Float[Tensor, "b n"], w: Float[Tensor, "n"]) -> Float[Tensor, "b n"]:
+                y = F.layer_norm(x, (x.size(1),), bias=w)
+                return F.layer_norm(y, w.shape)
+            """
+        )
+        self.assertEqual(errors, [])
+        y, ret = [s[3] for s in prog["functions"][0]["body"]]
+        self.assertEqual(y[2][1], "torch.nn.functional.layer_norm[weight=None]")
+        self.assertEqual(ret[1][1], "torch.nn.functional.layer_norm[weight=None,bias=None]")
+        self.assertEqual(len(ret[1][2]), 3)  # input, normalized_shape and eps
+        env = {e["name"] for e in prog["env"]}
+        self.assertIn("torch.nn.functional.layer_norm[weight=None,bias=None]", env)
+
+
+class Shapes(unittest.TestCase):
+    def test_shape_arguments(self):
+        prog, errors = program(
+            """
+            import torch
+
+            def f(x: Float[Tensor, "b n"]) -> Float[Tensor, "b n"]:
+                return x + torch.zeros(x.shape) + x.reshape(x.shape)
+            """
+        )
+        self.assertEqual(errors, [])
+        calls = [
+            t
+            for t in iterate(prog["functions"][0]["body"])
+            if isinstance(t, list) and t[:1] == ["Call"]
+        ]
+        self.assertIn(
+            ["Call", "torch.zeros", [["Call", "torch.Tensor.shape", [["Var", "x"]]]]], calls
+        )
+        self.assertIn(
+            [
+                "Call",
+                "torch.Tensor.reshape",
+                [["Var", "x"], ["Call", "torch.Tensor.shape", [["Var", "x"]]]],
+            ],
+            calls,
+        )
+
+
+def iterate(t):
+    yield t
+    if isinstance(t, list):
+        for x in t:
+            yield from iterate(x)
 
 
 class Asserts(unittest.TestCase):

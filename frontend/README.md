@@ -102,25 +102,28 @@ Bodies must be straight-line code, apart from `if`s that are decided statically 
 - `a, b = expr`, unpacking a tuple.
 - `return expr`, including `return a, b`.
 - `if` on whether variables are `None` (`if mask is not None:`), which is known statically. See
-  [Optional parameters](#optional-parameters).
+  [Optional parameters](#optional-parameters). And `if` on a flag (`if not self.flash:`), which is
+  checked once for each value. See [Flags](#flags).
 - `assert`: the rest of the body assumes it. Comparisons of ints with `+ - * //` are stated, and so is
   `a % b == 0`, as `b * (a // b) == a`. A call in one, like `x.size(1)`, is evaluated first. Anything else
   in an assert is dropped, which is sound. A divisor may be inferred positive, like a size.
 - `for layer in self.layers:` over an `nn.ModuleList`. The body is checked once, and the locals it
   reassigns must keep their shapes. See [Modules](#modules).
 - `x[a:b] = v` assigns into a slice. `v` must broadcast to the slice, and `x` keeps its shape.
+- `print(...)` is skipped, but the values it prints, other than strings and the text of f-strings, are
+  checked.
 - `pass` is skipped.
 - Expressions: local variables, int/bool/float literals, calls, `+ - * / // ** @ & | ^`, unary `-` and
   `~`, comparisons, methods (`x.sum(-1)`, `x.size(-1)`), properties (`x.mT`), tuples, and tuples of ints
   as shapes (`x.reshape((n, d))`). One entry of a shape may be `-1` where the stub determines it, as in
-  `x.reshape(-1, d)`.
+  `x.reshape(-1, d)`. `x.shape` is a shape too, but only where one is expected: `torch.zeros(x.shape)`.
 - Slices `x[a:b:c, ...]` of the leading dims, with Python's rules: negative bounds count from the end,
   and bounds past the end are clamped. So `x[:, :n]` has `min(n, m)` columns, which is `n` after
   `assert n <= m`. The step must be positive.
 
 Anything else gets an explicit error, and the rest of the file is still checked. That covers other control
-flow, augmented assignment (`x += y`), int indexing (`x[0]`) and `x.shape`, lambdas, and module-level
-values.
+flow, augmented assignment (`x += y`), int indexing (`x[0]`), `x.shape` as a value, lambdas, and
+module-level values.
 
 ## Optional parameters
 
@@ -147,8 +150,9 @@ optional_none.py:12: in masked[mask=None]: `mask` is None here
 ```
 
 Tests may combine `is None` and `is not None` with `not`, `and` and `or`, and `x if y is None else z` is
-decided the same way. A function may have at most 4 `Optional` parameters (16 cases). They aren't
-supported on `__init__` or in stubs. See [docs/15-attention.md](../docs/15-attention.md).
+decided the same way, as is `self.x is None` for an attribute `__init__` assigns. A function may have at
+most 4 `Optional` parameters (16 cases). They aren't supported on `__init__`. Stubs may have them. See
+[docs/15-attention.md](../docs/15-attention.md).
 
 ## Modules
 
@@ -231,12 +235,50 @@ class GPTConfig:
   be a forward reference (`"GPTConfig"`), and a field can't share a name with another parameter.
 - `config.n_embd` is that field, and a `float` field is a float. `self.config = config` stores it, so
   `self.config.n_embd` works in methods.
-- `bool` fields are flags, not instance dims, so a method can't read them. `__init__` can pass them on
-  (`bias=config.bias`).
+- `bool` fields aren't instance dims, so a method can't read them. `__init__` can pass them on
+  (`bias=config.bias`), but not test them yet.
 - `Block(config)` passes a config on. A config can't be used as a value otherwise, or built in checked
   code.
 
 See [docs/18-configs.md](../docs/18-configs.md).
+
+## Flags
+
+A flag is a `bool` a module's code branches on: a `bool` parameter of `__init__`, or an attribute that
+`__init__` sets to one, to `hasattr(...)`, or to `not`/`and`/`or` of those. Its value isn't known
+statically, so a method is checked once for each value of each flag it tests:
+
+```python
+class LayerNorm(nn.Module):
+    def __init__(self, ndim: int, bias: bool):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+
+    def forward(self, input: Float[Tensor, "*b ndim"]) -> Float[Tensor, "*b ndim"]:
+        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+```
+
+`forward` reads `self.bias`, whose value tests `bias`, so it's checked as `LayerNorm.forward[bias=True]`
+and `LayerNorm.forward[bias=False]`. In the second, `self.bias` is `None`, which selects `layer_norm`'s
+case without a bias. The cases are found from the code: a flag is split on when a case first tests it, so
+a flag tested only under another is only split there (`[self.fast=False,shift=True]`).
+
+- Unlike an `Optional` parameter, a caller can't pick a case, so they all have the function's one
+  signature, and that's all callers see. What one case infers is required of them all, and an assert in
+  `__init__` is part of the class invariant only if every case reaches it.
+- `self.use_bias = bias` is the flag `bias`, and `self.flash = hasattr(F, "scaled_dot_product_attention")`
+  is a flag of its own, `self.flash`. Setting a flag isn't checked otherwise.
+- `__init__` can't reassign a flag. Only `self`'s flags can be tested, not a nested module's.
+- `x if flag else y`, `if flag:` and `self.x is None` are decided in each case. An error names the case:
+
+  ```
+  flag_none.py:15: in Affine.forward[bias=False]: `self.bias` is None here
+  ```
+
+- A function may test at most 4 flags (16 cases, for each case of its `Optional` parameters).
+
+See [docs/19-flags.md](../docs/19-flags.md).
 
 ## Calls
 
@@ -267,6 +309,8 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
   needs an inferred precondition.
 - Asserts in the body are preconditions (`assert prod(A) == prod(B)`), or postconditions if they mention
   an existential (`assert m <= n` for `unique`).
+- `Optional[T]` parameters, as in user code: `layer_norm`'s `weight` and `bias`. A call with `None` goes to
+  the stub's case without it, e.g. `torch.nn.functional.layer_norm[bias=None]`.
 - A class that subclasses `Module` is a module class, typed like a user's module: its instance dims are
   the `int` parameters of `__init__`, and its methods' annotations may name them. Asserts in `__init__`
   are the constructor's requires, which its instances then satisfy:
@@ -286,8 +330,9 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
   ```
 
 The shipped stubs cover common torch functions, `Tensor` methods, `torch.nn.functional`, the modules
-`nn.Linear`, `nn.Embedding`, `nn.LayerNorm`, `nn.Dropout`, `nn.ReLU` and `nn.GELU`, `math.sqrt`/`math.log`, and
-Python's operators. `operator.setitem(target, value)` is slice assignment: the frontend passes the slice
+`nn.Linear`, `nn.Embedding`, `nn.LayerNorm`, `nn.Dropout`, `nn.ReLU` and `nn.GELU`, `nn.Parameter`,
+`math.sqrt`/`math.log`, and Python's operators. `Tensor.shape` is a property whose value is a shape
+(`-> Shape["*A"]`), and the frontend only allows it where a shape is expected. `operator.setitem(target, value)` is slice assignment: the frontend passes the slice
 itself as `target`. `nn.ModuleList` has no stub; the frontend handles it. A call with no stub is an error,
 never an unknown shape.
 
@@ -312,10 +357,11 @@ stmt   ["Let", x, term] ["LetAnnot", x, typ, term] ["Unpack", [x], term] ["Retur
        ["Assume", constr] ["Loop", [[x_before, x_after]], [stmt]] ["At", line, text, stmt]
 
 program {"env": [{"name": f, "overloads": [sig]}],
-         "functions": [{"name": f, "sig": sig, "body": [stmt] | null}]}
+         "functions": [{"name": f, "sig": sig, "body": [stmt] | null, "group": f}]}
 ```
 
-`None` is `["Tuple", []]`. A signature's `invariant` and `instances` are optional. An invariant is
+`None` is `["Tuple", []]`. A signature's `invariant` and `instances` are optional, and so is a function's
+`group`. An invariant is
 assumed by the body and by callers. Each instance says that some of the parameters are an instance's dims:
 the CLI adds the constructor `init`'s requires and ensures, renamed to those parameters, to the invariant.
 A method has one instance, for `self`, and each module parameter adds one. `Assume` is an assert: the
@@ -328,7 +374,11 @@ returns the declared type, and `C.a (assigned)` takes the instance dims and the 
 type, and returns `None`.
 
 A function with `Optional` parameters is one checker function per case, named like
-`attention[mask=None]`.
+`attention[mask=None]`, and so is a stub's case. A function that tests flags is a function with its
+signature and no body, which callers use, and a checker function per case, named like
+`LayerNorm.forward[bias=False]`, whose `group` names it. The cases have its signature, and the CLI keeps
+their inferred requires per group, so what one case infers is required of all of them and seen by
+callers.
 
 A function whose body couldn't be translated has `"body": null`, so callers still use its signature. The
 checker prints `{"results": [{"name": f, "error": null | message, "inferred": ["n >= 0", ...]}]}` and

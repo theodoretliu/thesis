@@ -1,8 +1,9 @@
 # Shapes of torch.nn.functional; see ../__init__.pyi for the stub syntax.
 
-from typing import overload
+from typing import Optional, overload
 
-from jaxtyping import Shaped
+from jaxtyping import Float, Shaped
+from shapecheck.stubs import Shape
 from torch import Tensor
 
 def relu(input: Shaped[Tensor, "*A"]) -> Shaped[Tensor, "*A"]: ...
@@ -12,6 +13,14 @@ def sigmoid(input: Shaped[Tensor, "*A"]) -> Shaped[Tensor, "*A"]: ...
 def tanh(input: Shaped[Tensor, "*A"]) -> Shaped[Tensor, "*A"]: ...
 def softmax(input: Shaped[Tensor, "*A"], dim: int) -> Shaped[Tensor, "*A"]: ...
 def log_softmax(input: Shaped[Tensor, "*A"], dim: int) -> Shaped[Tensor, "*A"]: ...
+# normalized_shape is one dim, the last: torch allows several
+def layer_norm(
+    input: Float[Tensor, "*B n"],
+    normalized_shape: Shape["n"],
+    weight: Optional[Float[Tensor, "n"]] = None,
+    bias: Optional[Float[Tensor, "n"]] = None,
+    eps: float = 1e-5,
+) -> Float[Tensor, "*B n"]: ...
 def dropout(input: Shaped[Tensor, "*A"], p: float = 0.5, training: bool = True) -> Shaped[Tensor, "*A"]: ...
 
 # weight is [out_features, in_features]

@@ -146,16 +146,29 @@ let callee (j : Yojson.Safe.t) : lib =
   | [ sg ] -> { name; callee = Sig sg; lib_instances }
   | sgs -> { name; callee = Overloads sgs; lib_instances }
 
-(* a function to check; without a body only its signature is used *)
-type item = { fd : fundef; checked : bool; instances : instance list }
+(* a function to check; without a body only its signature is used. a case
+   of a function (checked once per value of a flag) names its group, the
+   function whose signature callers use: the cases share its requires *)
+type item = {
+  fd : fundef;
+  checked : bool;
+  instances : instance list;
+  group : string option;
+}
 
 let item (j : Yojson.Safe.t) : item =
   let name = string (field "name" j) and sg = signature (field "sig" j) in
   let instances = instances (field "sig" j) in
+  let group = optional "group" None (fun g -> Some (string g)) j in
   match field "body" j with
-  | `Null -> { fd = { name; sg; body = [] }; checked = false; instances }
+  | `Null -> { fd = { name; sg; body = [] }; checked = false; instances; group }
   | body ->
-      { fd = { name; sg; body = list stmt body }; checked = true; instances }
+      {
+        fd = { name; sg; body = list stmt body };
+        checked = true;
+        instances;
+        group;
+      }
 
 type program = { env : lib list; items : item list }
 

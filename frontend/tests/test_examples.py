@@ -100,6 +100,35 @@ class Examples(unittest.TestCase):
             ],
         )
 
+    def test_flag_cases(self):
+        report = check_file(EXAMPLES / "pass" / "flags.py", STUBS, self.checker)
+        # a function passes if it checks in every case of its flags
+        self.assertEqual(
+            sorted(report.passed),
+            [
+                "Block.__init__",
+                "Block.forward",
+                "LayerNorm.__init__",
+                "LayerNorm.forward",
+                "Masked.__init__",
+                "Masked.forward",
+                "Scale.__init__",
+                "Scale.forward",
+            ],
+        )
+        # the cases share their function's signature, so what they infer is
+        # its requires, reported once. only the slow case of Masked.__init__
+        # builds the mask, but every caller must allow for it, as Block's does
+        self.assertEqual(
+            report.inferred,
+            {
+                "LayerNorm.__init__": ["ndim >= 0"],
+                "Scale.__init__": ["d >= 0"],
+                "Masked.__init__": ["d >= 0", "max_len >= 0"],
+                "Block.__init__": ["d >= 0", "max_len >= 0"],
+            },
+        )
+
     def test_optional_cases_and_asserts(self):
         report = check_file(EXAMPLES / "pass" / "masks.py", STUBS, self.checker)
         # a function passes if it checks in every case: forward with and

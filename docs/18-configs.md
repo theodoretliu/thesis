@@ -124,8 +124,9 @@ part of the class invariant, so neither `forward` infers anything.
 
 - **Only top-level dataclasses**, with fields annotated `int`, `bool` or `float` by name. Inherited
   fields aren't read. A config can't be `Optional`, have a default, be returned, or be stored in a local.
-- **Flags aren't known in methods.** `self.config.bias` is an error there. Milestone 2 decides how a flag
-  decides an attribute's `None`-ness (N5).
+- **Flags aren't known in methods.** `self.config.bias` is an error there. Milestone 2 checks a module
+  once per value of each flag it tests, but a config's `bool` fields aren't flags yet, only `__init__`'s
+  `bool` parameters and attributes ([19-flags.md](19-flags.md)).
 - As for modules, a constructor argument can't be a local of `__init__`: `width = 4 * config.n_embd;
   self.up = nn.Linear(config.n_embd, width)` is an error in the methods that use `self.up`.
 - A config parameter of a method or a free function works, but its fields can't have the names of the

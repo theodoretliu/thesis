@@ -3,8 +3,9 @@
 Every top-level function with an annotation is checked, and so is every
 annotated method of an nn.Module subclass. A body must be straight-line code:
 assignments (plain, annotated, unpacking a tuple, or into a slice), asserts,
-and a return. The exceptions are `if`s on whether a local is None, decided
-statically, and loops over an nn.ModuleList, whose body is checked once.
+and a return. The exceptions are `if`s on whether a local is None or on a
+flag, decided in each case, and loops over an nn.ModuleList, whose body is
+checked once.
 Calls resolve to user functions (in any order, through their signatures) or
 stubs; operators desugar to the stub module `operator` (x @ w is
 operator.matmul), methods and properties to the stub classes (x.sum(-1) is
@@ -25,6 +26,13 @@ where d_model is the method's own instance dim. So an attribute's type comes
 from the one assignment to it in __init__, unless a class-level annotation
 declares it.
 
+A flag is a bool a module branches on: a bool parameter of __init__, or an
+attribute __init__ sets to one or to hasattr(...). Its value isn't known
+statically, so a function is checked once for each value of each flag it
+tests, as separate checker functions (LayerNorm.forward[bias=False]). Callers
+can't pick a case, so the cases share the function's signature, which is
+what calls use.
+
 A config is a @dataclass of settings, like GPTConfig. A parameter annotated
 with one is passed as its int and bool fields, as int parameters named by
 field, and a module whose __init__ takes one has its int fields as instance
@@ -34,6 +42,7 @@ dims: forward(x: "b t n_embd") refers to config.n_embd.
 from __future__ import annotations
 
 import ast
+import copy
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +93,8 @@ class ModuleClass:
     # that's a config's field, the parameter and the field
     configs: dict[str, ConfigClass] = field(default_factory=dict)
     sources: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # user classes: __init__'s bool parameters, which may be tested as flags
+    flags: list[str] = field(default_factory=list)
 
     @property
     def init(self) -> str:
@@ -105,10 +116,13 @@ class ModuleClass:
 
 @dataclass
 class Instance:
-    """A module value: its class, and a term for each instance dim."""
+    """A module value: its class, and a term for each instance dim. own is
+    whether it's the self of the method translated, whose flags the case
+    gives."""
 
     cls: ModuleClass
     ints: list[Json]
+    own: bool = False
 
 
 @dataclass
@@ -182,10 +196,23 @@ def load_stubs(dirs: Sequence[Path]) -> Stubs:
     return stubs
 
 
+def stub_overload(node: ast.FunctionDef, **kwargs) -> Overload:
+    """A stub's signature, and one for each choice of which of its Optional
+    parameters are None."""
+    ov = build_signature(node, stub=True, **kwargs)[0]
+    optional = [p.name for p in ov.params if p.optional]
+    if len(optional) > MAX_OPTIONAL:
+        raise FrontendError(f"at most {MAX_OPTIONAL} parameters can be Optional", node)
+    for k in range(1, 2 ** len(optional)):
+        nones = frozenset(n for i, n in enumerate(optional) if k >> i & 1)
+        ov.variants[nones] = build_signature(node, stub=True, nones=nones, **kwargs)[0].sig
+    return ov
+
+
 def load_stub_module(stubs: Stubs, module: str, tree: ast.Module) -> None:
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
-            stubs.add(f"{module}.{node.name}", build_signature(node, stub=True)[0])
+            stubs.add(f"{module}.{node.name}", stub_overload(node))
         elif isinstance(node, ast.ClassDef) and any(last(b) == "Module" for b in node.bases):
             load_module_class(stubs, f"{module}.{node.name}", node)
         elif isinstance(node, ast.ClassDef):
@@ -198,7 +225,7 @@ def load_stub_module(stubs: Stubs, module: str, tree: ast.Module) -> None:
                 names = table.setdefault(m.name, [])
                 if qualname not in names:
                     names.append(qualname)
-                stubs.add(qualname, build_signature(m, stub=True)[0])
+                stubs.add(qualname, stub_overload(m))
 
 
 def load_module_class(stubs: Stubs, qualname: str, node: ast.ClassDef) -> None:
@@ -213,11 +240,12 @@ def load_module_class(stubs: Stubs, qualname: str, node: ast.ClassDef) -> None:
     stubs.classes[qualname] = cls
     for m in methods:
         if m.name == "__init__":
-            ov = build_signature(m, stub=True, init=True)[0]
+            ov = stub_overload(m, init=True)
         else:
-            ov = build_signature(m, stub=True, instance=cls.ints)[0]
+            ov = stub_overload(m, instance=cls.ints)
             if cls.ints:
-                ov.sig["instances"] = cls.instances()
+                for sig in [ov.sig, *ov.variants.values()]:
+                    sig["instances"] = cls.instances()
         stubs.add(f"{qualname}.{m.name}", ov)
 
 
@@ -282,6 +310,8 @@ SYMBOLS = {
 
 # each Optional parameter doubles the checks, so there's a limit
 MAX_OPTIONAL = 4
+# and so does each flag
+MAX_FLAGS = 4
 
 MODULE_LIST = "torch.nn.ModuleList"
 MODULE_LIST_FORM = "`nn.ModuleList([Module(...) for _ in range(n)])`"
@@ -289,15 +319,33 @@ DATACLASS = "dataclasses.dataclass"
 
 
 @dataclass
+class Case:
+    """A variant where each flag its body tests has a value, e.g.
+    LayerNorm.forward[bias=False]: a checker function of its own."""
+
+    flags: dict[str, bool]
+    name: str
+    sig: Json
+    body: list[Json] | None = None  # None if its body has errors
+
+
+@dataclass
 class Variant:
     """A function where some of its Optional parameters are None: a checker
-    function of its own, named like attention[mask=None]."""
+    function of its own, named like attention[mask=None]. It's checked once
+    for each case of the flags its body tests, and the cases share its
+    signature, which is what callers see."""
 
     nones: frozenset[str]
     name: str
     overload: Overload
     scope: Scope
-    body: list[Json] | None = None  # None if its body has errors
+    labels: list[str]  # e.g. ["mask=None"]
+    cases: list[Case] = field(default_factory=list)
+
+    @property
+    def flagged(self) -> bool:
+        return any(c.flags for c in self.cases)
 
 
 @dataclass
@@ -334,6 +382,15 @@ class Unstated(Exception):
     """Part of an assert the checker can't state, so it's dropped."""
 
 
+class NeedFlag(Exception):
+    """A flag the case being translated has no value for: the body is
+    translated again for each value."""
+
+    def __init__(self, key: str):
+        super().__init__(key)
+        self.key = key
+
+
 # an argument: an expression, or a term already translated (a receiver)
 Arg = Union[ast.expr, tuple[str, Json]]
 
@@ -363,10 +420,16 @@ class Translator:
         self.self_name: str | None = None  # its name for self
         self.in_init = False
         self.in_instance = False  # translating a field's value (see as_instance)
+        self.own = True  # whether that field is of the method's own self
+        self.case: dict[str, bool] = {}  # the flags' values in the case translated
+        self.flag_fields: set[tuple[str, str]] = set()  # flag attributes being evaluated
+        self.flag_checks: set[tuple[str, str]] = set()  # attributes is_flag_expression is in
+        self.none_fields: set[tuple[str, str]] = set()  # attributes static_none is in
         self.returns_none = False
-        # a field's value, as terms over its class's instance dims
-        # None while being computed, to catch attributes defined by each other
-        self.field_terms: dict[tuple[str, str], list[Json] | None] = {}
+        # a field's value, as terms over its class's instance dims, in the
+        # case translated. None while being computed, to catch attributes
+        # defined by each other
+        self.field_terms: dict[tuple[str, str, bool], list[Json] | None] = {}
 
     def translate(self, tree: ast.Module) -> Json:
         # imports and configs first: a module's instance dims may come from a
@@ -410,26 +473,76 @@ class Translator:
                 self.errors.append(Error(e.line or f.node.lineno, name, e.message))
             for v in f.variants:
                 self.owners[v.name] = name
-        for f in self.functions.values():
-            reported = set()
+        for name, f in self.functions.items():
+            reported: set[tuple[int, str]] = set()
             for v in f.variants:
-                try:
-                    v.body = self.body(f, v)
-                except FrontendError as e:
-                    line = e.line or f.node.lineno
-                    # the same error in each variant is reported once
-                    if (line, e.message) not in reported:
-                        reported.add((line, e.message))
-                        self.errors.append(Error(line, v.name, e.message))
+                v.cases = self.cases(f, v, reported)
+                for c in v.cases:
+                    self.owners[c.name] = name
 
+        functions = []
+        for f in self.functions.values():
+            for v in f.variants:
+                if not v.flagged:
+                    (c,) = v.cases
+                    functions.append({"name": v.name, "sig": c.sig, "body": c.body})
+                    continue
+                # callers see one signature, which each case checks against
+                head = copy.deepcopy(v.overload.sig)
+                head["ensures"] = v.cases[0].sig["ensures"]
+                functions.append({"name": v.name, "sig": head, "body": None})
+                functions += [
+                    {"name": c.name, "sig": c.sig, "body": c.body, "group": v.name} for c in v.cases
+                ]
         return {
             "env": [{"name": k, "overloads": v} for k, v in self.env.items()],
-            "functions": [
-                {"name": v.name, "sig": v.overload.sig, "body": v.body}
-                for f in self.functions.values()
-                for v in f.variants
-            ],
+            "functions": functions,
         }
+
+    def cases(self, f: Function, v: Variant, reported: set[tuple[int, str]]) -> list[Case]:
+        """v's body for each case of the flags it tests. A flag is found when
+        the body tests it, and the body is then translated for each value, so
+        a flag tested only when another has some value only splits that case.
+        An error is reported once for all of f's cases."""
+        todo: list[dict[str, bool]] = [{}]
+        out = []
+        while todo:
+            flags = todo.pop(0)
+            labels = v.labels + [f"{k}={b}" for k, b in flags.items()]
+            base = self.owners[v.name]
+            name = f"{base}[{','.join(labels)}]" if labels else base
+            case = Case(flags, name, copy.deepcopy(v.overload.sig))
+            try:
+                case.body = self.body(f, v, case)
+            except NeedFlag as need:
+                if len(flags) < MAX_FLAGS:
+                    todo[:0] = [{**flags, need.key: True}, {**flags, need.key: False}]
+                    continue
+                e = FrontendError(
+                    f"at most {MAX_FLAGS} flags can be tested: each one doubles the cases "
+                    f"checked, and `{need.key}` is one more",
+                    f.node,
+                )
+                self.report(f, case.name, e, reported)
+            except FrontendError as e:
+                self.report(f, case.name, e, reported)
+            out.append(case)
+        if any(c.flags for c in out):
+            # an assert in __init__ that only some cases reach isn't a fact
+            # about every instance
+            common = [x for x in out[0].sig["ensures"] if all(x in c.sig["ensures"] for c in out)]
+            for c in out:
+                c.sig["ensures"] = common
+        return out
+
+    def report(
+        self, f: Function, name: str, e: FrontendError, reported: set[tuple[int, str]]
+    ) -> None:
+        line = e.line or f.node.lineno
+        # the same error in each variant and case is reported once
+        if (line, e.message) not in reported:
+            reported.add((line, e.message))
+            self.errors.append(Error(line, name, e.message))
 
     def variants(self, name: str, f: Function) -> list[Variant]:
         """f's signature for each choice of which Optional parameters are
@@ -468,8 +581,10 @@ class Translator:
         for k in range(2 ** len(optional)):
             nones = frozenset(n for i, n in enumerate(optional) if k >> i & 1)
             ov, scope = full if not nones else build(nones)
-            label = ",".join(f"{n}=None" for n in optional if n in nones)
-            out.append(Variant(nones, f"{name}[{label}]" if nones else name, ov, scope))
+            labels = [f"{n}=None" for n in optional if n in nones]
+            out.append(
+                Variant(nones, f"{name}[{','.join(labels)}]" if nones else name, ov, scope, labels)
+            )
         return out
 
     def module_class(self, ann: ast.expr) -> ModuleClass | None:
@@ -530,7 +645,7 @@ class Translator:
             return None  # an attribute defined in terms of itself is reported elsewhere
         self.config_fields.add(key)
         try:
-            cfg = self.as_instance(base.cls, lambda: self.config_value(value))
+            cfg = self.as_instance(base.cls, lambda: self.config_value(value), base.own)
         finally:
             self.config_fields.discard(key)
         if cfg is None:
@@ -621,12 +736,15 @@ class Translator:
 
     def instance_dims(self, cls: ModuleClass, init: ast.FunctionDef | None) -> None:
         """cls's instance dims: the int parameters of __init__, and the int
-        fields of its config parameters, named by field."""
+        fields of its config parameters, named by field. Also its flags, the
+        bool parameters."""
         if init is None:
             return
         ints = instance_ints(init)
         a = init.args
         for arg in (a.posonlyargs + a.args)[1:] + a.kwonlyargs:
+            if isinstance(arg.annotation, ast.Name) and arg.annotation.id == "bool":
+                cls.flags.append(arg.arg)
             if arg.arg in ints:
                 cls.ints.append(arg.arg)
                 continue
@@ -664,7 +782,7 @@ class Translator:
                 return self.module_locals[e.id]
             if self.cls is None or e.id != self.self_name or self.is_local(e.id):
                 return None
-            return Instance(self.cls, [ir.Var(n) for n in self.cls.ints])
+            return Instance(self.cls, [ir.Var(n) for n in self.cls.ints], self.own)
         if isinstance(e, ast.Attribute):
             base = self.instance(e.value)
             if base is None or not base.cls.user:
@@ -679,10 +797,13 @@ class Translator:
         """class_named, where the names are those of cls's __init__."""
         return self.as_instance(cls, lambda: self.class_named(e))
 
-    def as_instance(self, cls: ModuleClass, f):
+    def as_instance(self, cls: ModuleClass, f, own: bool = False):
         """Run f where the names are those of cls's __init__, standing for an
-        instance's dims: its int parameters, and self."""
+        instance's dims: its int parameters, and self. own is whether the
+        instance is the self of the method translated, so its flags are the
+        case's."""
         saved = (
+            self.own,
             self.locals,
             self.module_locals,
             self.config_locals,
@@ -698,10 +819,12 @@ class Translator:
         self.config_locals = {p: Config.of(c, flags=False) for p, c in cls.configs.items()}
         self.terms = {}
         self.cls, self.self_name, self.in_init, self.in_instance = cls, cls.self_name, False, True
+        self.own = own
         try:
             return f()
         finally:
             (
+                self.own,
                 self.locals,
                 self.module_locals,
                 self.config_locals,
@@ -742,7 +865,7 @@ class Translator:
         if base is None or not base.cls.user or e.attr not in base.cls.fields:
             return None
         value = self.field(base.cls, e.attr, e)
-        element = self.as_instance(base.cls, lambda: self.list_element(value))
+        element = self.as_instance(base.cls, lambda: self.list_element(value), base.own)
         return None if element is None else self.built_instance(base, e.attr, element, e)
 
     def list_element(self, value: ast.expr) -> ast.Call | None:
@@ -790,9 +913,7 @@ class Translator:
                 out.append(t if fld is None else self.config_field(t, fld, value))
             return out
 
-        ints = self.field_terms_of(
-            base.cls, name, terms, e, f"the arguments that build `self.{name}`"
-        )
+        ints = self.field_terms_of(base, name, terms, e, f"the arguments that build `self.{name}`")
         return Instance(cls, [substitute(t, base) for t in ints])
 
     def value_field(self, base: Instance, name: str, e: ast.AST) -> Json:
@@ -800,24 +921,23 @@ class Translator:
         __init__ assigns it, evaluated again from base's instance dims. It
         has no other inputs, so it has the same shape (or int value)."""
         value = self.field(base.cls, name, e)
-        (term,) = self.field_terms_of(
-            base.cls, name, lambda: [self.term(value)], e, f"`self.{name}`"
-        )
+        (term,) = self.field_terms_of(base, name, lambda: [self.term(value)], e, f"`self.{name}`")
         return substitute(term, base)
 
     def field_terms_of(
-        self, cls: ModuleClass, name: str, compute, e: ast.AST, what: str
+        self, base: Instance, name: str, compute, e: ast.AST, what: str
     ) -> list[Json]:
-        """compute() where the names are those of cls's __init__, once per
-        attribute."""
-        key = (cls.name, name)
+        """compute() where the names are those of base's class's __init__,
+        once per attribute."""
+        cls = base.cls
+        key = (cls.name, name, base.own)
         if key in self.field_terms:
             if self.field_terms[key] is None:
                 raise CycleError(f"`self.{name}` is defined in terms of itself", e)
             return self.field_terms[key]
         self.field_terms[key] = None
         try:
-            terms = self.as_instance(cls, compute)
+            terms = self.as_instance(cls, compute, base.own)
         except CycleError as err:
             del self.field_terms[key]
             raise CycleError(err.message, e) from None  # reported where it's used
@@ -940,7 +1060,7 @@ class Translator:
 
     # ---- statements ----
 
-    def body(self, f: Function, v: Variant) -> list[Json]:
+    def body(self, f: Function, v: Variant, case: Case) -> list[Json]:
         params = v.overload.params
         present = [p for p in params if p.name not in v.nones]
         self.locals = {p.name: p.ir_name for p in present if p.module is None and p.config is None}
@@ -958,7 +1078,11 @@ class Translator:
         }
         self.nones = set(v.nones)
         self.after_loop = set()
-        self.sig = v.overload.sig
+        self.sig = case.sig
+        self.case = case.flags
+        # fields may depend on the flags, so they're computed again per case
+        self.field_terms = {}
+        self.own = True
         self.terms = {}
         self.scope = v.scope
         self.cls = f.cls
@@ -1009,10 +1133,45 @@ class Translator:
                 del self.locals[name]
                 self.nones.add(name)
                 continue
-            out.append(ir.At(s.lineno, self.text(s), self.stmt(s)))
+            if isinstance(s, ast.Expr) and self.is_print(s.value):
+                terms = self.printed(s.value)
+                if terms:
+                    # checked for their preconditions, and otherwise unused
+                    out.append(ir.At(s.lineno, self.text(s), ir.Let("(print)", ir.Tuple(terms))))
+                continue
+            stmt = self.stmt(s)
+            if stmt is not None:
+                out.append(ir.At(s.lineno, self.text(s), stmt))
             if isinstance(s, ast.Return):
                 return out, True
         return out, False
+
+    def is_print(self, e: ast.expr) -> bool:
+        return (
+            isinstance(e, ast.Call)
+            and isinstance(e.func, ast.Name)
+            and e.func.id == "print"
+            and not self.is_local("print")
+            and "print" not in self.functions
+        )
+
+    def printed(self, e: ast.Call) -> list[Json]:
+        """The terms for what print(...) prints, other than strings: the
+        values in an f-string, and other arguments."""
+        if any(isinstance(a, ast.Starred) for a in e.args):
+            raise FrontendError("`print(*args)` isn't supported", e)
+        for k in e.keywords:
+            if not isinstance(k.value, ast.Constant):
+                raise FrontendError(f"`print`'s keyword `{k.arg}` isn't supported", k.value)
+        out = []
+        for a in e.args:
+            if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                continue
+            if isinstance(a, ast.JoinedStr):
+                out += [self.term(v.value) for v in a.values if isinstance(v, ast.FormattedValue)]
+                continue
+            out.append(self.term(a))
+        return out
 
     def loop(self, s: ast.For) -> Json:
         """for layer in self.layers:, over an nn.ModuleList. The body is
@@ -1068,8 +1227,9 @@ class Translator:
         return ir.Loop(pairs, body)
 
     def static_test(self, test: ast.expr, node: ast.AST, what: str) -> bool:
-        """The value of a test on whether locals are None, which is known in
-        each variant: x is None, x is not None, and not/and/or of those."""
+        """The value of a test that's known in each variant and case: on
+        whether locals or attributes are None (x is None, x is not None), on a
+        flag, and not/and/or of those."""
         if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
             return not self.static_test(test.operand, node, what)
         if isinstance(test, ast.BoolOp):
@@ -1092,11 +1252,175 @@ class Translator:
                     raise FrontendError(f"`{left.id}` isn't a local variable", left)
                 none = left.id in self.nones
                 return none if isinstance(test.ops[0], ast.Is) else not none
+            if is_none(right) and isinstance(left, ast.Attribute) and self.field_of(left):
+                none = self.static_none(left)
+                return none if isinstance(test.ops[0], ast.Is) else not none
+        value = self.flag_value(test)
+        if value is not None:
+            return value
         raise FrontendError(
             f"{what} isn't supported yet, except on whether variables are None "
-            f"(`x is None`, `x is not None`): `{self.text(node)}`",
+            "(`x is None`, `x is not None`) and on flags (a bool parameter of `__init__`, "
+            f"or an attribute it sets to one or to `hasattr(...)`): `{self.text(node)}`",
             node,
         )
+
+    # ---- flags ----
+
+    def flag(self, key: str) -> bool:
+        """A flag's value in the case translated. The first test of a flag
+        makes the body be translated once for each value."""
+        if key not in self.case:
+            raise NeedFlag(key)
+        return self.case[key]
+
+    def names_flag(self, name: str) -> bool:
+        """Whether name is a bool parameter of the __init__ of the class
+        translated: in __init__ itself, or in the value of a field."""
+        cls = self.cls
+        if cls is None or name not in cls.flags:
+            return False
+        if self.in_init:
+            return self.locals.get(name) == name  # __init__ can't reassign it
+        return self.in_instance and not self.is_local(name)
+
+    def is_flag_parameter(self, name: str) -> bool:
+        """names_flag, for a flag whose value the case gives: one of self's."""
+        if not self.names_flag(name):
+            return False
+        if self.in_instance and not self.own:
+            raise FrontendError(
+                f"`{name}` is a flag of another module; only the flags of `self` can be tested"
+            )
+        return True
+
+    def field_of(self, e: ast.Attribute) -> Instance | None:
+        """The instance whose field e is, if e is an attribute __init__ assigns
+        (like self.bias), rather than a module, a declared attribute or a
+        method."""
+        base = self.instance(e.value)
+        if base is None or not base.cls.user or e.attr not in base.cls.fields:
+            return None
+        if e.attr in base.cls.attrs:
+            return None
+        return base
+
+    def flag_value(self, e: ast.expr) -> bool | None:
+        """A flag's value in the case, or None if e isn't a flag: a bool
+        parameter of __init__, or an attribute __init__ sets to a flag
+        expression (see flag_expression)."""
+        if isinstance(e, ast.Name) and self.is_flag_parameter(e.id):
+            return self.flag(e.id)
+        if not isinstance(e, ast.Attribute):
+            return None
+        base = self.field_of(e)
+        if base is None:
+            return None
+        value = base.cls.fields[e.attr]
+        if value is not None and not self.as_instance(
+            base.cls, lambda: self.is_flag_expression(value), base.own
+        ):
+            return None
+        value = self.field(base.cls, e.attr, e)  # it must be assigned once
+        if not base.own:
+            raise FrontendError(
+                f"`{ast.unparse(e)}` is a flag of another module; only the flags of `self` "
+                "can be tested",
+                e,
+            )
+        key = (base.cls.name, e.attr)
+        if key in self.flag_fields:
+            raise FrontendError(f"`self.{e.attr}` is defined in terms of itself", e)
+        self.flag_fields.add(key)
+        try:
+            return self.as_instance(
+                base.cls, lambda: self.flag_expression(value, f"self.{e.attr}"), own=True
+            )
+        finally:
+            self.flag_fields.discard(key)
+
+    def is_flag_expression(self, e: ast.expr) -> bool:
+        """Whether e is a flag expression: True, False, a flag, hasattr(...),
+        or not/and/or of those."""
+        if isinstance(e, ast.Constant):
+            return isinstance(e.value, bool)
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.Not):
+            return self.is_flag_expression(e.operand)
+        if isinstance(e, ast.BoolOp):
+            return all(self.is_flag_expression(v) for v in e.values)
+        if isinstance(e, ast.Name):
+            return self.names_flag(e.id)
+        if isinstance(e, ast.Attribute):
+            base = self.field_of(e)
+            value = None if base is None else base.cls.fields[e.attr]
+            key = ("", "") if base is None else (base.cls.name, e.attr)
+            if value is None or key in self.flag_checks:
+                return False
+            self.flag_checks.add(key)
+            try:
+                return self.as_instance(base.cls, lambda: self.is_flag_expression(value), base.own)
+            finally:
+                self.flag_checks.discard(key)
+        return self.is_hasattr(e)
+
+    def is_hasattr(self, e: ast.expr) -> bool:
+        """hasattr(x, "name"), whose value is only known when it runs."""
+        return (
+            isinstance(e, ast.Call)
+            and isinstance(e.func, ast.Name)
+            and e.func.id == "hasattr"
+            and not self.is_local("hasattr")
+            and len(e.args) == 2
+            and not e.keywords
+            and isinstance(e.args[1], ast.Constant)
+            and isinstance(e.args[1].value, str)
+        )
+
+    def flag_expression(self, e: ast.expr, key: str) -> bool:
+        """The value of a flag expression that's the value of the attribute
+        key. It's decided by the flags it's made of, so self.use_bias = bias
+        is the flag bias. hasattr(...) is a flag of its own: the attribute,
+        if it's the whole expression."""
+        if isinstance(e, ast.Constant) and isinstance(e.value, bool):
+            return e.value
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, ast.Not):
+            return not self.flag_expression(e.operand, "")
+        if isinstance(e, ast.BoolOp):
+            stop = isinstance(e.op, ast.Or)
+            for v in e.values:
+                if self.flag_expression(v, "") == stop:
+                    return stop
+            return not stop
+        if self.is_hasattr(e):
+            return self.flag(key or self.text(e))
+        value = self.flag_value(e)
+        if value is None:
+            raise FrontendError(f"`{ast.unparse(e)}` isn't a flag", e)
+        return value
+
+    def static_none(self, e: ast.expr) -> bool:
+        """Whether e is None, as far as the variant and case know: the literal
+        None, a local that's None, a conditional expression that picks one of
+        those, or an attribute whose value is one. Anything else isn't."""
+        if is_none(e):
+            return True
+        if isinstance(e, ast.Name):
+            return e.id in self.nones
+        if isinstance(e, ast.IfExp):
+            taken = self.static_test(e.test, e, "a conditional expression")
+            return self.static_none(e.body if taken else e.orelse)
+        if isinstance(e, ast.Attribute):
+            base = self.field_of(e)
+            value = None if base is None else base.cls.fields[e.attr]
+            key = (e.attr, "" if base is None else base.cls.name)
+            if value is None or key in self.none_fields:
+                return False  # an attribute defined in terms of itself is reported elsewhere
+            self.none_fields.add(key)
+            try:
+                return self.as_instance(base.cls, lambda: self.static_none(value), base.own)
+            finally:
+                self.none_fields.discard(key)
+        return False
 
     # ---- asserts ----
 
@@ -1185,7 +1509,7 @@ class Translator:
             return ir.Id(name)
         raise Unstated
 
-    def stmt(self, s: ast.stmt) -> Json:
+    def stmt(self, s: ast.stmt) -> Json | None:
         if isinstance(s, ast.Assign):
             target = s.targets[0] if len(s.targets) == 1 else None
             if isinstance(target, ast.Tuple) and all(isinstance(x, ast.Name) for x in target.elts):
@@ -1254,6 +1578,11 @@ class Translator:
                     f"`__init__` can't reassign `{name}`: it's one of the instance's dims, "
                     "which its methods refer to"
                 )
+            if name in self.cls.flags and self.locals[name] == name:
+                raise FrontendError(
+                    f"`__init__` can't reassign `{name}`: it's a flag, which its attributes "
+                    "may depend on"
+                )
         # the IR name of an instance dim or a config's field is taken
         ir_name = name
         while ir_name in self.reserved:
@@ -1261,7 +1590,7 @@ class Translator:
         self.locals[name] = ir_name
         return ir_name
 
-    def set_attribute(self, target: ast.Attribute, value: ast.expr) -> Json:
+    def set_attribute(self, target: ast.Attribute, value: ast.expr) -> Json | None:
         """self.f = value, in __init__. A module attribute is built by
         calling its constructor, and later uses of self.f resolve through
         this assignment (see field_instance)."""
@@ -1280,6 +1609,12 @@ class Translator:
                 f'`{target.attr}: Float[Tensor, "..."]`',
                 target,
             )
+        name = f"{target.value.id}.{target.attr}"
+        if self.is_flag_expression(value):
+            # a flag: its value is the case's wherever it's tested
+            return None
+        if self.static_none(value):
+            return ir.Let(name, ir.Tuple([]))
         element = self.list_element(value)
         if element is not None:
             # the modules are all built alike, so checking one constructor
@@ -1342,6 +1677,8 @@ class Translator:
                 return ir.Lit(int(e.value))
             if isinstance(e.value, float):
                 return ir.Scalar()
+            if e.value is None:
+                raise FrontendError("`None` isn't supported here", e)
             raise FrontendError(f"unsupported constant `{ast.unparse(e)}`", e)
         if isinstance(e, ast.UnaryOp):
             if isinstance(e.op, ast.UAdd):
@@ -1487,11 +1824,18 @@ class Translator:
                     f"supported (`for layer in {ast.unparse(e)}:`)",
                     e,
                 )
+            if self.static_none(e):
+                raise FrontendError(f"`{ast.unparse(e)}` is None here", e)
             return self.value_field(base, e.attr, e)
         if self.qualname(e) is not None:
             raise FrontendError(f"module attributes like `{ast.unparse(e)}` aren't supported", e)
         if e.attr == "shape":
-            raise FrontendError("`x.shape` isn't supported yet", e)
+            # the checker has no tuples of ints, only shapes
+            raise FrontendError(
+                "`x.shape` is only supported where a shape is expected, e.g. "
+                "`torch.zeros(x.shape)`",
+                e,
+            )
         if e.attr not in self.stubs.properties and e.attr in self.stubs.methods:
             raise FrontendError(f"`.{e.attr}` is a method; call it", e)
         callee = self.member(self.stubs.properties, e, "attribute")
@@ -1543,13 +1887,25 @@ class Translator:
                 e,
             )
         indices = [i for i, _ in bound]
+
+        def nones_of(i: int, terms: list[Json]) -> list[str]:
+            return [p.name for p, t in zip(callee.overloads[i].params, terms) if t is NONE]
+
+        # the Optional parameters given None select a variant of each overload
+        nones = nones_of(*bound[0])
         key = callee.name
+        if nones:
+            key += "[" + ",".join(f"{n}=None" for n in nones) + "]"
         if len(indices) < len(callee.overloads):
             key += " (overload{} {})".format(
                 "s" if len(indices) > 1 else "", ", ".join(str(i + 1) for i in indices)
             )
-        self.env[key] = [callee.overloads[i].sig for i in indices]
-        return ir.Call(key, list(prefix) + bound[0][1])
+        sigs = []
+        for i, terms in bound:
+            ov, own = callee.overloads[i], nones_of(i, terms)
+            sigs.append(ov.variants[frozenset(own)] if own else ov.sig)
+        self.env[key] = sigs
+        return ir.Call(key, list(prefix) + [t for t in bound[0][1] if t is not NONE])
 
     def bind(
         self, params: list[Param], args: list[Arg], keywords: dict[str, ast.expr]
@@ -1572,6 +1928,9 @@ class Translator:
                 rest, i = args[i:], len(args)
                 if len(rest) == 1 and isinstance(rest[0], ast.Tuple):
                     rest = list(rest[0].elts)  # reshape((n, d)) as well as reshape(n, d)
+                if len(rest) == 1 and self.is_shape(rest[0]):
+                    bound[k] = lambda a=rest[0]: self.shape_term(a)  # zeros(x.shape)
+                    continue
                 bound[k] = lambda rest=rest: ir.Shape([self.arg_term(a, None) for a in rest])
                 continue
             if i < len(args):
@@ -1598,17 +1957,40 @@ class Translator:
 
     def arg_thunk(self, a: Arg, p: Param) -> Callable[[], Json]:
         # a tuple for a shape parameter is a binding error, found eagerly
-        if not isinstance(a, tuple) and p.shape and not isinstance(a, ast.Tuple):
+        if (
+            not isinstance(a, tuple)
+            and p.shape
+            and not isinstance(a, ast.Tuple)
+            and not self.is_shape(a)
+        ):
             raise BindError(f"`{p.name}` takes a tuple of ints")
         if isinstance(a, ast.Tuple) and not p.shape:
             raise BindError("a tuple isn't expected here")
         return lambda: self.arg_term(a, p)
 
+    def is_shape(self, a: Arg) -> bool:
+        """Whether an argument is x.shape, a tensor's shape."""
+        return (
+            isinstance(a, ast.Attribute)
+            and a.attr == "shape"
+            and self.instance(a.value) is None
+            and self.config_value(a.value) is None
+            and self.qualname(a.value) is None
+        )
+
+    def shape_term(self, a: ast.Attribute) -> Json:
+        """x.shape where a shape is expected: the stub property, whose value
+        is a shape (Shape["*A"])."""
+        callee = self.stubs.functions.get("torch.Tensor.shape")
+        if callee is None:
+            raise FrontendError("no stub for `.shape` (torch.Tensor.shape)", a)
+        return self.stub_call(callee, [("receiver", self.term(a.value))], {}, a)
+
     def none_value(self, a: Arg) -> bool:
-        """Whether an argument is None: the literal, or a local that's None."""
+        """Whether an argument is None (see static_none)."""
         if isinstance(a, tuple):
             return False
-        return is_none(a) or (isinstance(a, ast.Name) and a.id in self.nones)
+        return self.static_none(a)
 
     def arg_term(self, a: Arg, p: Param | None) -> Json:
         """The term for an argument. For an Optional parameter it may be NONE,
@@ -1618,8 +2000,9 @@ class Translator:
         if p is not None and self.none_value(a):
             if p.optional:
                 return NONE
-            if isinstance(a, ast.Name):
-                raise FrontendError(f"`{a.id}` is None here", a)
+            if not is_none(a):
+                # a local, an attribute or a conditional expression
+                raise FrontendError(f"`{ast.unparse(a)}` is None here", a)
             raise BindError(f"`{p.name}` can't be None")
         if p is not None and p.config is not None:
             cfg = self.config_value(a)
@@ -1632,6 +2015,8 @@ class Translator:
                 raise BindError(f"`{p.name}` takes a `{p.module.name}` module")
             return inst.ints
         if p is not None and p.shape:
+            if self.is_shape(a):
+                return self.shape_term(a)
             if not isinstance(a, ast.Tuple):
                 raise BindError(f"`{p.name}` takes a tuple of ints")
             return ir.Shape([self.term(x) for x in a.elts])

@@ -12,6 +12,9 @@ from torch import Tensor
 
 class Module: ...
 
+# a tensor that's a module's weight: torch.nn.Parameter is a Tensor subclass
+def Parameter(data: Shaped[Tensor, "*A"], requires_grad: bool = True) -> Shaped[Tensor, "*A"]: ...
+
 class Linear(Module):
     weight: Float[Tensor, "out_features in_features"]
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:

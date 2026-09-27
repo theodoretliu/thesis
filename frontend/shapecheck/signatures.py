@@ -17,7 +17,7 @@ setter of that type (attribute_signatures).
 
 An Optional[T] parameter is either None or a T at each call, so a function
 has a signature for each choice of which Optional parameters are None. A
-None parameter isn't in that signature at all.
+None parameter isn't in that signature at all. Stubs may have them too.
 
 Stubs follow the checker's own conventions: a shape may name an int
 parameter (sum's `dim`), Dim["..."] is an int equal to a dim expression,
@@ -78,6 +78,9 @@ class Param:
 class Overload:
     sig: Json
     params: list[Param]
+    # stubs: the signature for each choice of which Optional parameters are
+    # None, other than none of them
+    variants: dict[frozenset[str], Json] = field(default_factory=dict)
 
 
 def last_name(node: ast.expr) -> str | None:
@@ -357,9 +360,8 @@ def build_signature(
         inner = None if ann is None else optional_inner(ann)
         optional = inner is not None
         if optional:
-            if stub or init:
-                where = "in stubs" if stub else "on `__init__`"
-                raise FrontendError(f"`Optional` parameters aren't supported {where} yet", arg)
+            if init:
+                raise FrontendError("`Optional` parameters aren't supported on `__init__` yet", arg)
             ann = inner
         cfg = None if ann is None or config_class is None else config_class(ann)
         if cfg is not None:
