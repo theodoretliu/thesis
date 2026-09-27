@@ -15,6 +15,9 @@ GOAL = Path(__file__).resolve().parents[2] / "examples" / "goal" / "gpt.py"
 
 # the functions and methods that check so far
 PASSING = {
+    "LayerNorm.__init__",
+    "LayerNorm.forward",
+    "CausalSelfAttention.__init__",
     "MLP.__init__",
     "MLP.forward",
     "Block.__init__",

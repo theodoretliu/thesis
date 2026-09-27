@@ -28,7 +28,8 @@ uvx --python 3.12 --with torch --with numpy --with jaxtyping --with beartype \
 - `test_progress` is a ratchet over `PASSING`. It fails if a method stops checking, or if one starts
   checking and isn't recorded.
 
-**Progress:** 4 of 11. Milestone 1 is done ([18-configs.md](18-configs.md)): `MLP` and `Block` check.
+**Progress:** 7 of 11. Milestone 1 is done ([18-configs.md](18-configs.md)): `MLP` and `Block` check.
+Milestone 2 is done ([19-flags.md](19-flags.md)): `LayerNorm` and `CausalSelfAttention.__init__` check.
 
 ## What's missing
 
@@ -90,7 +91,9 @@ The first four were decided as recommended (2026-09-26), and the fifth before mi
    `Optional` parameters, so nanoGPT is unchanged and there are no user-written overloads. Unlike
    `Optional`, callers usually can't pick a case (`bias=config.bias` isn't a literal), so the cases are
    internal to the method: its signature must be the same in every case, and callers see that one
-   signature. A signature that depends on a flag is an error. Checking per case also relates the flags
+   signature. A signature that depends on a flag is an error. (As built in milestone 2, annotations
+   can't depend on one, and what the cases infer, or assert in `__init__`, is merged into that signature:
+   see [19-flags.md](19-flags.md).) Checking per case also relates the flags
    across methods: in `CausalSelfAttention`'s `flash=False` case, the `bias` buffer registered under `if
    not self.flash:` exists. The number of cases doubles with each flag, so there's a limit, as for
    `Optional`. The alternatives were `@overload`s on `Literal[True]`/`Literal[False]`, which are three
@@ -105,13 +108,16 @@ doc, as the Transformer's did.
 | Milestone | Gaps | Targets it unlocks |
 |---|---|---|
 | 1. Configs (done) | N1, and `nn.GELU` | `MLP`, `Block` (4) |
-| 2. Flags | N4 in `__init__`, N5, and `nn.Parameter`, `x.shape`, `F.layer_norm`, `hasattr`, `print` | `LayerNorm`, `CausalSelfAttention.__init__` (3) |
+| 2. Flags (done) | N4 in `__init__`, N5, and `nn.Parameter`, `x.shape`, `F.layer_norm`, `hasattr`, `print` | `LayerNorm`, `CausalSelfAttention.__init__` (3) |
 | 3. Causal attention | N2, N3, N4 in bodies, N9's `float`, N12, and `F.scaled_dot_product_attention`, `Tensor.split` | `CausalSelfAttention.forward` (1) |
 | 4. The model | N6, N7, N8, N9, N11, and `nn.ModuleDict`, `arange`'s keywords, `cross_entropy`'s `ignore_index` | `GPT.__init__`, `GPT.forward` (2) |
 | 5. Generation | N10, N13, and `topk`, `multinomial`, `cat`, `min` | `GPT.generate` (1) |
 
 Milestone 1 made a config's `int` fields instance dims, and its flags parameters of `__init__` only
-([18-configs.md](18-configs.md)). Milestone 2 checks flags per case (decision 5).
+([18-configs.md](18-configs.md)). Milestone 2 checks flags per case (decision 5), with one signature for
+all of a function's cases, and `Optional` parameters in stubs ([19-flags.md](19-flags.md)). Milestone 3
+makes attributes assigned in a branch per case, so `forward`'s `[self.flash=False]` case has the `bias`
+buffer, and adds `self.training` as a flag.
 Milestone 5 decides how a loop's invariant names the iteration count (N13). After each milestone, add the
 names that now check to `PASSING` in `test_gpt_goal.py`.
 
