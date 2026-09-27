@@ -1263,6 +1263,23 @@ let () =
   in
   expect "for a later call in the statement" (fun () ->
       inferred mask = [ within ]);
+  (* inferred in a loop's body, it's a requires, which holds after it *)
+  let pe_prefix =
+    Slice (var "pe", [ (None, Some (call "shape0" [ var "x" ]), None) ])
+  in
+  let looped ?requires () =
+    def ?requires "f"
+      [ ("pe", arr [ Id "m"; Id "d" ]); ("x", arr [ Id "n"; Id "d" ]) ]
+      (arr [ Id "n"; Id "d" ])
+      [
+        Loop ([], [ Let ("y", call "add" [ pe_prefix; var "x" ]) ]);
+        Return pe_prefix;
+      ]
+  in
+  expect "a relation inferred in a loop holds after it" (fun () ->
+      inferred (looped ()) = [ within ]);
+  expect "and the loop checks given it" (fun () ->
+      checks (looped ~requires:[ Le (Id "n", Id "m") ] ()));
   expect "and it's checked given it" (fun () ->
       checks
         { mask with sg = { mask.sg with requires = [ Le (Id "n", Id "m") ] } });

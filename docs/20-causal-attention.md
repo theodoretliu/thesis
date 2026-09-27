@@ -63,8 +63,8 @@ Deciding them may split the case, like any test of a flag. Exactly one assignmen
   mask_case.py:18: in Masked.forward[self.fast=True]: `self.mask` isn't assigned in this case: `Masked.__init__` assigns it under `if not self.fast:`
   ```
 
-- Where more than one runs (at the top level and in a branch), it's the error for an attribute assigned
-  twice.
+- Where more than one runs (at the top level and in a branch), reading it is an error: `` `self.b` is
+  assigned more than once in this case ``.
 
 `if bias: self.b = ... else: self.b = None` works the same way, so it's an alternative to milestone 2's
 `... if bias else None`. A flag attribute must still be assigned once at the top level.
@@ -95,7 +95,7 @@ slice but at a later call (here `masked_fill`), which uses plain proving. So:
 2. **A statement that fails is checked again, assuming it** (`with_relations`). If a `Let`, unpacking,
    annotation or `return` fails with relations registered and not yet inferred, it's rolled back and
    checked again assuming each one, then all of them. If that checks, what it assumed is an inferred
-   requires. A relation that contradicts what's known isn't assumed, as everything would be provable.
+   requires, which holds for the rest of the body, including after a loop whose body inferred it. A relation that contradicts what's known isn't assumed, as everything would be provable.
 3. **Callers pass it on.** Inferred requires are now separate from declared ones in a signature
    (`inferred`). A callee's inferred relation `x <= y` may be inferred by a caller whose names equal both
    sides, so `Block.forward` requires `t <= block_size` too. `GPT.forward` (milestone 4) will prove it
@@ -146,7 +146,8 @@ relies on clamping keeps its weaker signature.
 ## Tests
 
 - `checker/test/test_bodies.ml`: a slice's stop inferred within its dim when the return needs it, not
-  when nothing does, for a later call in the statement (a causal mask), checking given it, and a callee's
+  when nothing does, for a later call in the statement (a causal mask), checking given it, inferred in a
+  loop's body and holding after it, and a callee's
   inferred relation inferred in turn but not assumed without inference. The existing test that a
   declared relation isn't inferred still passes.
 - `frontend/tests/test_translate.py`: `BranchAttributes` checks the cases of a module with a flag
@@ -169,7 +170,8 @@ relies on clamping keeps its weaker signature.
 - **`split` with a list of sizes**, `chunk`, and `unbind` aren't stubbed.
 - **Inferred relations are between two names**, `x <= y`: `t <= block_size - 1` or `t + 1 <= n` aren't
   inferred. Only a slice's stop registers one, not its start.
-- **Branch attributes** need tests that are decided in each case: flags and `is None`. An attribute
-  assigned in a loop is still an error.
+- **Branch attributes** need tests that are decided in each case: flags, and whether an attribute is
+  `None` (`if self.x is None:`). A test on a parameter of `__init__` that isn't a flag, like `if mask is
+  None:`, is an error where the attribute is read. An attribute assigned in a loop is still an error.
 - **`self.training`** is a flag of `self` only, not of a nested module.
 - **`float`** only of constants; `float(n)` of an int isn't supported.

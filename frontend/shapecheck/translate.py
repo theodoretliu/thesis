@@ -885,7 +885,12 @@ class Translator:
 
         values = self.as_instance(base.cls, taken, base.own)
         if len(values) > 1:
-            return None  # reported as assigned more than once
+            raise FrontendError(
+                f"`self.{name}` is assigned more than once in this case of "
+                f"`{base.cls.name}.__init__`; it must be assigned once for its methods to "
+                "know its value",
+                e,
+            )
         if not values:
             guards, _ = value.assignments[0]
             where = " and ".join(

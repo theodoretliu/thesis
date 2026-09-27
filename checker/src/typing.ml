@@ -1160,7 +1160,10 @@ let infer_relation ((fact, c) : Z3.Expr.expr * constr) : bool =
       Z3.Solver.pop Z3utils.solver 1;
       if sat then (
         Z3.Solver.add Z3utils.solver [ fact ];
-        if not (List.mem c inf.inferred) then inf.inferred <- c :: inf.inferred);
+        if not (List.mem c inf.inferred) then inf.inferred <- c :: inf.inferred;
+        (* so a loop can assert it again after its body (see walk) *)
+        if not (List.exists (fun (_, c') -> c' = c) inf.relations) then
+          inf.relations <- inf.relations @ [ (fact, c) ]);
       sat
 
 (* prove a <= b (a < b if strict), or infer it: a sign fact (see
@@ -2232,7 +2235,9 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
                   (fun c ->
                     if not (List.mem c inferred) then
                       match
-                        List.find_opt (fun (_, c') -> c' = c) inf.candidates
+                        List.find_opt
+                          (fun (_, c') -> c' = c)
+                          (inf.candidates @ inf.relations)
                       with
                       | Some (fact, _) -> Z3.Solver.add Z3utils.solver [ fact ]
                       | None -> ())

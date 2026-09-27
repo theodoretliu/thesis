@@ -1358,7 +1358,7 @@ class BranchAttributes(unittest.TestCase):
                 "`self.mask` isn't assigned in this case: `C.__init__` assigns it under "
                 "`if not self.fast:`",
             ),
-            ("return self.twice", "`self.twice` must be assigned once"),
+            ("return self.twice", "`self.twice` is assigned more than once in this case"),
             ("return x * float(self.n)", r"only `float` of a constant is supported"),
             (
                 "return x if self.inner.training else x",
