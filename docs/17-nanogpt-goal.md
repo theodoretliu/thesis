@@ -68,7 +68,7 @@ gaps below are what nanoGPT adds.
 
 ## Decisions
 
-All four were decided as recommended (2026-09-26):
+The first four were decided as recommended (2026-09-26), and the fifth before milestone 2 (2026-09-27):
 
 1. **Config objects (N1).** A `@dataclass` parameter's `int` fields are instance dims, named by field,
    by the same rule as constructor ints. `self.config = config` stores it, and `self.config.block_size`
@@ -84,6 +84,18 @@ All four were decided as recommended (2026-09-26):
    n"]`, because jaxtyping can't evaluate `"b t+max_new_tokens"` at run time: `max_new_tokens` is an
    argument, not a dim (`AnnotationError: Cannot process symbolic axis`). The checker may still prove the
    length.
+5. **Flags (N4, N5).** A method is checked once for each value of each `bool` it depends on: a
+   constructor flag (`LayerNorm`'s `bias`) or a `bool` attribute set in `__init__` (`self.flash`). The
+   checker derives the cases from the code (`... if bias else None`, `if self.flash:`), as it does for
+   `Optional` parameters, so nanoGPT is unchanged and there are no user-written overloads. Unlike
+   `Optional`, callers usually can't pick a case (`bias=config.bias` isn't a literal), so the cases are
+   internal to the method: its signature must be the same in every case, and callers see that one
+   signature. A signature that depends on a flag is an error. Checking per case also relates the flags
+   across methods: in `CausalSelfAttention`'s `flash=False` case, the `bias` buffer registered under `if
+   not self.flash:` exists. The number of cases doubles with each flag, so there's a limit, as for
+   `Optional`. The alternatives were `@overload`s on `Literal[True]`/`Literal[False]`, which are three
+   signatures for one constructor, and a maybe-`None` value that only an `Optional` parameter accepts, which
+   doesn't relate `self.flash` to the buffer.
 
 ## Suggested order
 
@@ -99,8 +111,7 @@ doc, as the Transformer's did.
 | 5. Generation | N10, N13, and `topk`, `multinomial`, `cat`, `min` | `GPT.generate` (1) |
 
 Milestone 1 made a config's `int` fields instance dims, and its flags parameters of `__init__` only
-([18-configs.md](18-configs.md)). Milestone 2 decides how a value whose `None`-ness depends on a `bool` is checked (N5): cases per flag, like
-milestone 3 of the Transformer, or a maybe-`None` value that only an `Optional` parameter accepts.
+([18-configs.md](18-configs.md)). Milestone 2 checks flags per case (decision 5).
 Milestone 5 decides how a loop's invariant names the iteration count (N13). After each milestone, add the
 names that now check to `PASSING` in `test_gpt_goal.py`.
 
