@@ -61,7 +61,8 @@ skipped with a note. Every parameter and the return type need annotations, excep
 | `Tensor`, `np.ndarray` with no shape | a parameter of any shape (not allowed as a return type) |
 | `tuple[A, B]` (return types only) | a tuple of those types |
 | `None` (return types only) | the empty tuple |
-| `Optional[T]`, `T \| None` (parameters only) | `None` or a `T`: checked once for each (see [Optional](#optional-parameters)) |
+| `Optional[T]`, `T \| None` in a parameter | `None` or a `T`: checked once for each (see [Optional](#optional-parameters)) |
+| `Optional[T]`, `T \| None` in a return type | `None` or a `T`: a caller may unpack it or return it, but not use it otherwise |
 | `nn.Dropout`, a user's `nn.Module` subclass | an instance of that module (see [Modules](#modules)) |
 | a `@dataclass` like `GPTConfig` | its `int` and `bool` fields, as ints named by field (see [Configs](#configs)) |
 
@@ -74,7 +75,7 @@ Shape strings follow jaxtyping:
 | `...`, `*_` | an unnamed run of dims (not in a return type) |
 | `_`, `_foo` | a dim that isn't checked |
 | `*#batch` | a run of dims that broadcasts to `batch`: no more dims, each 1 or `batch`'s. The first occurrence binds `batch` exactly |
-| `#n` | `n` or 1 (parameters only). Like `n`, it binds `n` where it first appears |
+| `#n` | `n` or 1. In a parameter, like `n`, it binds `n` where it first appears. In a return type, a parameter must bind `n` |
 | `dim-1`, `2*dim`, `(n+1)//2` | arithmetic with `+ - * //` on names and ints |
 
 A name that only the return type mentions is existential. Shape names and Python parameter names are
@@ -92,7 +93,8 @@ sizes.py:7: note: causal_mask requires size >= 0 (inferred from its body)
 ```
 
 Only size obligations are inferred: an int used as a size, a returned dim, the other sizes of a `-1`
-(torch can't infer `-1` if they multiply to 0), and a callee's inferred requires. One relation is
+(torch can't infer `-1` if they multiply to 0), an index being in range (`x[:, -1]` needs the dim to be
+`>= 1`), and a callee's inferred requires. One relation is
 inferred too: a slice's stop being within its dim, relating two of the signature's names, when the
 statement with the slice doesn't check without it. nanoGPT's mask `self.bias[:, :, :T, :T]` broadcasts
 against the scores only if `t <= block_size`:
@@ -112,7 +114,8 @@ Bodies must be straight-line code, apart from `if`s that are decided statically 
 - `a, b = expr`, unpacking a tuple. `B, T, C = x.size()` unpacks a tensor's dims, and `q, k, v =
   x.split(s, dim=2)` its pieces: the stubs have an overload per rank and per number of pieces, so the
   unpacking checks that there are that many.
-- `return expr`, including `return a, b`.
+- `return expr`, including `return a, b`. An item of a returned tuple may be `None` where the return
+  type's is `Optional`, as in `return logits, None`.
 - `if` on whether variables are `None` (`if mask is not None:`), which is known statically. See
   [Optional parameters](#optional-parameters). And `if` on a flag (`if not self.flash:`), which is
   checked once for each value. See [Flags](#flags).
@@ -125,17 +128,21 @@ Bodies must be straight-line code, apart from `if`s that are decided statically 
 - `print(...)` is skipped, but the values it prints, other than strings and the text of f-strings, are
   checked.
 - `pass` is skipped.
+- `device = x.device` binds a value that isn't a shape, which can be passed where the stubs expect one
+  (`torch.arange(0, t, dtype=torch.long, device=device)`). See [Stubs](#stubs).
 - Expressions: local variables, int/bool/float literals, `float` of a constant (`float("-inf")`), calls, `+ - * / // ** @ & | ^`, unary `-` and
   `~`, comparisons, methods (`x.sum(-1)`, `x.size(-1)`), properties (`x.mT`), tuples, and tuples of ints
   as shapes (`x.reshape((n, d))`). One entry of a shape may be `-1` where the stub determines it, as in
   `x.reshape(-1, d)`. `x.shape` is a shape too, but only where one is expected: `torch.zeros(x.shape)`.
-- Slices `x[a:b:c, ...]` of the leading dims, with Python's rules: negative bounds count from the end,
-  and bounds past the end are clamped. So `x[:, :n]` has `min(n, m)` columns, which is `n` after
-  `assert n <= m`. The step must be positive.
+- Indexing `x[a:b:c, i, [j], ...]` of the leading dims. A slice has Python's rules: negative bounds count
+  from the end, and bounds past the end are clamped. So `x[:, :n]` has `min(n, m)` columns, which is `n`
+  after `assert n <= m`. The step must be positive. An int `i` drops the dim, and a list of ints keeps it
+  with as many entries, so `x[:, [-1], :]` is the last position with its dim. Both must be in range. Only
+  one list is supported, and not with ints, since torch's advanced indexing would move the dims.
 
 Anything else gets an explicit error, and the rest of the file is still checked. That covers other control
-flow, augmented assignment (`x += y`), int indexing (`x[0]`), `x.shape` as a value, lambdas, and
-module-level values.
+flow, augmented assignment (`x += y`), indexing with `None`, `...` or a mask, `x.shape` as a value,
+lambdas, and module-level values.
 
 ## Optional parameters
 
@@ -217,10 +224,15 @@ dims first, and `self.w_1(x)` becomes `torch.nn.Linear.forward(d_model, d_ff, x)
   layer in self.layers:` checks its body once, with `layer` as one of them. Each local the body reassigns
   must keep its shape, which makes the loop's invariant. A name only the body binds isn't known after the
   loop.
+- `self.transformer = nn.ModuleDict(dict(wte=nn.Embedding(...), h=nn.ModuleList(...)))` (or with a dict
+  literal whose keys are names) is a namespace of modules. `__init__` checks each entry's constructor,
+  and `self.transformer.wte(idx)`, `for block in self.transformer.h:` and
+  `self.transformer.wte.weight = self.lm_head.weight` work as they would for attributes of `self`. The
+  dict itself can't be called or used as a value.
 
 Modules can't be returned or stored in locals yet, and an annotation can't name a module parameter's
-dims. Only direct subclasses of `nn.Module` are checked. See [docs/14-modules.md](../docs/14-modules.md)
-and [docs/16-stacks.md](../docs/16-stacks.md).
+dims. Only direct subclasses of `nn.Module` are checked. See [docs/14-modules.md](../docs/14-modules.md),
+[docs/16-stacks.md](../docs/16-stacks.md) and [docs/21-the-model.md](../docs/21-the-model.md).
 
 ## Configs
 
@@ -334,6 +346,11 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
   an existential (`assert m <= n` for `unique`).
 - `Optional[T]` parameters, as in user code: `layer_norm`'s `weight` and `bias`. A call with `None` goes to
   the stub's case without it, e.g. `torch.nn.functional.layer_norm[bias=None]`.
+- A class with nothing in it, like `class device: ...`, is a kind of value that isn't a shape. A parameter
+  annotated with one (`device: Optional[device] = None`) takes such a value, or `None`, and isn't passed to
+  the checker, so it doesn't make cases. A module-level annotation declares a constant of one (`long:
+  dtype` for `torch.long`), and one in a class declares an attribute of arrays (`device: device` in
+  `Tensor`, for `x.device`, which is only supported on a local variable).
 - A class that subclasses `Module` is a module class, typed like a user's module: its instance dims are
   the `int` parameters of `__init__`, and its methods' annotations may name them. Asserts in `__init__`
   are the constructor's requires, which its instances then satisfy:
@@ -357,8 +374,9 @@ The shipped stubs cover common torch functions, `Tensor` methods, `torch.nn.func
 `math.sqrt`/`math.log`, `F.scaled_dot_product_attention`, and Python's operators. `x.size()` and
 `x.split(s, dim)` have an overload per rank (1 to 6) and per number of pieces (1 to 4). `Tensor.shape` is a property whose value is a shape
 (`-> Shape["*A"]`), and the frontend only allows it where a shape is expected. `operator.setitem(target, value)` is slice assignment: the frontend passes the slice
-itself as `target`. `nn.ModuleList` has no stub; the frontend handles it. A call with no stub is an error,
-never an unknown shape.
+itself as `target`. `torch.dtype` and `torch.device` are kinds of values, with the dtypes as constants, and
+the creation functions take `dtype` and `device`. `nn.ModuleList` and `nn.ModuleDict` have no stubs; the
+frontend handles them. A call with no stub is an error, never an unknown shape.
 
 ## The IR
 
@@ -372,11 +390,13 @@ entry  ["Id", n] ["Int", i] ["Add"|"Sub"|"Mul"|"Div", e, e] ["Spread", A] ["Broa
        ["Index", A, idx]
                                                                  idx is a name or an int
 typ    ["Array", [entry]] ["Int"] ["IntExpr", entry] ["Literal", i] ["Tuple", [typ]]
+       ["Optional", typ]                                         return types only
 constr ["Eq"|"Le"|"Lt", entry, entry]
 sig    {"params": [[name, typ]], "ret": typ, "requires": [constr], "exists": [name], "ensures": [constr],
         "invariant": [constr], "instances": [{"init": f, "ints": [[init_param, param]]}]}
 term   ["Var", x] ["Lit", i] ["Call", f, [term]] ["Shape", [term]] ["Scalar"] ["Tuple", [term]]
-       ["Slice", term, [[start, stop, step]]]            start, stop, step are terms or null
+       ["Slice", term, [item]]
+item   [start, stop, step] ["Index", term] ["List", [term]]   start, stop, step are terms or null
 stmt   ["Let", x, term] ["LetAnnot", x, typ, term] ["Unpack", [x], term] ["Return", term]
        ["Assume", constr] ["Loop", [[x_before, x_after]], [stmt]] ["At", line, text, stmt]
 
@@ -384,7 +404,7 @@ program {"env": [{"name": f, "overloads": [sig]}],
          "functions": [{"name": f, "sig": sig, "body": [stmt] | null, "group": f}]}
 ```
 
-`None` is `["Tuple", []]`. A signature's `invariant` and `instances` are optional, and so is a function's
+`None` is `["Tuple", []]`, which an `Optional` also accepts. A signature's `invariant` and `instances` are optional, and so is a function's
 `group`. An invariant is
 assumed by the body and by callers. Each instance says that some of the parameters are an instance's dims:
 the CLI adds the constructor `init`'s requires and ensures, renamed to those parameters, to the invariant.

@@ -120,8 +120,8 @@ same work around one target, the Transformer, and adds what it needs (modules, i
    ([14-modules.md](14-modules.md)), with class-level annotations for attributes built outside the
    attribute's assignment ([16-stacks.md](16-stacks.md)). Modules as returns and locals, and subclassing
    user classes, remain.
-5. **Indexing:** slices check ([16-stacks.md](16-stacks.md)). Int indices, `None`, `...` and advanced
-   indexing remain.
+5. **Indexing:** slices check ([16-stacks.md](16-stacks.md)), and so do int indices and one list index
+   ([21-the-model.md](21-the-model.md)). `None`, `...`, masks and other advanced indexing remain.
 6. **Lists:** `torch.cat`, `torch.stack`. (Tuple returns and unpacking are done.)
 7. **Single broadcastable dims (`#b`)**, and an in-place `Broadcast` ("broadcasts *to* A") for `x += y`.
 8. **NumPy stubs**, and more of torch.

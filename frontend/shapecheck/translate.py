@@ -24,7 +24,9 @@ them first. In a method of Encoder, `self.w = nn.Linear(d_model, d_ff)` in
 __init__ makes `self.w(x)` the call torch.nn.Linear.forward(d_model, d_ff, x),
 where d_model is the method's own instance dim. So an attribute's type comes
 from the one assignment to it in __init__ (in each case, for one assigned
-inside `if`s on flags), unless a class-level annotation declares it.
+inside `if`s on flags), unless a class-level annotation declares it. An
+nn.ModuleDict attribute is an instance of a class of its entries, with the
+same instance dims (see dict_class).
 
 A flag is a bool a module branches on: a bool parameter of __init__, an
 attribute __init__ sets to one or to hasattr(...), or nn.Module's training.
