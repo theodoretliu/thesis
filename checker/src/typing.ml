@@ -46,6 +46,9 @@ type constr = Eq of entry * entry | Le of entry * entry | Lt of entry * entry
 
 (* a function type with refinements:
    - requires: must be provable from the arguments (preconditions)
+   - inferred: requires inferred from the body. callers may infer them in
+     turn, including relations, e.g. t <= block_size, which a declared
+     requires only allows for sign facts
    - exists: fresh dimensions the result may use (data-dependent shapes)
    - ensures: assumed about the exists dims afterwards (postconditions)
    - invariant: holds for the int arguments whenever the function can be
@@ -57,6 +60,7 @@ type signature = {
   params : (string * typ) list;
   ret : typ;
   requires : constr list;
+  inferred : constr list;
   exists : string list;
   ensures : constr list;
   invariant : constr list;
@@ -365,7 +369,7 @@ let check_signature (sg : signature) : unit =
   let ((vars, spread_vars, param_vars) as ctx) =
     check_args_signature sg.params
   in
-  List.iter (check_constr_signature ctx) sg.requires;
+  List.iter (check_constr_signature ctx) (sg.requires @ sg.inferred);
   List.iter (check_constr_signature ctx) sg.invariant;
 
   (* exists dims behave like dimension variables bound by the parameters *)
@@ -638,7 +642,12 @@ let derived_dims (e : entry)
     | Ok e
       when Z3utils.prove (Z3.Arithmetic.mk_ge Z3utils.ctx e (mk_int_numeral 0))
       ->
-        Some (Z3utils.add_to_solver e)
+        let d = Z3utils.add_to_solver e in
+        (* named by its value, e.g. 3 * d - 2 * d for split's last piece *)
+        if not (Hashtbl.mem Z3utils.dim_labels d) then
+          Hashtbl.replace Z3utils.dim_labels d
+            (string_of_expr (Z3.Expr.simplify e None));
+        Some d
     | _ -> None
   in
   (* apply f to v's dims and the resolved positions of indices *)
@@ -1072,10 +1081,15 @@ and check_and_update_individual_mapping (s1 : entry) (* the signature's type *)
    only size obligations use it: an int used as a shape entry or a returned
    dim is >= 0, the other sizes of a -1 have a positive product, and a
    callee's sign-fact requires hold. relations like conv2d's kernel fitting
-   the image must be proved *)
+   the image must be proved, except two: a slice's stop being within its dim
+   (see slice_dim and with_relations), and a callee's inferred relation *)
 type inference = {
   candidates : (Z3.Expr.expr * constr) list; (* stronger facts first *)
   mutable inferred : constr list; (* newest first *)
+  names : (string * Z3.Expr.expr) list;
+      (* the signature's int parameters and dims, which relations are about *)
+  mutable relations : (Z3.Expr.expr * constr) list;
+      (* relations slices may need, e.g. t <= block_size (see slice_dim) *)
 }
 
 let inference : inference option ref = ref None
@@ -1115,6 +1129,56 @@ let prove_or_infer (e : Z3.Expr.expr) : bool =
         needed;
       true
 
+(* a relation between two of the signature's names equal to a and b, e.g.
+   Le (Id t, Id block_size) for a slice's stop and its dim: the fact over the
+   names' values, which outlive the statement being checked, and the constr *)
+let relation ~(strict : bool) (a : Z3.Expr.expr) (b : Z3.Expr.expr) :
+    (Z3.Expr.expr * constr) option =
+  match !inference with
+  | None -> None
+  | Some inf -> (
+      let named e =
+        List.find_opt (fun (_, v) -> Z3utils.prove_int_eq v e) inf.names
+      in
+      match (named a, named b) with
+      | Some (x, xe), Some (y, ye) when x <> y ->
+          let ctx = Z3utils.ctx in
+          Some
+            (if strict then (Z3.Arithmetic.mk_lt ctx xe ye, Lt (Id x, Id y))
+             else (Z3.Arithmetic.mk_le ctx xe ye, Le (Id x, Id y)))
+      | _ -> None)
+
+(* assume a relation as an inferred requires, unless it contradicts what's
+   known, which would make everything provable *)
+let infer_relation ((fact, c) : Z3.Expr.expr * constr) : bool =
+  match !inference with
+  | None -> false
+  | Some inf ->
+      Z3.Solver.push Z3utils.solver;
+      Z3.Solver.add Z3utils.solver [ fact ];
+      let sat = Z3.Solver.check Z3utils.solver [] <> Z3.Solver.UNSATISFIABLE in
+      Z3.Solver.pop Z3utils.solver 1;
+      if sat then (
+        Z3.Solver.add Z3utils.solver [ fact ];
+        if not (List.mem c inf.inferred) then inf.inferred <- c :: inf.inferred;
+        (* so a loop can assert it again after its body (see walk) *)
+        if not (List.exists (fun (_, c') -> c' = c) inf.relations) then
+          inf.relations <- inf.relations @ [ (fact, c) ]);
+      sat
+
+(* prove a <= b (a < b if strict), or infer it: a sign fact (see
+   prove_or_infer), or a relation between two of the signature's names. a
+   callee's inferred relation, like t <= block_size, is passed on this way *)
+let prove_or_infer_le ~(strict : bool) (a : Z3.Expr.expr) (b : Z3.Expr.expr) :
+    bool =
+  let ctx = Z3utils.ctx in
+  prove_or_infer
+    ((if strict then Z3.Arithmetic.mk_lt else Z3.Arithmetic.mk_le) ctx a b)
+  ||
+  match relation ~strict a b with
+  | Some r -> infer_relation r
+  | None -> false
+
 let without_inference (f : unit -> 'a) : 'a =
   let saved = !inference in
   inference := None;
@@ -1129,16 +1193,44 @@ let pending_sizes : StringSet.t ref = ref StringSet.empty
 let attempt (f : unit -> 'a) : 'a =
   let unfoldings = !Z3utils.unfoldings and pending = !pending_sizes in
   let inferred = Option.map (fun inf -> inf.inferred) !inference in
+  let level = Z3.Solver.get_num_scopes Z3utils.solver in
   Z3.Solver.push Z3utils.solver;
   try f ()
   with e ->
-    Z3.Solver.pop Z3utils.solver 1;
+    (* f may have left scopes of its own, from attempts that succeeded *)
+    Z3.Solver.pop Z3utils.solver
+      (Z3.Solver.get_num_scopes Z3utils.solver - level);
     Z3utils.unfoldings := unfoldings;
     pending_sizes := pending;
     (match (!inference, inferred) with
     | Some inf, Some l -> inf.inferred <- l
     | _ -> ());
     raise e
+
+(* check a statement with f. if it fails, it may need a relation that a
+   slice registered (see slice_dim): it's checked again assuming each one,
+   then all of them, which become inferred requires *)
+let with_relations (f : unit -> 'a) : 'a =
+  match !inference with
+  | None -> f ()
+  | Some inf -> (
+      try attempt f
+      with TypeError _ as err ->
+        let fresh =
+          List.filter
+            (fun (_, c) -> not (List.mem c inf.inferred))
+            inf.relations
+        in
+        let assuming rs =
+          attempt (fun () ->
+              if not (List.for_all infer_relation rs) then raise err;
+              f ())
+        in
+        let rec go = function
+          | [] -> if List.length fresh > 1 then assuming fresh else raise err
+          | r :: rest -> ( try assuming [ r ] with TypeError _ -> go rest)
+        in
+        go fresh)
 
 let rec mentions (x : string) (e : Z3.Expr.expr) : bool =
   (Z3.Expr.get_num_args e = 0 && Z3.Expr.to_string e = x)
@@ -1490,18 +1582,33 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
           | Le (Int (0 | 1), Id _) | Lt (Int 0, Id _) -> true
           | _ -> false
         in
+        (* and so may an inferred relation between two names, e.g. t <=
+           block_size *)
+        let relates c =
+          let names strict a b =
+            match (expr_of_dim a mapping, expr_of_dim b mapping) with
+            | Ok a, Ok b -> prove_or_infer_le ~strict a b
+            | _ -> false
+          in
+          match c with
+          | Le ((Id _ as a), (Id _ as b)) -> names false a b
+          | Lt ((Id _ as a), (Id _ as b)) -> names true a b
+          | _ -> false
+        in
         List.iter
-          (fun c ->
+          (fun (c, inferred) ->
             match constr_expr c mapping with
             | Ok e
               when (if inferable c then prove_or_infer else Z3utils.prove) e ->
                 ()
+            | Ok _ when inferred && relates c -> ()
             | Ok _ ->
                 raise
                   (TypeError
                      ("Precondition not provable: " ^ string_of_constr c mapping))
             | Error err -> raise (TypeError (show_dim_error err)))
-          sg.requires;
+          (List.map (fun c -> (c, false)) sg.requires
+          @ List.map (fun c -> (c, true)) sg.inferred);
 
         let var_mapping, spread_mapping, param_mapping = mapping in
         let var_mapping =
@@ -1524,7 +1631,15 @@ let check_sig (sg : signature) (argtyps : arg list) : arg =
         check_ret_type_with_mapping sg.ret mapping
 
 let sig_of_funtyp ((params, ret) : funtyp) : signature =
-  { params; ret; requires = []; exists = []; ensures = []; invariant = [] }
+  {
+    params;
+    ret;
+    requires = [];
+    inferred = [];
+    exists = [];
+    ensures = [];
+    invariant = [];
+  }
 
 let check_app (f : funtyp) (argtyps : arg list) : arg =
   check_sig (sig_of_funtyp f) argtyps
@@ -1775,6 +1890,22 @@ let slice_dim (dim : string)
               (TypeError
                  ("a slice's step must be positive, got " ^ string_of_arg v)))
   in
+  (* a stop within the dim makes the length plain arithmetic. when that
+     isn't known, the body may need it, as a requires relating two of the
+     signature's names *)
+  (match (stop, !inference) with
+  | Some v, Some inf -> (
+      match int_expr "stop" v with
+      | Some x
+        when Z3utils.prove (mk_ge ctx x zero)
+             && not (Z3utils.prove (mk_le ctx x n)) -> (
+          match relation ~strict:false x n with
+          | Some ((_, c) as r)
+            when not (List.exists (fun (_, c') -> c' = c) inf.relations) ->
+              inf.relations <- inf.relations @ [ r ]
+          | _ -> ())
+      | _ -> ())
+  | _ -> ());
   match (bound "start" zero start, bound "stop" n stop, step) with
   | Some a, Some b, Some k ->
       let len =
@@ -2015,25 +2146,27 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
                   raise (TypeError "return inside a loop isn't supported"));
             if rest <> [] then
               here (fun () -> raise (TypeError "statements after return"));
-            let mapping =
-              here (fun () ->
-                  match_typ "return value" fd.sg.ret (eval locals t) mapping)
-            in
-            List.iter
-              (fun c ->
-                here (fun () ->
-                    if not (Z3utils.prove (constr_value mapping c)) then
-                      raise
-                        (TypeError
-                           ("Postcondition not provable: "
-                          ^ string_of_constr c mapping))))
-              fd.sg.ensures;
+            with_relations (fun () ->
+                let mapping =
+                  here (fun () ->
+                      match_typ "return value" fd.sg.ret (eval locals t) mapping)
+                in
+                List.iter
+                  (fun c ->
+                    here (fun () ->
+                        if not (Z3utils.prove (constr_value mapping c)) then
+                          raise
+                            (TypeError
+                               ("Postcondition not provable: "
+                              ^ string_of_constr c mapping))))
+                  fd.sg.ensures);
             locals
         | Let (x, t) ->
-            let v = here (fun () -> eval locals t) in
+            let v = with_relations (fun () -> here (fun () -> eval locals t)) in
             walk ~loop (StringMap.add x v locals) kinds mapping rest
         | Unpack (xs, t) ->
             let vs =
+              with_relations @@ fun () ->
               here (fun () ->
                   match eval locals t with
                   | Tuple vs when List.length vs = List.length xs -> vs
@@ -2102,7 +2235,9 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
                   (fun c ->
                     if not (List.mem c inferred) then
                       match
-                        List.find_opt (fun (_, c') -> c' = c) inf.candidates
+                        List.find_opt
+                          (fun (_, c') -> c' = c)
+                          (inf.candidates @ inf.relations)
                       with
                       | Some (fact, _) -> Z3.Solver.add Z3utils.solver [ fact ]
                       | None -> ())
@@ -2124,9 +2259,12 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
                   | TypeTuple _ ->
                       raise (TypeError "tuple annotations aren't supported"))
             in
-            let v = here (fun () -> eval locals t) in
-            let mapping =
-              here (fun () -> match_typ ("annotation of " ^ x) typ v mapping)
+            let v, mapping =
+              with_relations (fun () ->
+                  let v = here (fun () -> eval locals t) in
+                  ( v,
+                    here (fun () ->
+                        match_typ ("annotation of " ^ x) typ v mapping) ))
             in
             walk ~loop (StringMap.add x v locals) kinds mapping rest)
   in
@@ -2153,7 +2291,7 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
           assume_invariant fd.sg mapping;
           List.iter
             (fun c -> Z3.Solver.add Z3utils.solver [ constr_value mapping c ])
-            fd.sg.requires;
+            (fd.sg.requires @ fd.sg.inferred);
           if Z3.Solver.check Z3utils.solver [] = Z3.Solver.UNSATISFIABLE then
             raise (TypeError "the requires clauses are contradictory"));
       let var_mapping, _, _ = mapping in
@@ -2174,7 +2312,13 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
         facts 1 (StringMap.bindings var_mapping)
         @ facts 1 int_params @ facts 0 int_params
       in
-      let inf = { candidates; inferred = [] } in
+      let names =
+        int_params
+        @ List.filter
+            (fun (x, _) -> not (List.mem_assoc x int_params))
+            (StringMap.bindings var_mapping)
+      in
+      let inf = { candidates; inferred = []; names; relations = [] } in
       if infer then inference := Some inf;
       Fun.protect
         ~finally:(fun () ->

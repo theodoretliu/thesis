@@ -92,14 +92,26 @@ sizes.py:7: note: causal_mask requires size >= 0 (inferred from its body)
 ```
 
 Only size obligations are inferred: an int used as a size, a returned dim, the other sizes of a `-1`
-(torch can't infer `-1` if they multiply to 0), and a callee's inferred requires. Relations, like a
-kernel fitting the image, must be proved. See [docs/13-free-functions.md](../docs/13-free-functions.md).
+(torch can't infer `-1` if they multiply to 0), and a callee's inferred requires. One relation is
+inferred too: a slice's stop being within its dim, relating two of the signature's names, when the
+statement with the slice doesn't check without it. nanoGPT's mask `self.bias[:, :, :T, :T]` broadcasts
+against the scores only if `t <= block_size`:
+
+```
+causal.py:31: note: CausalSelfAttention.forward requires d >= 1, n <= max_len (inferred from its body)
+```
+
+A caller may infer a callee's inferred relation in turn, or prove it from an assert. Declared relations,
+like a kernel fitting the image, must be proved. See [docs/13-free-functions.md](../docs/13-free-functions.md)
+and [docs/20-causal-attention.md](../docs/20-causal-attention.md).
 
 Bodies must be straight-line code, apart from `if`s that are decided statically and loops over an
 `nn.ModuleList`:
 
 - `y = expr` and `y: Float[Tensor, "..."] = expr`. The annotation is checked, and it can bind new names.
-- `a, b = expr`, unpacking a tuple.
+- `a, b = expr`, unpacking a tuple. `B, T, C = x.size()` unpacks a tensor's dims, and `q, k, v =
+  x.split(s, dim=2)` its pieces: the stubs have an overload per rank and per number of pieces, so the
+  unpacking checks that there are that many.
 - `return expr`, including `return a, b`.
 - `if` on whether variables are `None` (`if mask is not None:`), which is known statically. See
   [Optional parameters](#optional-parameters). And `if` on a flag (`if not self.flash:`), which is
@@ -113,7 +125,7 @@ Bodies must be straight-line code, apart from `if`s that are decided statically 
 - `print(...)` is skipped, but the values it prints, other than strings and the text of f-strings, are
   checked.
 - `pass` is skipped.
-- Expressions: local variables, int/bool/float literals, calls, `+ - * / // ** @ & | ^`, unary `-` and
+- Expressions: local variables, int/bool/float literals, `float` of a constant (`float("-inf")`), calls, `+ - * / // ** @ & | ^`, unary `-` and
   `~`, comparisons, methods (`x.sum(-1)`, `x.size(-1)`), properties (`x.mT`), tuples, and tuples of ints
   as shapes (`x.reshape((n, d))`). One entry of a shape may be `-1` where the stub determines it, as in
   `x.reshape(-1, d)`. `x.shape` is a shape too, but only where one is expected: `torch.zeros(x.shape)`.
@@ -180,8 +192,9 @@ dims first, and `self.w_1(x)` becomes `torch.nn.Linear.forward(d_model, d_ff, x)
   computed from the int parameters of `__init__` (or other such attributes), not from its locals.
 - Any other attribute is its expression, evaluated again from the instance dims: `self.d_k = d_model //
   h` makes `self.d_k` the int `d_model // h`.
-- An attribute must be assigned once, at the top level of `__init__`. It can't be assigned anywhere
-  else, and `__init__` can't reassign an int parameter.
+- An attribute must be assigned once, at the top level of `__init__`, or inside `if`s on flags, which
+  are decided in each case (see [Flags](#flags)). It can't be assigned anywhere else, and `__init__`
+  can't reassign an int parameter.
 - `__init__` returns `None`, and `super().__init__()` is skipped.
 - A method may assume its class invariant: the requires of `__init__`, including those inferred for it,
   and its asserts about its int parameters (`assert d_model % h == 0`). Every instance was built
@@ -276,9 +289,19 @@ a flag tested only under another is only split there (`[self.fast=False,shift=Tr
   flag_none.py:15: in Affine.forward[bias=False]: `self.bias` is None here
   ```
 
+- An attribute assigned inside `if`s in `__init__` has its value per case: exactly one assignment must
+  run, so the mask registered under `if not self.flash:` exists in `forward[self.flash=False]`. Reading
+  it in a case where no assignment runs is an error, as it would be an `AttributeError`:
+
+  ```
+  mask_case.py:18: in Masked.forward[self.fast=True]: `self.mask` isn't assigned in this case: `Masked.__init__` assigns it under `if not self.fast:`
+  ```
+
+- `self.training`, `nn.Module`'s flag, is a flag too, unless `__init__` assigns it. `train()` and
+  `eval()` set it between calls, so each call is in one case. Used as a value, it's its case's value.
 - A function may test at most 4 flags (16 cases, for each case of its `Optional` parameters).
 
-See [docs/19-flags.md](../docs/19-flags.md).
+See [docs/19-flags.md](../docs/19-flags.md) and [docs/20-causal-attention.md](../docs/20-causal-attention.md).
 
 ## Calls
 
@@ -331,7 +354,8 @@ same syntax as user code, plus what library signatures need and jaxtyping can't 
 
 The shipped stubs cover common torch functions, `Tensor` methods, `torch.nn.functional`, the modules
 `nn.Linear`, `nn.Embedding`, `nn.LayerNorm`, `nn.Dropout`, `nn.ReLU` and `nn.GELU`, `nn.Parameter`,
-`math.sqrt`/`math.log`, and Python's operators. `Tensor.shape` is a property whose value is a shape
+`math.sqrt`/`math.log`, `F.scaled_dot_product_attention`, and Python's operators. `x.size()` and
+`x.split(s, dim)` have an overload per rank (1 to 6) and per number of pieces (1 to 4). `Tensor.shape` is a property whose value is a shape
 (`-> Shape["*A"]`), and the frontend only allows it where a shape is expected. `operator.setitem(target, value)` is slice assignment: the frontend passes the slice
 itself as `target`. `nn.ModuleList` has no stub; the frontend handles it. A call with no stub is an error,
 never an unknown shape.

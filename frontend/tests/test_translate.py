@@ -1248,6 +1248,147 @@ class Flags(unittest.TestCase):
         self.assertEqual(len(errors), 1)
 
 
+ATTENTION = """
+import torch
+import torch.nn as nn
+from jaxtyping import Float
+from torch import Tensor
+from torch.nn import functional as F
+
+
+class Attn(nn.Module):
+    def __init__(self, d: int, max_len: int, bias: bool):
+        super().__init__()
+        self.qkv = nn.Linear(d, 3 * d)
+        self.p = 0.1
+        self.fast = hasattr(F, "scaled_dot_product_attention")
+        if not self.fast:
+            self.register_buffer("mask", torch.tril(torch.ones(max_len, max_len)))
+        if bias:
+            self.b = nn.Parameter(torch.zeros(d))
+        else:
+            self.b = None
+
+    def forward(self, x: Float[Tensor, "n d"]) -> Float[Tensor, "n d"]:
+        T, C = x.size()
+        q, k, v = self.qkv(x).split(C, dim=1)
+        if self.fast:
+            y = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=self.p if self.training else 0, is_causal=True
+            )
+        else:
+            att = (q @ k.transpose(0, 1)).masked_fill(self.mask[:T, :T] == 0, float("-inf"))
+            y = F.dropout(F.softmax(att, dim=-1), 0.1, self.training) @ v
+        return y
+
+    def shifted(self, x: Float[Tensor, "n d"]) -> Float[Tensor, "n d"]:
+        if self.b is not None:
+            return x + self.b
+        return x
+"""
+
+
+class BranchAttributes(unittest.TestCase):
+    """nanoGPT milestone 3: attributes assigned in a branch, self.training,
+    x.size(), split and float(...)."""
+
+    def test_cases(self):
+        fs, errors = functions(ATTENTION)
+        self.assertEqual(errors, [])
+        # a flag attribute, and nn.Module's training, which both paths use
+        self.assertEqual(
+            [n for n in fs if n.startswith("Attn.forward")],
+            [
+                "Attn.forward",
+                "Attn.forward[self.fast=True,self.training=True]",
+                "Attn.forward[self.fast=True,self.training=False]",
+                "Attn.forward[self.fast=False,self.training=True]",
+                "Attn.forward[self.fast=False,self.training=False]",
+            ],
+        )
+        # the attribute assigned in both branches is decided in each case
+        self.assertEqual(
+            [n for n in fs if n.startswith("Attn.shifted")],
+            ["Attn.shifted", "Attn.shifted[bias=True]", "Attn.shifted[bias=False]"],
+        )
+        self.assertEqual(stmts(fs["Attn.shifted[bias=False]"]), [["Return", ["Var", "x"]]])
+
+    def test_buffer_is_read_in_its_case(self):
+        fs, _ = functions(ATTENTION)
+        slow = stmts(fs["Attn.forward[self.fast=False,self.training=True]"])
+        text = repr(slow)
+        # the buffer's value, evaluated again from the instance dims
+        self.assertIn("torch.tril", text)
+        self.assertIn('["Slice", ["Call", "torch.tril"', text.replace("'", '"'))
+        # float("-inf") is a float, and self.training is its case's value
+        self.assertIn("['Scalar']", text)
+        dropout = next(
+            t
+            for t in iterate(slow)
+            if isinstance(t, list) and t[:2] == ["Call", "torch.nn.functional.dropout"]
+        )
+        self.assertEqual(dropout[2][1:], [["Scalar"], ["Lit", 1]])
+        fast = stmts(fs["Attn.forward[self.fast=True,self.training=False]"])
+        sdpa = next(
+            t
+            for t in iterate(fast)
+            if isinstance(t, list)
+            and t[:1] == ["Call"]
+            and t[1].startswith("torch.nn.functional.scaled_dot_product_attention")
+        )
+        self.assertEqual(
+            sdpa[1], "torch.nn.functional.scaled_dot_product_attention[attn_mask=None]"
+        )
+        self.assertEqual(sdpa[2][3:], [["Lit", 0], ["Lit", 1]])  # dropout_p, is_causal
+
+    def test_size_and_split_unpack(self):
+        fs, _ = functions(ATTENTION)
+        size, split = stmts(fs["Attn.forward[self.fast=True,self.training=True]"])[:2]
+        self.assertEqual(size[0], "Unpack")
+        self.assertEqual(size[1], ["T", "C"])
+        self.assertTrue(size[2][1].startswith("torch.Tensor.size"))
+        self.assertEqual(split[1], ["q", "k", "v"])
+        self.assertEqual(split[2][1], "torch.Tensor.split")
+        self.assertEqual(split[2][2][1:], [["Var", "C"], ["Lit", 1]])
+
+    def test_errors(self):
+        for src, msg in [
+            (
+                "return self.mask",
+                "`self.mask` isn't assigned in this case: `C.__init__` assigns it under "
+                "`if not self.fast:`",
+            ),
+            ("return self.twice", "`self.twice` is assigned more than once in this case"),
+            ("return x * float(self.n)", r"only `float` of a constant is supported"),
+            (
+                "return x if self.inner.training else x",
+                "`self.inner.training` is a flag of another",
+            ),
+        ]:
+            with self.subTest(src):
+                _, errors = program(
+                    "import torch\nimport torch.nn as nn\n"
+                    "from torch.nn import functional as F\n"
+                    "class Inner(nn.Module):\n"
+                    "    def __init__(self):\n"
+                    "        super().__init__()\n"
+                    "class C(nn.Module):\n"
+                    "    def __init__(self, n: int, a: bool):\n"
+                    "        super().__init__()\n"
+                    "        self.n = n\n"
+                    "        self.inner = Inner()\n"
+                    "        self.fast = hasattr(F, 'scaled_dot_product_attention')\n"
+                    "        if not self.fast:\n"
+                    "            self.mask = torch.ones(n)\n"
+                    "        self.twice = torch.ones(n)\n"
+                    "        if a:\n"
+                    "            self.twice = torch.zeros(n)\n"
+                    "    def f(self, x: Float[Tensor, 'n']) -> Float[Tensor, 'n']:\n"
+                    f"        {src}\n"
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+
 class StubOptionals(unittest.TestCase):
     def test_variants(self):
         stubs = Stubs()

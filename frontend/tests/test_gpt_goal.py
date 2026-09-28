@@ -18,6 +18,7 @@ PASSING = {
     "LayerNorm.__init__",
     "LayerNorm.forward",
     "CausalSelfAttention.__init__",
+    "CausalSelfAttention.forward",
     "MLP.__init__",
     "MLP.forward",
     "Block.__init__",

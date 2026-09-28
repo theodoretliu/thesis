@@ -23,11 +23,12 @@ arguments its __init__ was called with, and a method is a function that takes
 them first. In a method of Encoder, `self.w = nn.Linear(d_model, d_ff)` in
 __init__ makes `self.w(x)` the call torch.nn.Linear.forward(d_model, d_ff, x),
 where d_model is the method's own instance dim. So an attribute's type comes
-from the one assignment to it in __init__, unless a class-level annotation
-declares it.
+from the one assignment to it in __init__ (in each case, for one assigned
+inside `if`s on flags), unless a class-level annotation declares it.
 
-A flag is a bool a module branches on: a bool parameter of __init__, or an
-attribute __init__ sets to one or to hasattr(...). Its value isn't known
+A flag is a bool a module branches on: a bool parameter of __init__, an
+attribute __init__ sets to one or to hasattr(...), or nn.Module's training.
+Its value isn't known
 statically, so a function is checked once for each value of each flag it
 tests, as separate checker functions (LayerNorm.forward[bias=False]). Callers
 can't pick a case, so the cases share the function's signature, which is
@@ -82,9 +83,10 @@ class ModuleClass:
     name: str  # qualified for stubs, e.g. torch.nn.Linear
     ints: list[str]
     user: bool = False
-    # user classes: `self.f = value` at the top level of __init__, or None if
-    # f is assigned more than once or elsewhere
-    fields: dict[str, ast.expr | None] = field(default_factory=dict)
+    # user classes: `self.f = value` at the top level of __init__, Guarded if
+    # it's inside `if`s, or None if f is assigned more than once at the top
+    # level or elsewhere
+    fields: dict[str, ast.expr | Guarded | None] = field(default_factory=dict)
     self_name: str = "self"  # __init__'s name for self
     # attributes declared at class level, e.g. pe: Float[Tensor, "1 max_len d"]:
     # their IR types, over the instance dims
@@ -112,6 +114,15 @@ class ModuleClass:
         """For a method's signature: its leading int parameters are an
         instance of this class, so they satisfy __init__'s requires."""
         return [{"init": self.init, "ints": [[n, n] for n in self.ints]}]
+
+
+@dataclass
+class Guarded:
+    """An attribute __init__ assigns inside `if`s: each assignment, with the
+    tests around it and the value each must have. Which one runs is decided
+    in each case (see field_value)."""
+
+    assignments: list[tuple[list[tuple[ast.expr, bool]], ast.expr]]
 
 
 @dataclass
@@ -312,6 +323,9 @@ SYMBOLS = {
 MAX_OPTIONAL = 4
 # and so does each flag
 MAX_FLAGS = 4
+
+# nn.Module's training, a flag of every module
+TRAINING = "self.training"
 
 MODULE_LIST = "torch.nn.ModuleList"
 MODULE_LIST_FORM = "`nn.ModuleList([Module(...) for _ in range(n)])`"
@@ -639,9 +653,11 @@ class Translator:
         base = self.instance(e.value)
         if base is None or not base.cls.user:
             return None
-        value = base.cls.fields.get(e.attr)
         key = (base.cls.name, e.attr)
-        if value is None or key in self.config_fields:
+        if key in self.config_fields:
+            return None  # an attribute defined in terms of itself is reported elsewhere
+        value = self.field_value(base, e.attr, e)
+        if value is None:
             return None  # an attribute defined in terms of itself is reported elsewhere
         self.config_fields.add(key)
         try:
@@ -787,7 +803,7 @@ class Translator:
             base = self.instance(e.value)
             if base is None or not base.cls.user:
                 return None
-            value = base.cls.fields.get(e.attr)
+            value = self.field_value(base, e.attr, e)
             if not (isinstance(value, ast.Call) and self.in_class(base.cls, value.func)):
                 return None
             return self.field_instance(base, e.attr, e)
@@ -836,11 +852,12 @@ class Translator:
                 self.in_instance,
             ) = saved
 
-    def field(self, cls: ModuleClass, name: str, e: ast.AST) -> ast.expr:
-        """The value __init__ assigns to self.name."""
+    def field(self, base: Instance, name: str, e: ast.AST) -> ast.expr:
+        """The value __init__ assigns to base.name, in the case translated."""
+        cls = base.cls
         if name not in cls.fields:
             raise FrontendError(f"`{cls.name}` has no attribute `{name}` assigned in __init__", e)
-        value = cls.fields[name]
+        value = self.field_value(base, name, e)
         if value is None:
             raise FrontendError(
                 f"`self.{name}` must be assigned once, at the top level of "
@@ -849,10 +866,48 @@ class Translator:
             )
         return value
 
+    def field_value(self, base: Instance, name: str, e: ast.AST) -> ast.expr | None:
+        """The value __init__ assigns to base.name, or None if it isn't one
+        assignment. For one assigned inside `if`s, the tests around each
+        assignment are decided in the case, in base's __init__, so they may
+        split it; exactly one assignment must run."""
+        value = base.cls.fields.get(name)
+        if not isinstance(value, Guarded):
+            return value
+
+        def taken() -> list[ast.expr]:
+            what = "an `if` around an attribute's assignment"
+            return [
+                v
+                for guards, v in value.assignments
+                if all(self.static_test(t, t, what) == want for t, want in guards)
+            ]
+
+        values = self.as_instance(base.cls, taken, base.own)
+        if len(values) > 1:
+            raise FrontendError(
+                f"`self.{name}` is assigned more than once in this case of "
+                f"`{base.cls.name}.__init__`; it must be assigned once for its methods to "
+                "know its value",
+                e,
+            )
+        if not values:
+            guards, _ = value.assignments[0]
+            where = " and ".join(
+                f"`if {ast.unparse(t)}:`" if want else f"the `else` of `if {ast.unparse(t)}:`"
+                for t, want in guards
+            )
+            raise FrontendError(
+                f"`self.{name}` isn't assigned in this case: `{base.cls.name}.__init__` assigns "
+                f"it under {where}",
+                e,
+            )
+        return values[0]
+
     def field_instance(self, base: Instance, name: str, e: ast.AST) -> Instance:
         """The module base.name: the arguments its constructor was called with
         in __init__, as terms over base's instance dims."""
-        value = self.field(base.cls, name, e)
+        value = self.field(base, name, e)
         assert isinstance(value, ast.Call)
         return self.built_instance(base, name, value, e)
 
@@ -864,7 +919,7 @@ class Translator:
         base = self.instance(e.value)
         if base is None or not base.cls.user or e.attr not in base.cls.fields:
             return None
-        value = self.field(base.cls, e.attr, e)
+        value = self.field(base, e.attr, e)
         element = self.as_instance(base.cls, lambda: self.list_element(value), base.own)
         return None if element is None else self.built_instance(base, e.attr, element, e)
 
@@ -920,7 +975,7 @@ class Translator:
         """Any other attribute, e.g. self.d_k = d_model // h: the expression
         __init__ assigns it, evaluated again from base's instance dims. It
         has no other inputs, so it has the same shape (or int value)."""
-        value = self.field(base.cls, name, e)
+        value = self.field(base, name, e)
         (term,) = self.field_terms_of(base, name, lambda: [self.term(value)], e, f"`self.{name}`")
         return substitute(term, base)
 
@@ -999,7 +1054,7 @@ class Translator:
         if inst.cls.user:
             f = self.functions.get(key)
             if name in inst.cls.fields:
-                self.field(inst.cls, name, e)  # it must be assigned once
+                self.field(inst, name, e)  # it must be assigned once
                 raise FrontendError(f"`self.{name}` isn't a module, so it can't be called", e)
             if f is None:
                 if key in self.unannotated:
@@ -1147,12 +1202,15 @@ class Translator:
         return out, False
 
     def is_print(self, e: ast.expr) -> bool:
+        return isinstance(e, ast.Call) and self.is_builtin(e.func, "print")
+
+    def is_builtin(self, f: ast.expr, name: str) -> bool:
+        """Whether f names the builtin name, not a local or a user function."""
         return (
-            isinstance(e, ast.Call)
-            and isinstance(e.func, ast.Name)
-            and e.func.id == "print"
-            and not self.is_local("print")
-            and "print" not in self.functions
+            isinstance(f, ast.Name)
+            and f.id == name
+            and not self.is_local(name)
+            and name not in self.functions
         )
 
     def printed(self, e: ast.Call) -> list[Json]:
@@ -1313,15 +1371,19 @@ class Translator:
             return self.flag(e.id)
         if not isinstance(e, ast.Attribute):
             return None
+        if self.is_training(e):
+            return self.flag(TRAINING)
         base = self.field_of(e)
         if base is None:
             return None
         value = base.cls.fields[e.attr]
+        if isinstance(value, Guarded):
+            return None  # a flag is assigned once, at the top level
         if value is not None and not self.as_instance(
             base.cls, lambda: self.is_flag_expression(value), base.own
         ):
             return None
-        value = self.field(base.cls, e.attr, e)  # it must be assigned once
+        value = self.field(base, e.attr, e)  # it must be assigned once
         if not base.own:
             raise FrontendError(
                 f"`{ast.unparse(e)}` is a flag of another module; only the flags of `self` "
@@ -1339,6 +1401,24 @@ class Translator:
         finally:
             self.flag_fields.discard(key)
 
+    def is_training(self, e: ast.Attribute) -> bool:
+        """Whether e is nn.Module's training, of self: a flag, which train()
+        and eval() set between calls."""
+        if e.attr != "training":
+            return False
+        base = self.instance(e.value)
+        if base is None or not base.cls.user or "training" in base.cls.fields:
+            return False
+        if "training" in base.cls.attrs:
+            return False
+        if not base.own:
+            raise FrontendError(
+                f"`{ast.unparse(e)}` is a flag of another module; only the flags of `self` "
+                "can be tested",
+                e,
+            )
+        return True
+
     def is_flag_expression(self, e: ast.expr) -> bool:
         """Whether e is a flag expression: True, False, a flag, hasattr(...),
         or not/and/or of those."""
@@ -1354,7 +1434,7 @@ class Translator:
             base = self.field_of(e)
             value = None if base is None else base.cls.fields[e.attr]
             key = ("", "") if base is None else (base.cls.name, e.attr)
-            if value is None or key in self.flag_checks:
+            if value is None or isinstance(value, Guarded) or key in self.flag_checks:
                 return False
             self.flag_checks.add(key)
             try:
@@ -1411,10 +1491,12 @@ class Translator:
             return self.static_none(e.body if taken else e.orelse)
         if isinstance(e, ast.Attribute):
             base = self.field_of(e)
-            value = None if base is None else base.cls.fields[e.attr]
             key = (e.attr, "" if base is None else base.cls.name)
-            if value is None or key in self.none_fields:
+            if base is None or key in self.none_fields:
                 return False  # an attribute defined in terms of itself is reported elsewhere
+            value = self.field_value(base, e.attr, e)
+            if value is None:
+                return False
             self.none_fields.add(key)
             try:
                 return self.as_instance(base.cls, lambda: self.static_none(value), base.own)
@@ -1782,6 +1864,13 @@ class Translator:
             if callee is None:
                 raise FrontendError(f"no stub for `{q}`", e)
             return self.stub_call(callee, args, keywords, e)
+        if self.is_builtin(f, "float"):
+            # float("-inf"), float(1): a float, which broadcasts like a 0-d array
+            if not (len(e.args) == 1 and not e.keywords and isinstance(e.args[0], ast.Constant)):
+                raise FrontendError(
+                    "only `float` of a constant is supported, e.g. `float('-inf')`", e
+                )
+            return ir.Scalar()
         if isinstance(f, ast.Name):
             if f.id in self.after_loop:
                 self.term(f)  # the error for a name bound only in a loop
@@ -1805,6 +1894,8 @@ class Translator:
                 return self.attribute_call(base, e.attr)
             if not base.cls.user:
                 raise FrontendError(f"no stub declares the attribute `{base.cls.name}.{e.attr}`", e)
+            if self.is_training(e):
+                return ir.Lit(int(self.flag(TRAINING)))
             key = f"{base.cls.name}.{e.attr}"
             if e.attr not in base.cls.fields and (key in self.functions or key in self.unannotated):
                 raise FrontendError(f"`{ast.unparse(e)}` is a method; call it", e)
@@ -2043,9 +2134,10 @@ def substitute(t: Json, inst: Instance) -> Json:
     return go(t)
 
 
-def fields_of(init: ast.FunctionDef, self_name: str) -> dict[str, ast.expr | None]:
-    """The attributes __init__ assigns: self.f = value at its top level. An
-    attribute assigned more than once, or anywhere else, maps to None."""
+def fields_of(init: ast.FunctionDef, self_name: str) -> dict[str, ast.expr | Guarded | None]:
+    """The attributes __init__ assigns: self.f = value at its top level, or
+    inside `if`s, where it's Guarded by their tests. An attribute assigned
+    more than once at the top level, or anywhere else, maps to None."""
 
     def attribute(t: ast.expr) -> str | None:
         if (
@@ -2056,22 +2148,36 @@ def fields_of(init: ast.FunctionDef, self_name: str) -> dict[str, ast.expr | Non
             return t.attr
         return None
 
-    fields: dict[str, ast.expr | None] = {}
+    assigned: dict[str, list[tuple[list[tuple[ast.expr, bool]], ast.expr]]] = {}
     top: set[int] = set()
-    for s in init.body:
-        target = value = None
-        name = None
-        if isinstance(s, ast.Assign) and len(s.targets) == 1:
-            target, value = s.targets[0], s.value
-        elif isinstance(s, ast.AnnAssign):
-            target, value = s.target, s.value
-        elif isinstance(s, ast.Expr) and buffer_of(s.value, self_name) is not None:
-            target = s.value
-            name, value = buffer_of(s.value, self_name)
-        name = name or (None if target is None else attribute(target))
-        if name is not None and value is not None:
-            top.add(id(target))
-            fields[name] = value if name not in fields else None
+
+    def visit(stmts: list[ast.stmt], guards: list[tuple[ast.expr, bool]]) -> None:
+        for s in stmts:
+            if isinstance(s, ast.If):
+                visit(s.body, guards + [(s.test, True)])
+                visit(s.orelse, guards + [(s.test, False)])
+                continue
+            target = value = None
+            name = None
+            if isinstance(s, ast.Assign) and len(s.targets) == 1:
+                target, value = s.targets[0], s.value
+            elif isinstance(s, ast.AnnAssign):
+                target, value = s.target, s.value
+            elif isinstance(s, ast.Expr) and buffer_of(s.value, self_name) is not None:
+                target = s.value
+                name, value = buffer_of(s.value, self_name)
+            name = name or (None if target is None else attribute(target))
+            if name is not None and value is not None:
+                top.add(id(target))
+                assigned.setdefault(name, []).append((guards, value))
+
+    visit(init.body, [])
+    fields: dict[str, ast.expr | Guarded | None] = {}
+    for name, xs in assigned.items():
+        if any(guards for guards, _ in xs):
+            fields[name] = Guarded(xs)
+        else:
+            fields[name] = xs[0][1] if len(xs) == 1 else None
     for node in ast.walk(init):
         name = None
         if isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
