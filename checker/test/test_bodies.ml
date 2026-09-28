@@ -907,10 +907,14 @@ let () =
            [ ("x", arr [ BroadcastDim "n" ]); ("y", arr [ Id "n" ]) ]
            (arr [ Id "n" ])
            [ Return (var "y") ]));
-  expect "#n can't be in a return type" (fun () ->
+  (* nanoGPT milestone 4: a return type may say a bound dim is n or 1 *)
+  expect "#n can be in a return type when a parameter binds n" (fun () ->
+      check_signature (sg ([ ("x", arr [ Id "n" ]) ], arr [ BroadcastDim "n" ]));
+      true);
+  expect "but can't bind n there" (fun () ->
       match
         check_signature
-          (sg ([ ("x", arr [ Id "n" ]) ], arr [ BroadcastDim "n" ]))
+          (sg ([ ("x", arr [ Id "m" ]) ], arr [ BroadcastDim "n" ]))
       with
       | () -> false
       | exception KindError _ -> true)
@@ -1157,7 +1161,7 @@ let () =
     def ?requires "f" params (arr ret) [ Return (Slice (var x, items)) ]
   in
   let n = [ ("x", arr [ Id "n" ]) ] in
-  let upto k = (None, Some (Lit k), None) in
+  let upto k = Range (None, Some (Lit k), None) in
   expect "x[:2] of [n] is [2] when n >= 2" (fun () ->
       checks (slice ~requires:[ at_least 2 "n" ] n [ Int 2 ] "x" [ upto 2 ]));
   expect "and may be shorter otherwise" (fun () ->
@@ -1167,19 +1171,19 @@ let () =
         (slice
            ~requires:[ at_least 2 "n" ]
            n [ Int 2 ] "x"
-           [ (Some (Lit (-2)), None, None) ]));
+           [ Range (Some (Lit (-2)), None, None) ]));
   expect "x[::2] is (n + 1) // 2" (fun () ->
       checks
         (slice n
            [ Div (Add (Id "n", Int 1), Int 2) ]
            "x"
-           [ (None, None, Some (Lit 2)) ]));
+           [ Range (None, None, Some (Lit 2)) ]));
   expect "x[1::2] is n // 2" (fun () ->
       checks
         (slice n
            [ Div (Id "n", Int 2) ]
            "x"
-           [ (Some (Lit 1), None, Some (Lit 2)) ]));
+           [ Range (Some (Lit 1), None, Some (Lit 2)) ]));
   (* positional encodings: sin fills x[0::2] and cos x[1::2], which have the
      same width when n is even *)
   let halves ?requires () =
@@ -1189,8 +1193,8 @@ let () =
         Return
           (call "add"
              [
-               Slice (var "x", [ (Some (Lit 0), None, Some (Lit 2)) ]);
-               Slice (var "x", [ (Some (Lit 1), None, Some (Lit 2)) ]);
+               Slice (var "x", [ Range (Some (Lit 0), None, Some (Lit 2)) ]);
+               Slice (var "x", [ Range (Some (Lit 1), None, Some (Lit 2)) ]);
              ]);
       ]
   in
@@ -1206,7 +1210,8 @@ let () =
       (arr [ Id "n"; Id "d" ])
       [
         Return
-          (Slice (var "pe", [ (None, Some (call "shape0" [ var "x" ]), None) ]));
+          (Slice
+             (var "pe", [ Range (None, Some (call "shape0" [ var "x" ]), None) ]));
       ]
   in
   expect "a symbolic stop within bounds" (fun () ->
@@ -1216,9 +1221,9 @@ let () =
   expect "a step must be positive" (fun () ->
       rejects
         ~saying:[ "step must be positive" ]
-        (slice n [ Id "n" ] "x" [ (None, None, Some (Lit 0)) ]));
+        (slice n [ Id "n" ] "x" [ Range (None, None, Some (Lit 0)) ]));
   expect "more slices than dims" (fun () ->
-      rejects ~saying:[ "too many slices" ]
+      rejects ~saying:[ "too many indices" ]
         (slice n [ Id "n" ] "x" [ upto 1; upto 1 ]));
   expect "slicing a spread needs its dims" (fun () ->
       rejects
@@ -1237,7 +1242,8 @@ let () =
              Let
                ( "y",
                  Slice
-                   (var "pe", [ (None, Some (call "shape0" [ var "x" ]), None) ])
+                   ( var "pe",
+                     [ Range (None, Some (call "shape0" [ var "x" ]), None) ] )
                );
              Return (var "x");
            ])
@@ -1256,7 +1262,8 @@ let () =
                Slice
                  ( var "bias",
                    [
-                     (None, Some (var "t"), None); (None, Some (var "t"), None);
+                     Range (None, Some (var "t"), None);
+                     Range (None, Some (var "t"), None);
                    ] );
              ]);
       ]
@@ -1265,7 +1272,7 @@ let () =
       inferred mask = [ within ]);
   (* inferred in a loop's body, it's a requires, which holds after it *)
   let pe_prefix =
-    Slice (var "pe", [ (None, Some (call "shape0" [ var "x" ]), None) ])
+    Slice (var "pe", [ Range (None, Some (call "shape0" [ var "x" ]), None) ])
   in
   let looped ?requires () =
     def ?requires "f"
@@ -1307,3 +1314,176 @@ let () =
       match check_fundef (("head", Sig head) :: env) caller with
       | () -> false
       | exception TypeError m -> contains m "Precondition not provable")
+
+(* nanoGPT milestone 4: indexing with ints and lists *)
+let () =
+  let index ?requires params ret x items =
+    def ?requires "f" params (arr ret) [ Return (Slice (var x, items)) ]
+  in
+  let bn = [ ("x", arr [ Id "b"; Id "n"; Id "d" ]) ] in
+  let all = Range (None, None, None) in
+  expect "x[:, -1] drops the dim" (fun () ->
+      checks
+        (index
+           ~requires:[ at_least 1 "n" ]
+           bn [ Id "b"; Id "d" ] "x" [ all; Point (Lit (-1)) ]));
+  expect "and needs it to be at least 1" (fun () ->
+      rejects
+        ~saying:[ "index -1 may be out of range for a dim of size n" ]
+        (index bn [ Id "b"; Id "d" ] "x" [ all; Point (Lit (-1)) ]));
+  expect "which may be inferred" (fun () ->
+      inferred (index bn [ Id "b"; Id "d" ] "x" [ all; Point (Lit (-1)) ])
+      = [ show_constr (at_least 1 "n") ]);
+  expect "x[:, [-1], :] keeps it with size 1" (fun () ->
+      checks
+        (index
+           ~requires:[ at_least 1 "n" ]
+           bn [ Id "b"; Int 1; Id "d" ] "x"
+           [ all; Points [ Lit (-1) ]; all ]));
+  let two ?requires () =
+    index ?requires bn [ Id "b"; Int 2; Id "d" ] "x"
+      [ all; Points [ Lit 0; Lit 1 ] ]
+  in
+  expect "x[:, [0, 1]] has size 2 when n >= 2" (fun () ->
+      checks (two ~requires:[ at_least 2 "n" ] ()));
+  expect "which isn't inferred, as it isn't a sign fact" (fun () ->
+      match inferred (two ()) with
+      | [ m ] -> contains m "index 1 may be out of range"
+      | _ -> false);
+  expect "an index of an int parameter must be in range" (fun () ->
+      rejects
+        ~saying:[ "index k may be out of range" ]
+        (index
+           [ ("x", arr [ Id "n" ]); ("k", TypeInt) ]
+           [] "x"
+           [ Point (var "k") ]));
+  expect "and is when it's required" (fun () ->
+      checks
+        (index
+           ~requires:[ Lt (Id "k", Id "n"); at_least 0 "k" ]
+           [ ("x", arr [ Id "n" ]); ("k", TypeInt) ]
+           [] "x"
+           [ Point (var "k") ]));
+  expect "two lists move dims, so they're rejected" (fun () ->
+      rejects ~saying:[ "only one list index" ]
+        (index bn [ Int 1; Int 1; Id "d" ] "x"
+           [ Points [ Lit 0 ]; Points [ Lit 0 ] ]));
+  expect "and so are a list and an int" (fun () ->
+      rejects ~saying:[ "only one list index" ]
+        (index bn [ Int 1; Id "d" ] "x" [ Points [ Lit 0 ]; Point (Lit 0) ]));
+  expect "more indices than dims" (fun () ->
+      rejects ~saying:[ "too many indices" ]
+        (index
+           ~requires:[ at_least 1 "n" ]
+           [ ("x", arr [ Id "n" ]) ]
+           [] "x"
+           [ Point (Lit 0); Point (Lit 0) ]))
+
+(* nanoGPT milestone 4: #n and Optional in return types *)
+let () =
+  (* logits of length n, or 1 for the last position only *)
+  let last ?requires ret body =
+    def ?requires "f" [ ("x", arr [ Id "b"; Id "n" ]) ] ret body
+  in
+  let bn1 = arr [ Id "b"; BroadcastDim "n" ] in
+  expect "#n in a return type accepts n" (fun () ->
+      checks (last bn1 [ Return (var "x") ]));
+  expect "and 1" (fun () ->
+      checks
+        (last
+           ~requires:[ at_least 1 "n" ]
+           bn1
+           [
+             Return
+               (Slice
+                  (var "x", [ Range (None, None, None); Points [ Lit (-1) ] ]));
+           ]));
+  expect "and nothing else" (fun () ->
+      rejects ~saying:[ "n or 1" ]
+        (last bn1
+           [
+             Return
+               (Slice
+                  ( var "x",
+                    [
+                      Range (None, None, None); Range (None, Some (Lit 2), None);
+                    ] ));
+           ]));
+  (* a caller knows the dim is n or 1, so it's at least 1 when n is *)
+  let callee = sg ([ ("x", arr [ Id "b"; Id "n" ]) ], bn1) in
+  let caller ?requires ret =
+    {
+      (def ?requires "g"
+         [ ("y", arr [ Id "c"; Id "m" ]) ]
+         ret
+         [
+           Let ("z", call "callee" [ var "y" ]);
+           Return
+             (Slice (var "z", [ Range (None, None, None); Point (Lit (-1)) ]));
+         ])
+      with
+      name = "g";
+    }
+  in
+  let env' = ("callee", Sig callee) :: env in
+  expect "a caller's dim is n or 1" (fun () ->
+      match
+        check_fundef env' (caller ~requires:[ at_least 1 "m" ] (arr [ Id "c" ]))
+      with
+      | () -> true
+      | exception TypeError m ->
+          print_endline ("  unexpected error: " ^ m);
+          false);
+  expect "so it may be 0 when n is" (fun () ->
+      match check_fundef env' (caller (arr [ Id "c" ])) with
+      | () -> false
+      | exception TypeError m -> contains m "may be out of range");
+  (* forward(x, targets) -> (logits, Optional[loss]) *)
+  let pair = TypeTuple [ arr [ Id "n" ]; TypeOptional (arr []) ] in
+  let fwd body = def "f" [ ("x", arr [ Id "n" ]) ] pair body in
+  expect "an Optional in a return type accepts None" (fun () ->
+      checks (fwd [ Return (Tup [ var "x"; Tup [] ]) ]));
+  expect "and a value of its type" (fun () ->
+      checks (fwd [ Return (Tup [ var "x"; call "sum" [ var "x"; Lit 0 ] ]) ]));
+  expect "and nothing else" (fun () ->
+      rejects ~saying:[ "return value[1]" ]
+        (fwd [ Return (Tup [ var "x"; var "x" ]) ]));
+  let opt = sg ([ ("x", arr [ Id "n" ]) ], pair) in
+  let env' = ("fwd", Sig opt) :: env in
+  let use body =
+    check_fundef env' (def "g" [ ("y", arr [ Id "m" ]) ] (arr [ Id "m" ]) body)
+  in
+  expect "a caller may unpack it" (fun () ->
+      match
+        use [ Unpack ([ "a"; "l" ], call "fwd" [ var "y" ]); Return (var "a") ]
+      with
+      | () -> true
+      | exception TypeError m ->
+          print_endline ("  unexpected error: " ^ m);
+          false);
+  expect "but not use it as an array" (fun () ->
+      match
+        use
+          [
+            Unpack ([ "a"; "l" ], call "fwd" [ var "y" ]);
+            Return (call "add" [ var "a"; var "l" ]);
+          ]
+      with
+      | () -> false
+      | exception TypeError m -> contains m "add");
+  expect "and may return it as an Optional" (fun () ->
+      match
+        check_fundef env'
+          (def "g"
+             [ ("y", arr [ Id "m" ]) ]
+             (TypeTuple [ arr [ Id "m" ]; TypeOptional (arr []) ])
+             [ Return (call "fwd" [ var "y" ]) ])
+      with
+      | () -> true
+      | exception TypeError m ->
+          print_endline ("  unexpected error: " ^ m);
+          false);
+  expect "Optional parameters aren't supported" (fun () ->
+      match check_signature (sg ([ ("x", TypeOptional (arr [])) ], arr [])) with
+      | () -> false
+      | exception KindError _ -> true)

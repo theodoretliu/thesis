@@ -81,6 +81,11 @@ def TupleType(typs: list[Json]) -> Json:
     return ["Tuple", typs]
 
 
+def Optional(t: Json) -> Json:
+    """Optional[T], in a return type: None or a T."""
+    return ["Optional", t]
+
+
 def NoneType() -> Json:
     """None, the empty tuple: what __init__ returns."""
     return ["Tuple", []]
@@ -129,10 +134,20 @@ def Tuple(terms: list[Json]) -> Json:
     return ["Tuple", terms]
 
 
-def Slice(t: Json, items: list[list[Json | None]]) -> Json:
-    """t[start:stop:step, ...]: each item is [start, stop, step], where None
-    is a bound left out."""
+def Slice(t: Json, items: list[Json]) -> Json:
+    """t[start:stop:step, i, [j], ...]: each item is [start, stop, step],
+    where None is a bound left out, IndexItem(i) or ListItem([j])."""
     return ["Slice", t, items]
+
+
+def IndexItem(i: Json) -> Json:
+    """An int index, x[i], which drops the dim."""
+    return ["Index", i]
+
+
+def ListItem(ints: list[Json]) -> Json:
+    """A list index, x[[i, j]], which keeps the dim with as many entries."""
+    return ["List", ints]
 
 
 def Let(x: str, t: Json) -> Json:

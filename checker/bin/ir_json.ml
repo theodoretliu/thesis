@@ -60,6 +60,7 @@ let rec typ (j : Yojson.Safe.t) : typ =
   | `List [ `String "IntExpr"; e ] -> IntExpr (entry e)
   | `List [ `String "Literal"; i ] -> TypeLiteralInt (int i)
   | `List [ `String "Tuple"; l ] -> TypeTuple (list typ l)
+  | `List [ `String "Optional"; t ] -> TypeOptional (typ t)
   | j -> bad "a type" j
 
 let constr (j : Yojson.Safe.t) : constr =
@@ -111,8 +112,14 @@ let rec term (j : Yojson.Safe.t) : term =
   | `List [ `String "Slice"; t; items ] ->
       let part = function `Null -> None | j -> Some (term j) in
       let item = function
-        | `List [ a; b; c ] -> (part a, part b, part c)
-        | j -> bad "a slice [start, stop, step]" j
+        | `List [ `String "Index"; i ] -> Point (term i)
+        | `List [ `String "List"; is ] -> Points (list term is)
+        | `List [ a; b; c ] -> Range (part a, part b, part c)
+        | j ->
+            bad
+              "an index item ([start, stop, step], [\"Index\", i] or \
+               [\"List\", is])"
+              j
       in
       Slice (term t, list item items)
   | j -> bad "a term" j

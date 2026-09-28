@@ -28,7 +28,7 @@ spec, and all 24 of its functions and methods check.
 **The next goal** is to check nanoGPT, Karpathy's GPT-2 `model.py`, as
 [`examples/goal/gpt.py`](../examples/goal/gpt.py), with Llama as a stretch goal. The gaps, decisions and
 milestones are in [17-nanogpt-goal.md](17-nanogpt-goal.md). `frontend/tests/test_gpt_goal.py` is the spec,
-and 8 of its 11 methods check.
+and 10 of its 11 methods check.
 
 | Step | Gap | Status | Note |
 |---|---|---|---|
@@ -47,10 +47,11 @@ and 8 of its 11 methods check.
 | goal 2 | Modules: methods take their instance's constructor ints, class invariants | done | [14-modules.md](14-modules.md) |
 | goal 3 | Attention: `Optional` checked per case, asserts, `*#b`/`#q` broadcasting, `transpose(i, j)` | done | [15-attention.md](15-attention.md) |
 | goal 4 | Stacks and encodings: `nn.ModuleList` loops, declared attributes and weight tying, slices | done | [16-stacks.md](16-stacks.md) |
-| nanoGPT | Check nanoGPT's `model.py` (GPT-2) | 8 of 11 | [17-nanogpt-goal.md](17-nanogpt-goal.md) |
+| nanoGPT | Check nanoGPT's `model.py` (GPT-2) | 10 of 11 | [17-nanogpt-goal.md](17-nanogpt-goal.md) |
 | nanoGPT 1 | Configs: a dataclass's int fields are instance dims | done | [18-configs.md](18-configs.md) |
 | nanoGPT 2 | Flags: a case per value of each `bool` a module tests, `Optional` in stubs, `x.shape` | done | [19-flags.md](19-flags.md) |
 | nanoGPT 3 | Causal attention: `x.size()`, `split`, attributes per case, `self.training`, inferred `t <= block_size` | done | [20-causal-attention.md](20-causal-attention.md) |
+| nanoGPT 4 | The model: `nn.ModuleDict`, int and list indexing, `Optional` and `#t` in return types, `device` and `dtype` | done | [21-the-model.md](21-the-model.md) |
 
 ## Scorecard after steps 0–9
 

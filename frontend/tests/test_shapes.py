@@ -42,8 +42,10 @@ class JaxtypingSyntax(unittest.TestCase):
         )
         self.assertIn("q", scope.dims)
         self.assertEqual(user("#_"), [["Id", "_1"]])
-        with self.assertRaisesRegex(ShapeError, "only be in a parameter's shape"):
-            user("#q", binding=False, scope=scope)
+        # in a return type, q or 1 for a q the parameters bound
+        self.assertEqual(user("#q", binding=False, scope=scope), [["BroadcastDim", "q"]])
+        with self.assertRaisesRegex(ShapeError, "needs `r` to be bound by a parameter"):
+            user("#r", binding=False, scope=scope)
 
     def test_arithmetic(self):
         self.assertEqual(

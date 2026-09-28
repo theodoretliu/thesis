@@ -165,6 +165,24 @@ class Examples(unittest.TestCase):
             },
         )
 
+    def test_model(self):
+        report = check_file(EXAMPLES / "pass" / "model.py", STUBS, self.checker)
+        self.assertEqual(len(report.passed), 7)
+        # the ModuleDict's entries are built in __init__, so it infers what
+        # they require. forward proves t <= block_size from hidden's assert.
+        # without targets, x[:, [-1], :] needs t >= 1, and so does taking the
+        # last position of logits whose length is t or 1
+        self.assertEqual(
+            {k: v for k, v in report.inferred.items() if k.startswith("TinyLM")},
+            {
+                "TinyLM.__init__": ["vocab_size >= 0", "n_embd >= 0", "block_size >= 0"],
+                "TinyLM.forward": ["vocab_size >= 1"],
+                "TinyLM.forward[targets=None]": ["t >= 1"],
+                "TinyLM.next_token_logits": ["t >= 1"],
+                "TinyLM.first_state": ["t >= 1"],
+            },
+        )
+
 
 class CheckerCli(unittest.TestCase):
     def test_invalid_ir(self):

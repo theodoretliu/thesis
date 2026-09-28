@@ -111,8 +111,8 @@ class Signatures(unittest.TestCase):
             ("def f(x: str) -> int: return 0", "unsupported annotation `str`"),
             ("def f(x: int) -> Tensor: return 0", "needs a shape"),
             (
-                'def f(x: Float[Tensor, "n"]) -> Float[Tensor, "#n"]: return x',
-                "only be in a parameter's shape",
+                'def f(x: Float[Tensor, "n"]) -> Float[Tensor, "#m"]: return x',
+                "needs `m` to be bound by a parameter",
             ),
             ("def f(x: tuple[int, int]) -> int: return 0", "only supported as return types"),
             ("def f(x: int) -> tuple[int, ...]: return 0", "only fixed-length tuples"),
@@ -349,7 +349,7 @@ class Bodies(unittest.TestCase):
             ("return", "must return a value"),
             ("return y", "`y` isn't a local variable"),
             ("return (*x, x)", "starred items in tuples"),
-            ("return x[0]", r"only slices like `x\[a:b\]`"),
+            ("return x[None]", r"only slices, ints and lists of ints"),
             ("return x.shape", "`x.shape` is only supported where a shape is expected"),
             ("return x.shape[0]", r"`x.shape\[i\]` isn't supported"),
             ("return x.frob()", "no stub for the method `.frob`"),
@@ -1044,7 +1044,7 @@ class Optionals(unittest.TestCase):
             def f(
                 x: Float[Tensor, "n"], a: Optional[int] = None, b: Optional[int] = None
             ) -> Float[Tensor, "n"]:
-                return x[0]
+                return x[None]
             """
         )
         self.assertEqual(len(errors), 1)
@@ -1780,14 +1780,260 @@ class Slices(unittest.TestCase):
 
     def test_errors(self):
         for src, msg in [
-            ("return x[0]", "only slices like"),
-            ("return x[..., :1]", "only slices like"),
+            ("return x[None]", "only slices, ints and lists of ints"),
+            ("return x[..., :1]", "only slices, ints and lists of ints"),
             ("y = x\n    y.T[:1] = x\n    return x", "only slices of local variables"),
         ]:
             with self.subTest(src):
                 _, errors = program(
                     "import torch\n"
                     'def f(x: Float[Tensor, "n"]) -> Float[Tensor, "n"]:\n'
+                    f"    {src}\n"
+                )
+                self.assertRegex(" ".join(errors), msg)
+
+
+class Indexing(unittest.TestCase):
+    def test_ints_and_lists(self):
+        [ret] = body(
+            """
+            def f(x: Float[Tensor, "b n d"], k: int) -> Float[Tensor, "b 1"]:
+                return x[:, [-1], k]
+            """
+        )
+        self.assertEqual(
+            ret[1],
+            [
+                "Slice",
+                ["Var", "x"],
+                [[None, None, None], ["List", [["Lit", -1]]], ["Index", ["Var", "k"]]],
+            ],
+        )
+
+
+LM = """
+import torch
+import torch.nn as nn
+from typing import Optional
+
+class LM(nn.Module):
+    def __init__(self, vocab: int, d: int):
+        super().__init__()
+        self.parts = nn.ModuleDict(
+            dict(
+                embed=nn.Embedding(vocab, d),
+                layers=nn.ModuleList([nn.Linear(d, d) for _ in range(2)]),
+            )
+        )
+        self.lit = nn.ModuleDict({"norm": nn.LayerNorm(d)})
+        self.head = nn.Linear(d, vocab)
+        self.parts.embed.weight = self.head.weight
+
+    def forward(
+        self, idx: Int[Tensor, "b t"], targets: Optional[Int[Tensor, "b t"]] = None
+    ) -> tuple[Float[Tensor, "b #t vocab"], Optional[Float[Tensor, ""]]]:
+        x = self.lit.norm(self.parts.embed(idx))
+        for layer in self.parts.layers:
+            x = layer(x)
+        if targets is None:
+            return self.head(x[:, [-1], :]), None
+        logits = self.head(x)
+        return logits, logits.sum()
+"""
+
+
+class ModuleDicts(unittest.TestCase):
+    def test_entries_are_built(self):
+        fs, errors = functions(LM)
+        self.assertEqual(errors, [])
+        stmts = [s[3] for s in fs["LM.__init__"]["body"] if s[0] == "At"]
+        # each entry's constructor is checked, like an attribute's
+        self.assertEqual(
+            stmts[0],
+            [
+                "Let",
+                "self.parts",
+                [
+                    "Tuple",
+                    [
+                        ["Call", "torch.nn.Embedding.__init__", [["Var", "vocab"], ["Var", "d"]]],
+                        [
+                            "Call",
+                            "torch.nn.Linear.__init__",
+                            [["Var", "d"], ["Var", "d"], ["Lit", 1]],
+                        ],
+                    ],
+                ],
+            ],
+        )
+        self.assertEqual(
+            stmts[1],
+            [
+                "Let",
+                "self.lit",
+                [
+                    "Tuple",
+                    [
+                        [
+                            "Call",
+                            "torch.nn.LayerNorm.__init__",
+                            [["Var", "d"], ["Scalar"], ["Lit", 1], ["Lit", 1]],
+                        ]
+                    ],
+                ],
+            ],
+        )
+        # weight tying through an entry
+        self.assertEqual(
+            stmts[3][2][:2],
+            ["Call", "torch.nn.Embedding.weight (assigned)"],
+        )
+
+    def test_entries_are_modules(self):
+        fs, _ = functions(LM)
+        stmts = [s[3] for s in fs["LM.forward"]["body"] if s[0] == "At"]
+        embed = [
+            "Call",
+            "torch.nn.Embedding.forward",
+            [["Var", "vocab"], ["Var", "d"], ["Var", "idx"]],
+        ]
+        self.assertEqual(
+            stmts[0], ["Let", "x", ["Call", "torch.nn.LayerNorm.forward", [["Var", "d"], embed]]]
+        )
+        loop = stmts[1]
+        self.assertEqual(loop[2][0][3][2][1], "torch.nn.Linear.forward")
+
+    def test_errors(self):
+        for line, msg in [
+            ("return self.parts(x)", "is an nn.ModuleDict, so it can't be called"),
+            ("return torch.relu(self.parts)", "`self.parts` is an nn.ModuleDict; only its entries"),
+            ("return self.parts.nope(x)", "`LM.parts` has no entry `nope`"),
+            ("return self.bad(x)", "an nn.ModuleDict must be built as"),
+        ]:
+            with self.subTest(line):
+                _, errors = program(
+                    f"""
+import torch
+import torch.nn as nn
+
+class LM(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.parts = nn.ModuleDict(dict(lin=nn.Linear(d, d)))
+        self.bad = nn.ModuleDict(dict(**{{}}))
+
+    def forward(self, x: Float[Tensor, "b d"]) -> Float[Tensor, "b d"]:
+        {line}
+"""
+                )
+                self.assertRegex(" ".join(errors), msg)
+        _, errors = program(
+            """
+import torch.nn as nn
+
+class LM(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.parts = nn.ModuleDict(dict(k=d))
+"""
+        )
+        self.assertRegex(" ".join(errors), "an nn.ModuleDict's entries must be modules")
+
+
+class OptionalReturns(unittest.TestCase):
+    def test_return_types(self):
+        fs, errors = functions(LM)
+        self.assertEqual(errors, [])
+        ret = [
+            "Tuple",
+            [
+                ["Array", [["Id", "b"], ["BroadcastDim", "t"], ["Id", "vocab"]]],
+                ["Optional", ["Array", []]],
+            ],
+        ]
+        self.assertEqual(fs["LM.forward"]["sig"]["ret"], ret)
+        self.assertEqual(fs["LM.forward[targets=None]"]["sig"]["ret"], ret)
+
+    def test_none_where_optional(self):
+        fs, _ = functions(LM)
+        # without targets, the loss is None: the empty tuple
+        self.assertEqual(returned(fs["LM.forward[targets=None]"])[1][1], ["Tuple", []])
+        f = only_function(
+            """
+            from typing import Optional
+
+            def f(x: Float[Tensor, "n"]) -> Optional[Float[Tensor, "n"]]:
+                y = None
+                return y
+            """
+        )
+        self.assertEqual(returned(f), ["Tuple", []])
+
+    def test_errors(self):
+        for src, msg in [
+            ("return x, None", "`None` isn't supported here"),
+            ("y = None\n    return x, y", "`y` is None here"),
+        ]:
+            with self.subTest(src):
+                _, errors = program(
+                    'def f(x: Float[Tensor, "n"]) -> tuple[Float[Tensor, "n"], Float[Tensor, "n"]]'
+                    ":\n"
+                    f"    {src}\n"
+                )
+                self.assertRegex(" ".join(errors), msg)
+        _, errors = program(
+            "from typing import Optional\n"
+            'def f(x: Float[Tensor, "n"]) -> Optional[Optional[Float[Tensor, "n"]]]:\n'
+            "    return x\n"
+        )
+        self.assertRegex(" ".join(errors), "`Optional` of an `Optional`")
+
+
+class Values(unittest.TestCase):
+    def test_bound_not_passed(self):
+        stmts = body(
+            """
+            import torch
+
+            def f(idx: Int[Tensor, "b t"]) -> Float[Tensor, "t"]:
+                device = idx.device
+                return torch.arange(0, idx.size(1), dtype=torch.long, device=device)
+            """
+        )
+        # device = idx.device has no IR, and arange gets only its ints
+        [ret] = stmts
+        self.assertEqual(ret[1][1], "torch.arange (overload 2)")
+        self.assertEqual(len(ret[1][2]), 3)
+
+    def test_stubs(self):
+        with self.assertRaisesRegex(FrontendError, "can't be `Optional`"):
+            load_stub_module(
+                Stubs(),
+                "m",
+                ast.parse(
+                    "class C(Module):\n"
+                    '    w: Optional[Float[Tensor, "n"]]\n'
+                    "    def __init__(self, n: int) -> None: ..."
+                ),
+            )
+        self.assertEqual(STUBS.kinds["device"], "torch.device")
+        self.assertEqual(STUBS.values["torch.long"], "torch.dtype")
+        self.assertEqual(STUBS.value_attrs["device"], "torch.device")
+        # not an Optional parameter, so not a variant of arange
+        self.assertEqual(STUBS.functions["torch.arange"].overloads[1].variants, {})
+
+    def test_errors(self):
+        for src, msg in [
+            ("d = x.device\n    return x + d", "`d` is a `torch.device`, which isn't a shape"),
+            ("return x + torch.long", "`torch.long` is a `torch.dtype`"),
+            ("return torch.zeros(3, dtype=x.device)", "`dtype` takes a `torch.dtype`"),
+            ("return torch.zeros(3, device=x.T.device)", "`device` takes a `torch.device`"),
+            ("return x.T.device", "`.device` is only supported on a local variable"),
+        ]:
+            with self.subTest(src):
+                _, errors = program(
+                    "import torch\n"
+                    'def f(x: Float[Tensor, "3"]) -> Float[Tensor, "3"]:\n'
                     f"    {src}\n"
                 )
                 self.assertRegex(" ".join(errors), msg)

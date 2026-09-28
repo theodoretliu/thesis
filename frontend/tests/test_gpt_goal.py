@@ -23,6 +23,8 @@ PASSING = {
     "MLP.forward",
     "Block.__init__",
     "Block.forward",
+    "GPT.__init__",
+    "GPT.forward",
 }
 
 

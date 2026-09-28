@@ -28,10 +28,12 @@ uvx --python 3.12 --with torch --with numpy --with jaxtyping --with beartype \
 - `test_progress` is a ratchet over `PASSING`. It fails if a method stops checking, or if one starts
   checking and isn't recorded.
 
-**Progress:** 8 of 11. Milestone 1 is done ([18-configs.md](18-configs.md)): `MLP` and `Block` check.
+**Progress:** 10 of 11. Milestone 1 is done ([18-configs.md](18-configs.md)): `MLP` and `Block` check.
 Milestone 2 is done ([19-flags.md](19-flags.md)): `LayerNorm` and `CausalSelfAttention.__init__` check.
 Milestone 3 is done ([20-causal-attention.md](20-causal-attention.md)): `CausalSelfAttention.forward`
-checks, and it and `Block.forward` infer `t <= block_size`.
+checks, and it and `Block.forward` infer `t <= block_size`. Milestone 4 is done
+([21-the-model.md](21-the-model.md)): `GPT.__init__` and `GPT.forward` check, and `forward` proves
+`t <= block_size` from its assert.
 
 ## What's missing
 
@@ -112,7 +114,7 @@ doc, as the Transformer's did.
 | 1. Configs (done) | N1, and `nn.GELU` | `MLP`, `Block` (4) |
 | 2. Flags (done) | N4 in `__init__`, N5, and `nn.Parameter`, `x.shape`, `F.layer_norm`, `hasattr`, `print` | `LayerNorm`, `CausalSelfAttention.__init__` (3) |
 | 3. Causal attention (done) | N2, N3, N4 in bodies, N9's `float`, N12, and `F.scaled_dot_product_attention`, `Tensor.split` | `CausalSelfAttention.forward` (1) |
-| 4. The model | N6, N7, N8, N9, N11, and `nn.ModuleDict`, `arange`'s keywords, `cross_entropy`'s `ignore_index` | `GPT.__init__`, `GPT.forward` (2) |
+| 4. The model (done) | N6, N7, N8, N9, N11, and `nn.ModuleDict`, `arange`'s keywords, `cross_entropy`'s `ignore_index` | `GPT.__init__`, `GPT.forward` (2) |
 | 5. Generation | N10, N13, and `topk`, `multinomial`, `cat`, `min` | `GPT.generate` (1) |
 
 Milestone 1 made a config's `int` fields instance dims, and its flags parameters of `__init__` only
@@ -120,7 +122,9 @@ Milestone 1 made a config's `int` fields instance dims, and its flags parameters
 all of a function's cases, and `Optional` parameters in stubs ([19-flags.md](19-flags.md)). Milestone 3
 makes attributes assigned in a branch per case, so `forward`'s `[self.flash=False]` case has the `bias`
 buffer, adds `self.training` as a flag, and infers a slice's stop within its dim as a relation that
-callers pass on ([20-causal-attention.md](20-causal-attention.md)).
+callers pass on ([20-causal-attention.md](20-causal-attention.md)). Milestone 4 makes an `nn.ModuleDict`'s
+entries a class of their own, adds int and list indexing, `Optional` and `#t` in return types, and values
+that aren't shapes, like `device` ([21-the-model.md](21-the-model.md)).
 Milestone 5 decides how a loop's invariant names the iteration count (N13). After each milestone, add the
 names that now check to `PASSING` in `test_gpt_goal.py`.
 
