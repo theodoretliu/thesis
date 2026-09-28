@@ -294,6 +294,8 @@ def attribute_type(ann: ast.expr, ints: list[str], stub: bool, what: str) -> Jso
     only name the instance's dims."""
     scope = Scope(stub, set(ints))
     typ, _ = typ_of(ann, scope, False, what)
+    if typ[0] == "Optional":
+        raise FrontendError(f"the annotation of {what} can't be `Optional`", ann)
     for a in arrays(typ):
         for name in entry_names(a[1]):
             if name not in ints:

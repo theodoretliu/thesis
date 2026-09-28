@@ -2006,6 +2006,16 @@ class Values(unittest.TestCase):
         self.assertEqual(len(ret[1][2]), 3)
 
     def test_stubs(self):
+        with self.assertRaisesRegex(FrontendError, "can't be `Optional`"):
+            load_stub_module(
+                Stubs(),
+                "m",
+                ast.parse(
+                    "class C(Module):\n"
+                    '    w: Optional[Float[Tensor, "n"]]\n'
+                    "    def __init__(self, n: int) -> None: ..."
+                ),
+            )
         self.assertEqual(STUBS.kinds["device"], "torch.device")
         self.assertEqual(STUBS.values["torch.long"], "torch.dtype")
         self.assertEqual(STUBS.value_attrs["device"], "torch.device")

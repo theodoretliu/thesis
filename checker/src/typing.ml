@@ -1480,6 +1480,9 @@ let rec check_ret_type_with_mapping (rettyp : typ)
                 let v =
                   match expr_of_dim (Id x) mapping with
                   | Ok v -> v
+                  (* an int parameter of unknown value, as for Id *)
+                  | Error (Unknown_param _) ->
+                      Z3utils.mk_int (Z3utils.fresh_dim ())
                   | Error err -> raise (TypeError (show_dim_error err))
                 in
                 let d = Z3utils.fresh_dim ~label:("#" ^ string_of_expr v) () in
