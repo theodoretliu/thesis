@@ -54,6 +54,7 @@ from .ir import Json
 from .shapes import Scope
 from .signatures import (
     NONE,
+    OPAQUE,
     FrontendError,
     Overload,
     Param,
@@ -97,6 +98,9 @@ class ModuleClass:
     sources: dict[str, tuple[str, str]] = field(default_factory=dict)
     # user classes: __init__'s bool parameters, which may be tested as flags
     flags: list[str] = field(default_factory=list)
+    # an nn.ModuleDict attribute's entries, as a class of their own (see
+    # dict_class)
+    module_dict: bool = False
 
     @property
     def init(self) -> str:
@@ -183,9 +187,20 @@ class Stubs:
     methods: dict[str, list[str]] = field(default_factory=dict)
     properties: dict[str, list[str]] = field(default_factory=dict)
     classes: dict[str, ModuleClass] = field(default_factory=dict)
+    # kinds of values that aren't shapes, like torch.device, by class name;
+    # the constants of each kind (torch.long); and attributes of arrays that
+    # are one (x.device)
+    kinds: dict[str, str] = field(default_factory=dict)
+    values: dict[str, str] = field(default_factory=dict)
+    value_attrs: dict[str, str] = field(default_factory=dict)
 
     def add(self, qualname: str, ov: Overload) -> None:
         self.functions.setdefault(qualname, Callee(qualname, [])).overloads.append(ov)
+
+    def kind(self, ann: ast.expr) -> str | None:
+        """The kind of value an annotation names, e.g. device for torch.device."""
+        name = last(ann)
+        return None if name is None else self.kinds.get(name)
 
 
 def load_stubs(dirs: Sequence[Path]) -> Stubs:
@@ -207,9 +222,10 @@ def load_stubs(dirs: Sequence[Path]) -> Stubs:
     return stubs
 
 
-def stub_overload(node: ast.FunctionDef, **kwargs) -> Overload:
+def stub_overload(node: ast.FunctionDef, stubs: Stubs, **kwargs) -> Overload:
     """A stub's signature, and one for each choice of which of its Optional
     parameters are None."""
+    kwargs["value_kind"] = stubs.kind
     ov = build_signature(node, stub=True, **kwargs)[0]
     optional = [p.name for p in ov.params if p.optional]
     if len(optional) > MAX_OPTIONAL:
@@ -221,13 +237,38 @@ def stub_overload(node: ast.FunctionDef, **kwargs) -> Overload:
 
 
 def load_stub_module(stubs: Stubs, module: str, tree: ast.Module) -> None:
+    # a class with nothing in it is a kind of value that isn't a shape, like
+    # torch.device. they come first, since annotations may name them
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and is_value_class(node):
+            stubs.kinds[node.name] = f"{module}.{node.name}"
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
-            stubs.add(f"{module}.{node.name}", stub_overload(node))
+            stubs.add(f"{module}.{node.name}", stub_overload(node, stubs))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            # a constant of a kind, e.g. long: dtype
+            kind = stubs.kind(node.annotation)
+            if kind is None or node.value is not None:
+                raise FrontendError(
+                    "a stub's module-level annotation declares a constant of a kind of value, "
+                    "like `long: dtype`",
+                    node,
+                )
+            stubs.values[f"{module}.{node.target.id}"] = kind
         elif isinstance(node, ast.ClassDef) and any(last(b) == "Module" for b in node.bases):
             load_module_class(stubs, f"{module}.{node.name}", node)
-        elif isinstance(node, ast.ClassDef):
+        elif isinstance(node, ast.ClassDef) and not is_value_class(node):
             for m in node.body:
+                if isinstance(m, ast.AnnAssign) and isinstance(m.target, ast.Name):
+                    # an attribute that's a value of a kind, e.g. device: device
+                    kind = stubs.kind(m.annotation)
+                    if kind is None:
+                        raise FrontendError(
+                            "a stub class's annotation declares an attribute of a kind of "
+                            "value, like `device: device`",
+                            m,
+                        )
+                    stubs.value_attrs[m.target.id] = kind
                 if not isinstance(m, ast.FunctionDef):
                     continue
                 qualname = f"{module}.{node.name}.{m.name}"
@@ -236,7 +277,15 @@ def load_stub_module(stubs: Stubs, module: str, tree: ast.Module) -> None:
                 names = table.setdefault(m.name, [])
                 if qualname not in names:
                     names.append(qualname)
-                stubs.add(qualname, stub_overload(m))
+                stubs.add(qualname, stub_overload(m, stubs))
+
+
+def is_value_class(node: ast.ClassDef) -> bool:
+    """A stub class with nothing in it, like `class device: ...`."""
+    return not node.bases and all(
+        isinstance(s, ast.Pass) or (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+        for s in node.body
+    )
 
 
 def load_module_class(stubs: Stubs, qualname: str, node: ast.ClassDef) -> None:
@@ -251,9 +300,9 @@ def load_module_class(stubs: Stubs, qualname: str, node: ast.ClassDef) -> None:
     stubs.classes[qualname] = cls
     for m in methods:
         if m.name == "__init__":
-            ov = stub_overload(m, init=True)
+            ov = stub_overload(m, stubs, init=True)
         else:
-            ov = stub_overload(m, instance=cls.ints)
+            ov = stub_overload(m, stubs, instance=cls.ints)
             if cls.ints:
                 for sig in [ov.sig, *ov.variants.values()]:
                     sig["instances"] = cls.instances()
@@ -329,6 +378,11 @@ TRAINING = "self.training"
 
 MODULE_LIST = "torch.nn.ModuleList"
 MODULE_LIST_FORM = "`nn.ModuleList([Module(...) for _ in range(n)])`"
+MODULE_DICT = "torch.nn.ModuleDict"
+MODULE_DICT_FORM = "`nn.ModuleDict(dict(name=Module(...), ...))`"
+# a module dict's name for self, which no Python name can be: its entries are
+# evaluated without one
+DICT_SELF = "(dict)"
 DATACLASS = "dataclasses.dataclass"
 
 
@@ -428,6 +482,7 @@ class Translator:
         self.config_fields: set[tuple[str, str]] = set()  # attributes config_value is in
         self.configs: dict[str, ConfigClass] = {}  # user config classes
         self.nones: set[str] = set()  # locals that are None here
+        self.value_locals: dict[str, str] = {}  # locals that aren't shapes, e.g. a torch.device
         self.after_loop: set[str] = set()  # names bound only inside a loop's body
         self.owners: dict[str, str] = {}  # a checker function's Python function
         self.cls: ModuleClass | None = None  # the class of the method translated
@@ -444,6 +499,7 @@ class Translator:
         # case translated. None while being computed, to catch attributes
         # defined by each other
         self.field_terms: dict[tuple[str, str, bool], list[Json] | None] = {}
+        self.dict_classes: dict[int, ModuleClass] = {}  # by the nn.ModuleDict(...) call
 
     def translate(self, tree: ast.Module) -> Json:
         # imports and configs first: a module's instance dims may come from a
@@ -694,7 +750,7 @@ class Translator:
         instance dims, a config as its ints and flags, and None not at all."""
         out: list[Json] = []
         for p, t in zip(params, terms):
-            if t is NONE:
+            if t is NONE or t is OPAQUE:
                 continue
             if p.module is not None:
                 out += t
@@ -775,12 +831,13 @@ class Translator:
 
     def is_local(self, name: str) -> bool:
         """A local variable of the body translated: a value, a module or config
-        parameter, or None."""
+        parameter, None, or a value that isn't a shape."""
         return (
             name in self.locals
             or name in self.module_locals
             or name in self.config_locals
             or name in self.nones
+            or name in self.value_locals
         )
 
     def class_named(self, e: ast.expr) -> ModuleClass | None:
@@ -804,10 +861,61 @@ class Translator:
             if base is None or not base.cls.user:
                 return None
             value = self.field_value(base, e.attr, e)
+            cls = self.dict_class(base.cls, e.attr, value)
+            if cls is not None:
+                return Instance(cls, base.ints, base.own)
             if not (isinstance(value, ast.Call) and self.in_class(base.cls, value.func)):
                 return None
             return self.field_instance(base, e.attr, e)
         return None
+
+    def dict_class(self, cls: ModuleClass, name: str, value: ast.expr | None) -> ModuleClass | None:
+        """For an attribute that __init__ sets to an nn.ModuleDict, like
+        self.transformer: its entries, as the fields of a class of their own.
+        It has cls's instance dims and configs, which the entries' arguments
+        are over, so self.transformer.wte is built like an attribute of cls."""
+        if not isinstance(value, ast.Call):
+            return None
+        if id(value) in self.dict_classes:
+            return self.dict_classes[id(value)]
+        entries = self.as_instance(cls, lambda: self.dict_entries(value))
+        if entries is None:
+            return None
+        d = ModuleClass(
+            f"{cls.name}.{name}",
+            cls.ints,
+            user=True,
+            fields=dict(entries),
+            self_name=DICT_SELF,
+            configs=cls.configs,
+            sources=cls.sources,
+            flags=cls.flags,
+            module_dict=True,
+        )
+        self.dict_classes[id(value)] = d
+        return d
+
+    def dict_entries(self, value: ast.Call) -> dict[str, ast.expr] | None:
+        """For nn.ModuleDict(dict(k=v, ...)) or nn.ModuleDict({"k": v, ...}),
+        its entries; None if value isn't an nn.ModuleDict."""
+        if self.qualname(value.func) != MODULE_DICT:
+            return None
+        arg = value.args[0] if len(value.args) == 1 and not value.keywords else None
+        if (
+            isinstance(arg, ast.Call)
+            and self.is_builtin(arg.func, "dict")
+            and not arg.args
+            and all(k.arg is not None for k in arg.keywords)
+        ):
+            return {k.arg: k.value for k in arg.keywords}
+        if isinstance(arg, ast.Dict) and all(
+            isinstance(k, ast.Constant) and isinstance(k.value, str) and k.value.isidentifier()
+            for k in arg.keys
+        ):
+            return {k.value: v for k, v in zip(arg.keys, arg.values)}
+        raise FrontendError(
+            f"an nn.ModuleDict must be built as {MODULE_DICT_FORM}, with names for keys", value
+        )
 
     def in_class(self, cls: ModuleClass, e: ast.expr) -> ModuleClass | None:
         """class_named, where the names are those of cls's __init__."""
@@ -824,6 +932,7 @@ class Translator:
             self.module_locals,
             self.config_locals,
             self.nones,
+            self.value_locals,
             self.terms,
             self.cls,
             self.self_name,
@@ -831,7 +940,7 @@ class Translator:
             self.in_instance,
         )
         self.locals = {n: n for n in cls.ints if n not in cls.sources}
-        self.module_locals, self.nones = {}, set()
+        self.module_locals, self.nones, self.value_locals = {}, set(), {}
         self.config_locals = {p: Config.of(c, flags=False) for p, c in cls.configs.items()}
         self.terms = {}
         self.cls, self.self_name, self.in_init, self.in_instance = cls, cls.self_name, False, True
@@ -845,6 +954,7 @@ class Translator:
                 self.module_locals,
                 self.config_locals,
                 self.nones,
+                self.value_locals,
                 self.terms,
                 self.cls,
                 self.self_name,
@@ -1051,6 +1161,13 @@ class Translator:
             raise FrontendError("calling `__init__` isn't supported", e)
         if name in inst.cls.attrs:
             raise FrontendError(f"`{name}` isn't a module, so it can't be called", e)
+        if inst.cls.module_dict and name == "forward":
+            raise FrontendError(
+                f"`{inst.cls.name}` is an nn.ModuleDict, so it can't be called; its entries can",
+                e,
+            )
+        if inst.cls.module_dict and name not in inst.cls.fields:
+            raise FrontendError(f"`{inst.cls.name}` has no entry `{name}`", e)
         if inst.cls.user:
             f = self.functions.get(key)
             if name in inst.cls.fields:
@@ -1132,6 +1249,7 @@ class Translator:
             n for c in self.config_locals.values() for n in c.cls.passed
         }
         self.nones = set(v.nones)
+        self.value_locals = {}
         self.after_loop = set()
         self.sig = case.sig
         self.case = case.flags
@@ -1251,6 +1369,7 @@ class Translator:
         modules_before = dict(self.module_locals)
         configs_before = dict(self.config_locals)
         nones_before = set(self.nones)
+        values_before = dict(self.value_locals)
         assigned = {
             n.id
             for stmt in s.body
@@ -1276,11 +1395,12 @@ class Translator:
         # loop. one the body binds, and the loop variable, may be unbound or
         # hold anything, so they're dropped
         self.locals, self.module_locals, self.nones = locals_before, modules_before, nones_before
-        self.config_locals = configs_before
+        self.config_locals, self.value_locals = configs_before, values_before
         for name in (assigned | {target}) - set(carried):
             self.locals.pop(name, None)
             self.module_locals.pop(name, None)
             self.nones.discard(name)
+            self.value_locals.pop(name, None)
             self.after_loop.add(name)
         return ir.Loop(pairs, body)
 
@@ -1411,7 +1531,7 @@ class Translator:
             return False
         if "training" in base.cls.attrs:
             return False
-        if not base.own:
+        if not base.own or base.cls.module_dict:
             raise FrontendError(
                 f"`{ast.unparse(e)}` is a flag of another module; only the flags of `self` "
                 "can be tested",
@@ -1605,6 +1725,13 @@ class Translator:
                 raise FrontendError(
                     "only assignments to a name, or unpacking into names, are supported", s
                 )
+            kind = self.value_kind(s.value)
+            if kind is not None:
+                # device = idx.device: not a shape, so it's only bound
+                self.assign(target.id)
+                del self.locals[target.id]
+                self.value_locals[target.id] = kind
+                return None
             t = self.term(s.value)
             return ir.Let(self.assign(target.id), t)
         if isinstance(s, ast.AnnAssign):
@@ -1636,10 +1763,29 @@ class Translator:
                 target = ast.Attribute(ast.Name(self.self_name, ast.Load()), name, ast.Store())
                 return self.set_attribute(ast.copy_location(target, s), value)
         if isinstance(s, ast.Return):
-            if s.value is None or (isinstance(s.value, ast.Constant) and s.value.value is None):
-                if not self.returns_none:
+            ret = self.sig["ret"]
+            if (
+                s.value is None
+                or is_none(s.value)
+                or (ret[0] == "Optional" and self.static_none(s.value))
+            ):
+                # None, which an Optional return type allows too
+                if not (self.returns_none or ret[0] == "Optional"):
                     raise FrontendError("a checked function must return a value", s)
                 return ir.Return(ir.Tuple([]))
+            if (
+                isinstance(s.value, ast.Tuple)
+                and ret[0] == "Tuple"
+                and len(ret[1]) == len(s.value.elts)
+                and not any(isinstance(x, ast.Starred) for x in s.value.elts)
+            ):
+                # an item that's None where the return type is Optional, like
+                # the loss without targets
+                items = [
+                    ir.Tuple([]) if t[0] == "Optional" and self.static_none(x) else self.term(x)
+                    for x, t in zip(s.value.elts, ret[1])
+                ]
+                return ir.Return(ir.Tuple(items))
             return ir.Return(self.term(s.value))
         kind = {
             ast.If: "`if`", ast.For: "`for`", ast.While: "`while`", ast.With: "`with`",
@@ -1651,6 +1797,7 @@ class Translator:
 
     def assign(self, name: str) -> str:
         self.nones.discard(name)
+        self.value_locals.pop(name, None)
         self.after_loop.discard(name)
         self.module_locals.pop(name, None)
         self.config_locals.pop(name, None)
@@ -1697,20 +1844,37 @@ class Translator:
             return None
         if self.static_none(value):
             return ir.Let(name, ir.Tuple([]))
+        cfg = self.config_value(value)
+        if cfg is not None:
+            # self.config = config: later reads go through the field
+            t = ir.Tuple([self.config_field(cfg, n, value) for n in cfg.cls.passed])
+            return ir.Let(name, t)
+        # later statements read self.f from the class's fields, not this name
+        return ir.Let(name, self.built(value, module=False))
+
+    def built(self, value: ast.expr, module: bool) -> Json:
+        """The value of an attribute __init__ assigns: a module's constructor
+        call, or any other term unless it must be a module (an entry of an
+        nn.ModuleDict)."""
         element = self.list_element(value)
         if element is not None:
             # the modules are all built alike, so checking one constructor
             # call checks them all (and asks for more when there are none)
             value = element
-        cfg = self.config_value(value)
-        if cfg is not None:
-            # self.config = config: later reads go through the field
-            t = ir.Tuple([self.config_field(cfg, n, value) for n in cfg.cls.passed])
-            return ir.Let(f"{target.value.id}.{target.attr}", t)
+        entries = self.dict_entries(value) if isinstance(value, ast.Call) else None
+        if entries is not None:
+            # each entry is built, like an attribute of its own
+            return ir.Tuple([self.built(v, module=True) for v in entries.values()])
         cls = self.class_named(value.func) if isinstance(value, ast.Call) else None
-        t = self.construct(cls, value) if cls is not None else self.term(value)
-        # later statements read self.f from the class's fields, not this name
-        return ir.Let(f"{target.value.id}.{target.attr}", t)
+        if cls is not None:
+            return self.construct(cls, value)
+        if module:
+            raise FrontendError(
+                f"an nn.ModuleDict's entries must be modules, e.g. `nn.Linear(...)`: "
+                f"`{ast.unparse(value)}`",
+                value,
+            )
+        return self.term(value)
 
     def text(self, node: ast.AST) -> str:
         src = ast.get_source_segment(self.source, node) or ast.unparse(node)
@@ -1732,6 +1896,8 @@ class Translator:
                 return ir.Var(self.locals[e.id])
             if e.id in self.nones:
                 raise FrontendError(f"`{e.id}` is None here", e)
+            if e.id in self.value_locals:
+                raise FrontendError(self.value_error(e, self.value_locals[e.id]), e)
             if e.id in self.config_locals:
                 raise FrontendError(
                     f"`{e.id}` is a config: only its fields can be used, or it can be passed on",
@@ -1795,19 +1961,31 @@ class Translator:
         raise FrontendError(f"unsupported expression `{ast.unparse(e)}`", e)
 
     def subscript(self, e: ast.Subscript) -> Json:
-        """x[a:b:c, ...]: slices of x's leading dims, with Python's rules for
-        negative and out-of-range bounds (see slice_dim in the checker)."""
+        """x[a:b:c, i, [j], ...]: each item indexes one of x's leading dims. A
+        slice has Python's rules for negative and out-of-range bounds (see
+        slice_dim in the checker), an int drops the dim, and a list of ints
+        keeps it with as many entries. An int or a list must be in range."""
         items = e.slice.elts if isinstance(e.slice, ast.Tuple) else [e.slice]
         out = []
         for item in items:
-            if not isinstance(item, ast.Slice):
+            if isinstance(item, ast.Slice):
+                parts = (item.lower, item.upper, item.step)
+                out.append([None if p is None or is_none(p) else self.term(p) for p in parts])
+            elif isinstance(item, ast.List):
+                out.append(ir.ListItem([self.term(x) for x in item.elts]))
+            elif (
+                isinstance(item, (ast.Starred, ast.Tuple))
+                or is_none(item)
+                or (isinstance(item, ast.Constant) and item.value is Ellipsis)
+            ):
                 raise FrontendError(
-                    "only slices like `x[a:b]` or `x[:, ::2]` are supported in indexing yet: "
+                    "only slices, ints and lists of ints are supported in indexing yet: "
                     f"`{self.text(e)}`",
                     e,
                 )
-            parts = (item.lower, item.upper, item.step)
-            out.append([None if p is None or is_none(p) else self.term(p) for p in parts])
+            else:
+                # an int; the checker rejects anything else, like a mask
+                out.append(ir.IndexItem(self.term(item)))
         return ir.Slice(self.term(e.value), out)
 
     def set_slice(self, target: ast.Subscript, value: ast.expr, s: ast.stmt) -> Json:
@@ -1899,7 +2077,14 @@ class Translator:
             key = f"{base.cls.name}.{e.attr}"
             if e.attr not in base.cls.fields and (key in self.functions or key in self.unannotated):
                 raise FrontendError(f"`{ast.unparse(e)}` is a method; call it", e)
-            if self.instance(e) is not None:
+            inst = self.instance(e)
+            if inst is not None and inst.cls.module_dict:
+                raise FrontendError(
+                    f"`{ast.unparse(e)}` is an nn.ModuleDict; only its entries can be used, "
+                    f"e.g. `{ast.unparse(e)}.name`",
+                    e,
+                )
+            if inst is not None:
                 raise FrontendError(
                     f"`{ast.unparse(e)}` is a module; only calls to it are supported", e
                 )
@@ -1918,6 +2103,13 @@ class Translator:
             if self.static_none(e):
                 raise FrontendError(f"`{ast.unparse(e)}` is None here", e)
             return self.value_field(base, e.attr, e)
+        kind = self.value_kind(e)
+        if kind is not None:
+            raise FrontendError(self.value_error(e, kind), e)
+        if e.attr in self.stubs.value_attrs and self.instance(e.value) is None:
+            raise FrontendError(
+                f"`.{e.attr}` is only supported on a local variable, e.g. `x.{e.attr}`", e
+            )
         if self.qualname(e) is not None:
             raise FrontendError(f"module attributes like `{ast.unparse(e)}` aren't supported", e)
         if e.attr == "shape":
@@ -1931,6 +2123,27 @@ class Translator:
             raise FrontendError(f"`.{e.attr}` is a method; call it", e)
         callee = self.member(self.stubs.properties, e, "attribute")
         return self.stub_call(callee, [("receiver", self.term(e.value))], {}, e)
+
+    def value_kind(self, e: ast.expr) -> str | None:
+        """The kind of a value that isn't a shape, if e is one: a stub's
+        constant (torch.long is a torch.dtype), an attribute of a local array
+        that the stubs declare (x.device), or a local holding one."""
+        if isinstance(e, ast.Name):
+            return self.value_locals.get(e.id)
+        if not isinstance(e, ast.Attribute):
+            return None
+        q = self.qualname(e)
+        if q is not None:
+            return self.stubs.values.get(q)
+        if isinstance(e.value, ast.Name) and e.value.id in self.locals:
+            return self.stubs.value_attrs.get(e.attr)
+        return None
+
+    def value_error(self, e: ast.expr, kind: str) -> str:
+        return (
+            f"`{ast.unparse(e)}` is a `{kind}`, which isn't a shape: it can only be passed "
+            "where one is expected, or assigned to a name"
+        )
 
     def member(self, table: dict[str, list[str]], e: ast.Attribute, what: str) -> Callee:
         names = table.get(e.attr, [])
@@ -1996,7 +2209,8 @@ class Translator:
             ov, own = callee.overloads[i], nones_of(i, terms)
             sigs.append(ov.variants[frozenset(own)] if own else ov.sig)
         self.env[key] = sigs
-        return ir.Call(key, list(prefix) + [t for t in bound[0][1] if t is not NONE])
+        passed = [t for t in bound[0][1] if t is not NONE and t is not OPAQUE]
+        return ir.Call(key, list(prefix) + passed)
 
     def bind(
         self, params: list[Param], args: list[Arg], keywords: dict[str, ast.expr]
@@ -2088,6 +2302,10 @@ class Translator:
         and for a module parameter it's the instance's dims."""
         if isinstance(a, tuple):
             return a[1]
+        if p is not None and p.value is not None:
+            if is_none(a) or self.value_kind(a) == p.value:
+                return OPAQUE
+            raise BindError(f"`{p.name}` takes a `{p.value}`")
         if p is not None and self.none_value(a):
             if p.optional:
                 return NONE

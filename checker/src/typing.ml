@@ -36,6 +36,9 @@ type typ =
   | IntExpr of entry (* an int whose value is the given dimension expression *)
   | TypeLiteralInt of int (* python Literal[i]; bools are 0 and 1 *)
   | TypeTuple of typ list (* only as a return type *)
+  | TypeOptional of typ
+    (* only in a return type: None or the type, e.g. a loss that's only
+       computed when targets are given *)
 [@@deriving show]
 
 type funtyp = (string * typ) list * typ
@@ -72,6 +75,9 @@ type arg =
   | Int (* an int with no known value or identity *)
   | SymInt of string (* an int whose value is the named z3 variable *)
   | Tuple of arg list
+  | Maybe of arg
+    (* an Optional result: None or the value. only unpacking or returning it
+       is supported, since which one isn't known *)
 [@@deriving show]
 
 exception TypeError of string
@@ -158,6 +164,7 @@ let rec string_of_typ = function
   | TypeTuple [] -> "None"
   | TypeTuple ts ->
       "tuple[" ^ String.concat ", " (List.map string_of_typ ts) ^ "]"
+  | TypeOptional t -> "Optional[" ^ string_of_typ t ^ "]"
 
 let rec string_of_arg = function
   | Dimensions l -> "array of shape " ^ string_of_dims l
@@ -166,6 +173,7 @@ let rec string_of_arg = function
   | SymInt v -> "int " ^ string_of_dim v
   | Tuple [] -> "None"
   | Tuple l -> "tuple (" ^ String.concat ", " (List.map string_of_arg l) ^ ")"
+  | Maybe v -> "None or " ^ string_of_arg v
 
 module StringMap = Map.Make (struct
   type t = string
@@ -341,6 +349,8 @@ let check_args_signature (funargtyps : (string * typ) list) :
       match arg with
       | TypeInt | TypeLiteralInt _ -> (vars, spread_vars, new_param_var_mapping)
       | TypeTuple _ -> raise (KindError "Tuple parameters aren't supported")
+      | TypeOptional _ ->
+          raise (KindError "Optional is only supported in a return type")
       | IntExpr e ->
           (* e may only mention what earlier parameters bound *)
           check_arith_signature (vars, spread_vars, param_var_mapping) e;
@@ -391,10 +401,26 @@ let check_signature (sg : signature) : unit =
     | TypeInt | TypeLiteralInt _ -> ()
     | IntExpr e -> check_arith_signature ctx e
     | TypeTuple ts -> List.iter check_ret ts
+    | TypeOptional (TypeOptional _) ->
+        raise (KindError "Optional of an Optional isn't supported")
+    | TypeOptional t -> check_ret t
     | Nparray l ->
         ignore
           (List.fold_left
-             (fun acc e -> check_entry_signature acc e false)
+             (fun acc e ->
+               match e with
+               | BroadcastDim x ->
+                   (* in a return type, #x is x or 1 for an x the parameters
+                      bound: it can't bind x itself *)
+                   let vars, _, params = acc in
+                   if not (StringSet.mem x vars || is_int_param x params) then
+                     raise
+                       (KindError
+                          ("A broadcastable dim " ^ string_of_entry e
+                         ^ " in the return type needs " ^ x
+                         ^ " to be bound by a parameter"));
+                   acc
+               | e -> check_entry_signature acc e false)
              ctx l)
   in
   check_ret sg.ret
@@ -1384,6 +1410,7 @@ let rec check_ret_type_with_mapping (rettyp : typ)
   | TypeLiteralInt i -> LiteralInt i
   | TypeTuple ts ->
       Tuple (List.map (fun t -> check_ret_type_with_mapping t mapping) ts)
+  | TypeOptional t -> Maybe (check_ret_type_with_mapping t mapping)
   | IntExpr e -> (
       match expr_of_dim e mapping with
       | Ok e ->
@@ -1447,8 +1474,26 @@ let rec check_ret_type_with_mapping (rettyp : typ)
                 let gend_var = mk_int_var i in
 
                 gend_var :: check_ret_type_with_mapping' t
-            | Broadcast _ | BroadcastDim _ ->
-                raise (TypeError "Broadcast in return type")
+            | BroadcastDim x ->
+                (* x or 1, e.g. logits of length t or, for the last
+                   position only, 1: which one isn't known here *)
+                let v =
+                  match expr_of_dim (Id x) mapping with
+                  | Ok v -> v
+                  | Error err -> raise (TypeError (show_dim_error err))
+                in
+                let d = Z3utils.fresh_dim ~label:("#" ^ string_of_expr v) () in
+                let ed = Z3utils.mk_int d in
+                Z3.Solver.add Z3utils.solver
+                  [
+                    Z3.Boolean.mk_or Z3utils.ctx
+                      [
+                        Z3.Boolean.mk_eq Z3utils.ctx ed v;
+                        Z3.Boolean.mk_eq Z3utils.ctx ed (mk_int_numeral 1);
+                      ];
+                  ];
+                d :: check_ret_type_with_mapping' t
+            | Broadcast _ -> raise (TypeError "Broadcast in return type")
             end
       in
 
@@ -1709,8 +1754,17 @@ type term =
   | Shape of term list (* ints used as a shape, e.g. reshape(x, (n, d)) *)
   | Scalar (* a float, which broadcasts like a 0-d array *)
   | Tup of term list (* a tuple, e.g. return a, b *)
-  | Slice of term * (term option * term option * term option) list
-    (* x[start:stop:step, ...]: slices of x's leading dims *)
+  | Slice of term * term item list
+    (* x[start:stop:step, i, [j], ...]: each item takes one of x's leading
+       dims *)
+[@@deriving show]
+
+(* an item of an index, x[...] *)
+and 'a item =
+  | Range of 'a option * 'a option * 'a option
+    (* start:stop:step, a dim of the positions in range *)
+  | Point of 'a (* i, which drops the dim *)
+  | Points of 'a list (* [i, j], a dim of as many positions *)
 [@@deriving show]
 
 type stmt =
@@ -1741,9 +1795,13 @@ let rec string_of_term = function
   | Tup ts -> "(" ^ String.concat ", " (List.map string_of_term ts) ^ ")"
   | Slice (t, items) ->
       let part = function None -> "" | Some t -> string_of_term t in
-      let item (a, b, c) =
-        part a ^ ":" ^ part b
-        ^ match c with None -> "" | Some _ -> ":" ^ part c
+      let item = function
+        | Range (a, b, c) -> (
+            part a ^ ":" ^ part b
+            ^ match c with None -> "" | Some _ -> ":" ^ part c)
+        | Point i -> string_of_term i
+        | Points is ->
+            "[" ^ String.concat ", " (List.map string_of_term is) ^ "]"
       in
       string_of_term t ^ "[" ^ String.concat ", " (List.map item items) ^ "]"
 
@@ -1780,6 +1838,7 @@ let rec same_value (before : arg) (after : arg) : bool =
   | Int, (Int | SymInt _ | LiteralInt _) -> true
   | Tuple a, Tuple b ->
       List.length a = List.length b && List.for_all2 same_value a b
+  | Maybe a, Maybe b -> same_value a b
   | _ -> (
       match (int_expr before, int_expr after) with
       | Some a, Some b -> Z3utils.prove_int_eq a b
@@ -1804,7 +1863,7 @@ let dim_of_int (v : arg) : string =
            ^ " may be negative"))
   (* like zeros of an opaque int: some size, unknown *)
   | Int -> Z3utils.fresh_dim ~label:"?" ()
-  | Dimensions _ | Tuple _ ->
+  | Dimensions _ | Tuple _ | Maybe _ ->
       raise (TypeError ("expected an int in a shape, got " ^ string_of_arg v))
 
 (* the dims of ints used as a shape. one may be -1, which a callee's requires
@@ -1927,14 +1986,55 @@ let slice_dim (dim : string)
       Z3.Solver.add Z3utils.solver [ mk_le ctx (Z3utils.mk_int d) n ];
       d
 
-(* the dims of x[items]: each item slices one of x's leading dims *)
-let slice_dims (dims : string list) items : string list =
+(* an index into dim, which must be in [-dim, dim), as torch raises an
+   IndexError otherwise. a size fact may be inferred, e.g. n >= 1 for -1 *)
+let check_index (dim : string) (i : arg) : unit =
+  let open Z3.Arithmetic in
+  let ctx = Z3utils.ctx and n = Z3utils.mk_int dim in
+  let within e =
+    Z3.Boolean.mk_and ctx [ mk_le ctx (mk_unary_minus ctx n) e; mk_lt ctx e n ]
+  in
+  let ok =
+    match i with
+    | LiteralInt k -> prove_or_infer (within (mk_int_numeral k))
+    | SymInt v -> prove_or_infer (within (Z3utils.mk_int v))
+    | Int -> false
+    | v -> raise (TypeError ("an index must be an int, got " ^ string_of_arg v))
+  in
+  if not ok then
+    raise
+      (TypeError
+         (Printf.sprintf "index %s may be out of range for a dim of size %s"
+            (match i with
+            | LiteralInt k -> string_of_int k
+            | SymInt v -> string_of_dim v
+            | _ -> "of unknown value")
+            (string_of_dim dim)))
+
+(* the dims of x[items]: each item takes one of x's leading dims. with a
+   list, torch's advanced indexing moves dims around unless it's the only
+   one, and an int then counts as one too, so that's all that's supported *)
+let slice_dims (dims : string list) (items : arg item list) : string list =
+  let lists =
+    List.length (List.filter (function Points _ -> true | _ -> false) items)
+  and points = List.exists (function Point _ -> true | _ -> false) items in
+  if lists > 1 || (lists = 1 && points) then
+    raise
+      (TypeError
+         "only one list index is supported, and not with int indices, as torch \
+          would move the dims they index");
   let rec go dims items =
     match (items, Z3utils.expand dims) with
     | [], rest -> rest
-    | _ :: _, [] -> raise (TypeError "too many slices for the array's dims")
-    | item :: items, d :: rest when not (Z3utils.is_list_var d) ->
-        slice_dim d item :: go rest items
+    | _ :: _, [] -> raise (TypeError "too many indices for the array's dims")
+    | Range (a, b, c) :: items, d :: rest when not (Z3utils.is_list_var d) ->
+        slice_dim d (a, b, c) :: go rest items
+    | Point i :: items, d :: rest when not (Z3utils.is_list_var d) ->
+        check_index d i;
+        go rest items
+    | Points is :: items, d :: rest when not (Z3utils.is_list_var d) ->
+        List.iter (check_index d) is;
+        Z3utils.add_to_solver (mk_int_numeral (List.length is)) :: go rest items
     | _ :: _, (d :: _ as dims) ->
         if Z3utils.can_unfold d then (
           Z3utils.unfold ~right:false d;
@@ -2043,6 +2143,7 @@ let rigid_param (mapping : mapping_type) ((name, typ) : string * typ) :
         in
         (Dimensions dims, mapping)
     | TypeTuple _ -> raise (TypeError "tuple parameters aren't supported")
+    | TypeOptional _ -> raise (TypeError "Optional parameters aren't supported")
   in
   (arg, (var_mapping, spread_mapping, StringMap.add name arg param_mapping))
 
@@ -2062,6 +2163,15 @@ let rec match_typ (what : string) (typ : typ) (value : arg)
         (TypeError
            (Printf.sprintf "%s is %s, expected a tuple of %d" what
               (string_of_arg value) (List.length ts)))
+  (* None, or a value of the type. an Optional result checks as its value,
+     since its None is one too *)
+  | TypeOptional _, Tuple [] -> mapping
+  | TypeOptional t, Maybe v | TypeOptional t, v -> match_typ what t v mapping
+  | _, Maybe _ ->
+      raise
+        (TypeError
+           (Printf.sprintf "%s is %s, which may be None, expected %s" what
+              (string_of_arg value) (string_of_typ typ)))
   | _ -> match_one what typ value mapping
 
 and match_one (what : string) (typ : typ) (value : arg) (mapping : mapping_type)
@@ -2103,7 +2213,14 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
     | Tup ts -> Tuple (List.map (eval locals) ts)
     | Slice (t, items) -> (
         let opt = Option.map (eval locals) in
-        let items = List.map (fun (a, b, c) -> (opt a, opt b, opt c)) items in
+        let items =
+          List.map
+            (function
+              | Range (a, b, c) -> Range (opt a, opt b, opt c)
+              | Point i -> Point (eval locals i)
+              | Points is -> Points (List.map (eval locals) is))
+            items
+        in
         match eval locals t with
         | Dimensions l -> Dimensions (slice_dims l items)
         | v -> raise (TypeError ("can't slice " ^ string_of_arg v)))
@@ -2256,8 +2373,10 @@ let check_body ~(infer : bool) (env : (string * callee) list) (fd : fundef) :
                       check_arith_signature kinds e;
                       kinds
                   | TypeInt | TypeLiteralInt _ -> kinds
-                  | TypeTuple _ ->
-                      raise (TypeError "tuple annotations aren't supported"))
+                  | TypeTuple _ | TypeOptional _ ->
+                      raise
+                        (TypeError
+                           (string_of_typ typ ^ " annotations aren't supported")))
             in
             let v, mapping =
               with_relations (fun () ->

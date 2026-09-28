@@ -59,6 +59,9 @@ class FrontendError(Exception):
 # a None argument, or an Optional parameter's None default. it selects a
 # signature rather than being passed, so it's never in the IR
 NONE: Json = ["None"]
+# an argument that isn't a shape, like a torch.device, for a parameter that
+# takes one: it's bound but not passed, so it's never in the IR either
+OPAQUE: Json = ["Opaque"]
 
 
 @dataclass
@@ -72,6 +75,8 @@ class Param:
     module: Any = None  # a module class: an instance is passed as its dims
     ints: list[str] = field(default_factory=list)  # a module parameter's IR ints
     config: Any = None  # a config class: passed as its ints and flags, named by field
+    # a kind of value that isn't a shape, e.g. torch.device: bound, not passed
+    value: str | None = None
 
 
 @dataclass
@@ -130,6 +135,13 @@ def typ_of(ann: ast.expr | None, scope: Scope, binding: bool, what: str) -> tupl
 
 
 def typ_of_ast(ann: ast.expr, scope: Scope, binding: bool, what: str) -> tuple[Json, bool]:
+    # a parameter's Optional is a variant per choice (see build_signature),
+    # but a return type's is one type: None or a T
+    inner = None if binding else optional_inner(ann)
+    if inner is not None:
+        if optional_inner(inner) is not None:
+            raise FrontendError(f"`Optional` of an `Optional` isn't supported, on {what}", ann)
+        return ir.Optional(typ_of(inner, scope, binding, what)[0]), False
     base = ann.value if isinstance(ann, ast.Subscript) else ann
     name = last_name(base)
     if not isinstance(ann, ast.Subscript):
@@ -302,6 +314,7 @@ def build_signature(
     module_class: Callable[[ast.expr], Any] | None = None,
     config_class: Callable[[ast.expr], Any] | None = None,
     nones: frozenset[str] = frozenset(),
+    value_kind: Callable[[ast.expr], str | None] | None = None,
 ) -> tuple[Overload, Scope]:
     """The signature of fn, and the scope its body's annotations share. A
     method has an instance: its class's instance dims, which come first as
@@ -311,8 +324,10 @@ def build_signature(
     module_class gives the module class an annotation names, if any, and
     config_class the config class. A config parameter is its int and bool
     fields, as int parameters named by field. nones are the Optional
-    parameters that are None in this signature. Params lists every parameter,
-    for binding calls."""
+    parameters that are None in this signature. value_kind gives the kind of
+    value an annotation names that isn't a shape (e.g. torch.device): such a
+    parameter isn't in the IR, and it may be None without being Optional.
+    Params lists every parameter, for binding calls."""
     a = fn.args
     if a.kwarg is not None:
         raise FrontendError("**kwargs isn't supported", fn)
@@ -358,6 +373,15 @@ def build_signature(
             )
         ann = arg.annotation
         inner = None if ann is None else optional_inner(ann)
+        value = None if ann is None or value_kind is None else value_kind(inner or ann)
+        if value is not None:
+            if default is not None and not is_none(default):
+                raise FrontendError(
+                    f"{what} takes a `{value}`, so its default can only be None", arg
+                )
+            value_default = None if default is None else OPAQUE
+            params.append(Param(arg.arg, arg.arg, kind, value_default, False, value=value))
+            continue
         optional = inner is not None
         if optional:
             if init:

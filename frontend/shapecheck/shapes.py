@@ -8,7 +8,8 @@ The mapping onto the checker's entries:
     ...  *_     an unnamed run of dims        a fresh Spread
     _  _foo     one dim that isn't checked    a fresh Id
     *#batch     batch again, broadcastable    Broadcast (a first occurrence binds it)
-    #n          n or 1                        BroadcastDim (parameters only)
+    #n          n or 1                        BroadcastDim (in a return type, n
+                                              must be bound by a parameter)
     dim-1       arithmetic on names and ints  Add/Sub/Mul/Div (+ - * //)
 
 Stubs may also use list functions that jaxtyping doesn't have, since library
@@ -125,7 +126,13 @@ def parse_token(tok: str, scope: Scope, binding: bool) -> Json:
         if tok in scope.spreads:
             raise ShapeError(f"`{tok}` is used both as a dim and as `*{tok}`")
         if not binding:
-            raise ShapeError(f"a broadcastable dim `#{tok}` can only be in a parameter's shape")
+            # in a return type, tok or 1, for a tok the parameters bound
+            if tok not in scope.dims and tok not in scope.int_params:
+                raise ShapeError(
+                    f"a broadcastable dim `#{tok}` in a return type needs `{tok}` to be "
+                    "bound by a parameter"
+                )
+            return ir.BroadcastDim(tok)
         # like a dim, it binds tok where it first appears
         scope.dims.add(tok)
         return ir.BroadcastDim(tok)

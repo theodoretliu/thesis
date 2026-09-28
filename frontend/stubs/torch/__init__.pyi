@@ -12,14 +12,42 @@
 #     reshape
 #   - asserts are preconditions, or postconditions when they mention a name
 #     only the return type binds
+#   - a class with nothing in it is a kind of value that isn't a shape, like
+#     device. a parameter annotated with one takes such a value (or None) and
+#     isn't checked; a module-level annotation declares a constant of one
+#     (long: dtype), and one in a class an attribute of arrays (x.device)
 # Overloads are tried in order; the first that checks is used.
 
-from typing import Literal, overload
+from typing import Literal, Optional, overload
 
 from jaxtyping import Shaped
 from shapecheck.stubs import Dim, Shape
 
+# ---- values that aren't shapes ----
+
+class dtype: ...
+class device: ...
+
+float: dtype
+float16: dtype
+bfloat16: dtype
+float32: dtype
+float64: dtype
+half: dtype
+double: dtype
+int: dtype
+long: dtype
+int8: dtype
+int16: dtype
+int32: dtype
+int64: dtype
+uint8: dtype
+bool: dtype
+
 class Tensor:
+    device: device
+    dtype: dtype
+
     @property
     def T(self: Shaped[Tensor, "m n"]) -> Shaped[Tensor, "n m"]: ...
     @property
@@ -128,19 +156,19 @@ class Tensor:
 
 # ---- creation ----
 
-def zeros(*size: Shape["*S"]) -> Shaped[Tensor, "*S"]: ...
-def ones(*size: Shape["*S"]) -> Shaped[Tensor, "*S"]: ...
-def empty(*size: Shape["*S"]) -> Shaped[Tensor, "*S"]: ...
-def rand(*size: Shape["*S"]) -> Shaped[Tensor, "*S"]: ...
-def randn(*size: Shape["*S"]) -> Shaped[Tensor, "*S"]: ...
+def zeros(*size: Shape["*S"], dtype: Optional[dtype] = None, device: Optional[device] = None) -> Shaped[Tensor, "*S"]: ...
+def ones(*size: Shape["*S"], dtype: Optional[dtype] = None, device: Optional[device] = None) -> Shaped[Tensor, "*S"]: ...
+def empty(*size: Shape["*S"], dtype: Optional[dtype] = None, device: Optional[device] = None) -> Shaped[Tensor, "*S"]: ...
+def rand(*size: Shape["*S"], dtype: Optional[dtype] = None, device: Optional[device] = None) -> Shaped[Tensor, "*S"]: ...
+def randn(*size: Shape["*S"], dtype: Optional[dtype] = None, device: Optional[device] = None) -> Shaped[Tensor, "*S"]: ...
 def zeros_like(input: Shaped[Tensor, "*A"]) -> Shaped[Tensor, "*A"]: ...
 def ones_like(input: Shaped[Tensor, "*A"]) -> Shaped[Tensor, "*A"]: ...
 def randn_like(input: Shaped[Tensor, "*A"]) -> Shaped[Tensor, "*A"]: ...
 @overload
-def arange(end: int) -> Shaped[Tensor, "end"]: ...
+def arange(end: int, *, dtype: Optional[dtype] = None, device: Optional[device] = None) -> Shaped[Tensor, "end"]: ...
 # torch rejects start > end for a positive step
 @overload
-def arange(start: int, end: int, step: int = 1) -> Shaped[Tensor, "(end-start+step-1)//step"]:
+def arange(start: int, end: int, step: int = 1, *, dtype: Optional[dtype] = None, device: Optional[device] = None) -> Shaped[Tensor, "(end-start+step-1)//step"]:
     assert start <= end and step >= 1
 
 # ---- same shape ----
